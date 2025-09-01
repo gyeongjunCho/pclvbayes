@@ -1,6 +1,6 @@
 Preview-Only License (Time-limited)
 
-1) Permission. From <2025-10-20 00:00 KST> until <2025-10-23 23:59 KST> (the “Preview Period”),
+1) Permission. From <2025-10-21 00:00 KST> until <2025-10-24 23:59 KST> (the “Preview Period”),
    you may VIEW the contents of this repository solely via the official GitFront link for
    evaluation purposes. No other rights are granted.
 
