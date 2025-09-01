@@ -1,0 +1,45 @@
+Package: pglvbayes
+Title: Bayesian Pairwise gLV Regression for Microbiome Time-Series
+Version: 0.0.0.9000
+Authors@R: c(person(given="Gyeongjun", family="Cho",
+    email="chogj88@korea.kr", role=c("aut","cre"),
+    comment=c(ORCID="0000-0001-6820-2969",
+              affiliation="National Institute of Agricultural Sciences",
+              country="Korea, Republic of")),
+    person(given="Rural Development Administration (RDA)", role="cph"),
+    person(given="National Institute of Agricultural Sciences (NAS)", role="cph"))
+Description: Implements Bayesian pairwise generalized Lotka–Volterra (gLV)-inspired regressions for microbiome time-series from amplicon sequencing. Residuals are OU (≈AR(1)) or white-noise with Δt-aware options; includes optional correlation-based screening, tidy edge reshaping, Kalman ELPD for OU, and diagnostics; uses cmdstanr/CmdStan.
+License: file LICENSE
+URL: https://github.com/gyeongjunCho/pglvbayes
+BugReports: https://github.com/gyeongjunCho/pglvbayes/issues
+Depends: R (>= 4.2)
+Imports: 
+    cmdstanr,
+    dplyr,
+    furrr,
+    future,
+    loo,
+    matrixStats,
+    metafor,
+    methods,
+    phyloseq,
+    posterior,
+    progressr,
+    purrr,
+    qvalue,
+    stats,
+    tibble,
+    tidyr,
+    utils
+Suggests: 
+    knitr,
+    progressr,
+    rmarkdown,
+    roxygen2,
+    testthat
+Config/testthat/edition: 3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+SystemRequirements: CmdStan (install via cmdstanr::install_cmdstan()); C++ toolchain (Rtools/CLT/build-essential), GNU make
+BuildVignettes: false

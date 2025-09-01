@@ -1,0 +1,11 @@
+^dev$
+^inst/doc$
+^\.git$
+^\.gitignore$
+^\.Rproj\.user$
+^.*\.Rproj$
+^README\.Rmd$
+^pkgdown$
+^docs$
+^LICENSE\.md$
+^vignettes$
