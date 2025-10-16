@@ -44,12 +44,23 @@ cor_meta_resid(
   effn_min_frac = 0.6,
   acf_correction = TRUE,
   nz_partner_min_frac = 0.15,
-  warn_alr = FALSE
+  warn_alr = FALSE,
+  all_columns = FALSE
 )
+}
+\arguments{
+\item{all_columns}{Logical (default \code{FALSE}). Controls whether the output table
+includes \strong{all possible columns} or only those relevant to the chosen settings:
+\itemize{
+\item \code{FALSE} (default): Only columns relevant to the selected \code{effn_method} and
+\code{partial_rest} option are kept. For example, if \code{effn_method="ar1"}, only
+\code{effn_phi_cap} is shown (while \code{effn_L}, \code{effn_bw} are dropped). If
+\code{partial_rest=FALSE}, the \code{partial_method} column is dropped.
+\item \code{TRUE}: Keep all columns regardless of relevance, filling unused ones with \code{NA}.
+}}
 }
 \value{
 If \code{return_subjectwise = TRUE}, a list with \code{meta} and \code{subjectwise}.
-Otherwise, a data.frame; the meta table includes \code{piL/piU} (prediction interval) and
 the \code{n_eff} settings used.
 }
 \description{

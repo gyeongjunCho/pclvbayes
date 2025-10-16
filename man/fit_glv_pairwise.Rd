@@ -184,7 +184,7 @@ measurement variance uses \code{sigma^2} (or its t-variance expansion when \code
 \strong{Sampling robustness}
 \itemize{
 \item A diagnostics-aware \strong{retry} policy (up to \code{max_retries}) monitors divergences, tree depth,
-and E-BFMI; if needed, it \strong{escalates \code{nu_fix} within \link{4, 7}} while keeping other sampler controls
+and E-BFMI; if needed, it \strong{escalates \code{nu_fix} within 4 ~ 7} while keeping other sampler controls
 stable for fold runs. Diagnostics are returned for downstream filtering.
 }
 
@@ -203,6 +203,18 @@ pairs and K-fold tasks; otherwise it falls back silently.
 optionally use \strong{ELPD per subject} (from K x R) as supporting evidence. Aggregation is \strong{subject-uniform}.
 }
 }
+\section{Progress & Parallel}{
+
+\itemize{
+\item Set global handlers once for pretty bars: \preformatted{
+  if (requireNamespace("progressr", quietly = TRUE)) {
+    progressr::handlers(global = TRUE); progressr::handlers("cli")
+  }}
+\item Reproducibility: seeds are deterministic per pair/fold (\code{seed}, \code{kfold_seed}) and
+\code{furrr::future_map(..., .options = furrr::furrr_options(seed = TRUE))} is used.
+}
+}
+
 \examples{
 \dontrun{
 if (requireNamespace("progressr", quietly = TRUE)) {
@@ -219,8 +231,4 @@ EP_res <- fit_glv_pairwise(
 )
 }
 
-}
-\seealso{
-\code{get_glv_model()}, \code{get_sample_meta()}, \code{precompute_spline_smoothed()},
-\code{build_pair_df_smoothed()}, \code{.make_pair_inputs_glv()}.
 }

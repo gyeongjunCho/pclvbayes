@@ -41,9 +41,16 @@
 #' - For Spearman, `n_eff` is computed on the **same scale used for correlation**:
 #'   ranks (simple Spearman) or residuals of ranks (partial-resid Spearman).
 #'
+#' @param all_columns Logical (default `FALSE`). Controls whether the output table
+#'   includes **all possible columns** or only those relevant to the chosen settings:
+#'   - `FALSE` (default): Only columns relevant to the selected `effn_method` and
+#'     `partial_rest` option are kept. For example, if `effn_method="ar1"`, only
+#'     `effn_phi_cap` is shown (while `effn_L`, `effn_bw` are dropped). If
+#'     `partial_rest=FALSE`, the `partial_method` column is dropped.
+#'   - `TRUE`: Keep all columns regardless of relevance, filling unused ones with `NA`.
+#'
 #' @return
 #' If `return_subjectwise = TRUE`, a list with `meta` and `subjectwise`.
-#' Otherwise, a data.frame; the meta table includes `piL/piU` (prediction interval) and
 #' the `n_eff` settings used.
 #'
 #' @export
@@ -86,11 +93,17 @@ cor_meta_resid <- function(physeq,
                            # weak ACF-correction controls (optional)
                            effn_phi_cap = 0.6,   # e.g., 0.6 (cap on |phi_x * phi_y|)
                            effn_blend   = 0.5,   # e.g., 0.5 (blend toward raw n)
-                           effn_min_frac = 0.6,  # e.g., 0.6 (floor for n_eff relative to n)
+                           effn_min_frac = 0.6,  # e.g., 0.6 (floor for n_eff relative to n),
+                           # co-zero screening (optional)
+                           cozero_check = FALSE,
+                           cozero_tol = 0.5,
+                           cozero_action = c("exclude","flag","warn"),
+                           cozero_min_subject_frac = 0.4,
                            # misc
                            acf_correction = TRUE,
                            nz_partner_min_frac = 0.15,
-                           warn_alr = FALSE) {
+                           warn_alr = FALSE,
+                           all_columns = FALSE) {
   stopifnot(requireNamespace("metafor", quietly = TRUE))
   stopifnot(requireNamespace("phyloseq", quietly = TRUE))
   stopifnot(requireNamespace("dplyr", quietly = TRUE))
@@ -108,6 +121,7 @@ cor_meta_resid <- function(physeq,
   partial_method <- match.arg(partial_method)
   q_method <- match.arg(q_method, c("BH","BY","qvalue","wBH","wqvalue"))
   q_weight_by <- match.arg(q_weight_by)
+  cozero_action <- match.arg(cozero_action)
 
   # --- 0) matrix & metadata ---------------------------------------------------
   otu_mat <- as(phyloseq::otu_table(physeq), "matrix")
@@ -211,6 +225,7 @@ cor_meta_resid <- function(physeq,
     n_raw_list <- integer(0)     # 집계/전처리 전
     n_effin_list <- integer(0)   # neff 입력 길이(집계후 추정)
     s_list <- character(0)
+    coz_list <- numeric(0)
     floor_count_pair <- 0L
     cap_count_pair <- 0L
 
@@ -239,6 +254,20 @@ cor_meta_resid <- function(physeq,
       rest_ra <- rest_ra[cc]
       lib_t <- lib_t[cc]
       tt <- tt[cc]
+
+      # ---- co-zero check (subject level) ------------------------------------
+      if (isTRUE(cozero_check)) {
+        cozero_frac_sb <- mean((Xi_raw == 0) & (Xj_raw == 0), na.rm = TRUE)
+        if (cozero_action == "exclude" && is.finite(cozero_frac_sb) && cozero_frac_sb >= cozero_tol) {
+          # 이 subject는 co-zero 과다 → 제외 (k 감소에 반영)
+          next
+        } else if (cozero_action == "warn" && is.finite(cozero_frac_sb) && cozero_frac_sb >= cozero_tol) {
+          warning(sprintf("High co-zero in subject %s for pair (%s,%s): %.2f",
+                          as.character(sb), i, j, cozero_frac_sb), call. = FALSE)
+        }
+      } else {
+        cozero_frac_sb <- NA_real_
+      }
 
       # i, j 모두 변이/비영점 체크
       if (var(Xi_ra, na.rm = TRUE) < 1e-16 || var(Xj_ra, na.rm = TRUE) < 1e-16) next
@@ -489,6 +518,7 @@ cor_meta_resid <- function(physeq,
       n_raw_list   <- c(n_raw_list, n_raw)
       n_effin_list <- c(n_effin_list, n_in)
       s_list       <- c(s_list, as.character(sb))
+      coz_list     <- c(coz_list, cozero_frac_sb)
     } # end subject loop
 
     # Optional one-line warning per pair if safeguards triggered
@@ -510,7 +540,6 @@ cor_meta_resid <- function(physeq,
         k = k_eff,
         r_pooled = NA_real_,
         ciL = NA_real_, ciU = NA_real_,
-        piL = NA_real_, piU = NA_real_,
         pval = NA_real_,
         tau2 = NA_real_, I2 = NA_real_,
         Q = NA_real_, Q_p = NA_real_,
@@ -523,11 +552,27 @@ cor_meta_resid <- function(physeq,
         n_effin_min = ifelse(length(n_effin_list) > 0, min(n_effin_list), NA_integer_),
         n_effin_median = ifelse(length(n_effin_list) > 0, stats::median(n_effin_list), NA_real_),
         n_effin_max = ifelse(length(n_effin_list) > 0, max(n_effin_list), NA_integer_),
+        cozero_frac_median = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (length(fin) > 0) stats::median(fin) else NA_real_
+        },
+        cozero_frac_max = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (length(fin) > 0) max(fin) else NA_real_
+        },
+        cozero_flag_pair = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (isTRUE(cozero_check) &&
+              is.finite(cozero_min_subject_frac) && cozero_min_subject_frac > 0 &&
+              length(fin) > 0) {
+            mean(fin >= cozero_tol) >= cozero_min_subject_frac
+          } else FALSE
+        },
         meta_method = meta_method,
         knha = use_knha,
         var_method = if (var_method == "auto") (if (method == "spearman") "bonett" else "fisherz") else var_method,
         alr_cap_mode = if (transform == "alr") alr_cap_mode else NA_character_,
-        alr_cap_value = if (transform == "alr" && alr_cap_mode == "fixed") alr_cap_value else NA_real_,
+        alr_cap_value = if (transform == "alr") alr_cap_value else NA_real_,
         effn_method = effn_method,
         effn_L = ifelse(effn_method == "bartlett", if (is.null(effn_L)) NA_real_ else effn_L, NA_real_),
         effn_bw = ifelse(effn_method == "nw", if (is.null(effn_bw)) NA_real_ else effn_bw, NA_real_),
@@ -588,21 +633,8 @@ cor_meta_resid <- function(physeq,
       if (scale == "z") {
         r_hat <- tanh(fit$b[1, 1])
         ciL <- tanh(fit$ci.lb); ciU <- tanh(fit$ci.ub)
-        # 예측구간(PI)
-        pr <- try(metafor::predict(fit, transf = tanh), silent = TRUE)
-        if (inherits(pr, "try-error")) {
-          piL <- NA_real_; piU <- NA_real_
-        } else {
-          piL <- pr$pi.lb; piU <- pr$pi.ub
-        }
       } else {
         r_hat <- fit$b[1, 1]; ciL <- fit$ci.lb; ciU <- fit$ci.ub
-        pr <- try(metafor::predict(fit), silent = TRUE)
-        if (inherits(pr, "try-error")) {
-          piL <- NA_real_; piU <- NA_real_
-        } else {
-          piL <- pr$pi.lb; piU <- pr$pi.ub
-        }
       }
 
       meta_rows[[p]] <- tibble::tibble(
@@ -614,7 +646,6 @@ cor_meta_resid <- function(physeq,
         k = k_eff,
         r_pooled = r_hat,
         ciL = ciL, ciU = ciU,
-        piL = piL, piU = piU,
         pval = fit$pval,
         tau2 = fit$tau2, I2 = fit$I2,
         Q = fit$QE, Q_p = fit$QEp,
@@ -627,6 +658,22 @@ cor_meta_resid <- function(physeq,
         n_effin_min = min(n_effin_list),
         n_effin_median = stats::median(n_effin_list),
         n_effin_max = max(n_effin_list),
+        cozero_frac_median = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (length(fin) > 0) stats::median(fin) else NA_real_
+        },
+        cozero_frac_max = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (length(fin) > 0) max(fin) else NA_real_
+        },
+        cozero_flag_pair = {
+          fin <- coz_list[is.finite(coz_list)]
+          if (isTRUE(cozero_check) &&
+              is.finite(cozero_min_subject_frac) && cozero_min_subject_frac > 0 &&
+              length(fin) > 0) {
+            mean(fin >= cozero_tol) >= cozero_min_subject_frac
+          } else FALSE
+        },
         meta_method = meta_method,
         knha = use_knha,
         var_method = eff_var_method,
@@ -654,6 +701,27 @@ cor_meta_resid <- function(physeq,
 
   meta_tbl <- dplyr::bind_rows(meta_rows)
   rownames(meta_tbl) <- NULL
+
+  if (!all_columns && nrow(meta_tbl) > 0) {
+    uniq_meth <- unique(meta_tbl$effn_method)
+    if (length(uniq_meth) == 1) {
+      if (uniq_meth == "ar1") {
+        meta_tbl <- dplyr::select(meta_tbl, -effn_L, -effn_bw)
+      } else if (uniq_meth == "bartlett") {
+        meta_tbl <- dplyr::select(meta_tbl, -effn_bw, -effn_phi_cap)
+      } else if (uniq_meth == "nw") {
+        meta_tbl <- dplyr::select(meta_tbl, -effn_L, -effn_phi_cap)
+      }
+    }
+    # drop partial_method column if never used
+    if (all(meta_tbl$partial_rest == FALSE)) {
+      meta_tbl <- dplyr::select(meta_tbl, -partial_method)
+    }
+    if (all(meta_tbl$effn_aggregate_by_time == "none")) {
+      meta_tbl <- dplyr::select(meta_tbl, -effn_time_tol)
+    }
+  }
+
 
   if (nrow(meta_tbl)) {
     # -- helper: compute weights (mean-normalized to 1) --

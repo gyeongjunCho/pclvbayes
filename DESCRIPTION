@@ -13,33 +13,25 @@ License: file LICENSE
 URL: https://github.com/gyeongjunCho/pglvbayes
 BugReports: https://github.com/gyeongjunCho/pglvbayes/issues
 Depends: R (>= 4.2)
-Imports: 
+Imports:
     cmdstanr,
-    dplyr,
+    posterior,
+    purrr,
     furrr,
     future,
-    loo,
-    matrixStats,
-    metafor,
-    methods,
-    phyloseq,
-    posterior,
-    progressr,
-    purrr,
-    qvalue,
-    stats,
+    dplyr,
     tibble,
-    tidyr,
-    utils
-Suggests: 
-    knitr,
+    matrixStats,
+    phyloseq,
+    tidyr
+Suggests:
     progressr,
-    rmarkdown,
-    roxygen2,
-    testthat
+    loo,
+    metafor,
+    qvalue
 Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.3
 SystemRequirements: CmdStan (install via cmdstanr::install_cmdstan()); C++ toolchain (Rtools/CLT/build-essential), GNU make
 BuildVignettes: false
