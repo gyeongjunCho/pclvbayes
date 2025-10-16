@@ -13,6 +13,7 @@
 #' - Spearman 상관이면 상관에 사용한 것과 **동일 스케일**(랭크 또는 랭크-잔차)로 x,y를 넣으세요.
 #' - time 정보와 집계 옵션을 같이 주면, neff 계산을 위한 ACF 산출 전에
 #'   동일/근접 타임스탬프를 mean/median으로 집계하여 n 팽창을 방지합니다.
+#'
 .eff_n <- function(x, y,
                    t = NULL,
                    aggregate_by_time = c("none", "mean", "median"),

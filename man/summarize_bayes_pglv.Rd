@@ -2,28 +2,83 @@
 % Please edit documentation in R/summarize_bayes_pglv.R
 \name{summarize_bayes_pglv}
 \alias{summarize_bayes_pglv}
-\title{Convert wide (i–j) gLV table into a long directed edge list (Bayes-only)}
+\title{Summarize pairwise Bayesian gLV results (cross/self, diagnostics, weights)}
 \usage{
-summarize_bayes_pglv(df, alpha = NULL, p_sign2_max = NULL)
+summarize_bayes_pglv(
+  df,
+  alpha = NULL,
+  diag_mode = c("moderate", "strict"),
+  use_true_stacking = TRUE,
+  stacking_use_ppd = FALSE,
+  stacking_min_models = 2L,
+  stacking_min_subjects = 1L
+)
 }
 \arguments{
-\item{df}{Output of \code{\link[=fit_glv_pairwise]{fit_glv_pairwise()}}.}
+\item{df}{A list returned by \code{fit_glv_pairwise()}, which must include
+at least \code{$cross}, \code{$self}, and \code{$raw}. To compute true stacking,
+it should also include \code{$elpd_pointwise_cross}.}
 
-\item{alpha}{Optional numeric in (0,1]; if given, keep edges with q_bayes ≤ alpha.}
+\item{alpha}{(optional) Threshold for Bayes-FDR (LFSR). If provided,
+adds a \code{pass_bayes_fdr} column.}
 
-\item{p_sign2_max}{Optional numeric in (0,1]; if given, keep edges with p_sign2 ≤ p_sign2_max.}
+\item{diag_mode}{Either \code{"moderate"} or \code{"strict"}.}
+
+\item{use_true_stacking}{Logical; if \code{TRUE} (default) attempts to use
+\code{.compute_stacking_weights_cross()} and falls back to pseudo-BMA if not feasible.}
+
+\item{stacking_use_ppd}{Logical; pass-through to \code{.compute_stacking_weights_cross()}.}
+
+\item{stacking_min_models}{Integer; pass-through.}
+
+\item{stacking_min_subjects}{Integer; pass-through.}
 }
 \value{
-data.frame with:
-from,to,n_pairs,a_mean,a_sign("pos/neg/zero"),a_q2.5,a_q97.5,
-p_sign2,lfsr,q_bayes,psp,rhat,essb,esst,div,tdhit,ok_diag,keep_final,
-delta_elpd,delta_elpd_se,delta_elpd_per_obs,n_heldout,
-smoothed/smooth_* (if present), resid_mode/prior_mode (if present).
+\code{list(cross = <tibble>, self = <tibble>)}.
+Both tables use the \strong{from, to} column order and are finally
+sorted by \strong{bayes_FDR in descending order}.
 }
 \description{
-One row per \strong{directed} edge (j -> i and i -> j).
-Bayesian-only: uses p_sign2, lfsr, q_bayes, psp. No frequentist p/q.
-PLOTTING TIP: Do NOT map |a_mean| to edge width. Use \code{delta_elpd_per_obs}
-as edge thickness (importance) and \code{a_sign} for color. The absolute magnitude
-of a_mean from pairwise fits is not comparable across pairs.
+Given the result list from \code{fit_glv_pairwise()}, returns separate
+summary tables for \strong{cross} (from→to) edges and \strong{self} effects.
+
+Included fields:
+\itemize{
+\item Key intuitive metrics: \code{from}, \code{to}, \code{n_pairs}, \code{a_sign},
+\code{a_mean}, \code{a_q2.5}, \code{a_q97.5}
+\item Reliability metrics: \code{p_sign2}, \code{bayes_FDR} (=\code{LFSR}),
+optional \code{pass_bayes_fdr}
+\item Weight-like metrics: \code{pseudo_BMA}, \code{pseudo_BMA_pos}, and
+\code{stacking} (true stacking if available, otherwise a proxy)
+\item Diagnostics: \code{rhat}, \code{essb}, \code{esst}, \code{div},
+\code{tdhit}, \code{ebfmi_min}, \code{diag_ok}
+}
+}
+\details{
+\itemize{
+\item Diagnostic criteria depend on \code{diag_mode}:
+\itemize{
+\item \strong{strict}: \code{rhat < 1.01}, \code{essb > 1000}, \code{esst > 1000},
+\code{div == 0}, \code{tdhit == 0}, \code{ebfmi_min >= 0.40}
+\item \strong{moderate} (default): \code{rhat < 1.05}, \code{essb > 400}, \code{esst > 400},
+\code{div <= 8}, \code{tdhit <= 80}, \code{ebfmi_min >= 0.30}
+}
+\item \code{stacking}: if \code{use_true_stacking = TRUE} and pointwise ELPD
+(\code{df$elpd_pointwise_cross}) is available and \pkg{loo} is installed,
+weights are computed per target (columns sum to 1) via an internal helper
+\code{.compute_stacking_weights_cross()}; otherwise falls back to
+\code{pseudo_BMA}. \code{pseudo_BMA_pos} is computed over positive edges only.
+}
+
+Each table is returned sorted by \strong{bayes_FDR in descending order}.
+}
+\examples{
+\dontrun{
+S <- summarize_bayes_pglv(EP_res, diag_mode = "moderate", alpha = 0.1)
+S$cross; S$self
+}
+
+}
+\seealso{
+\code{fit_glv_pairwise()}
 }

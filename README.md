@@ -1,8 +1,8 @@
-# pGLVbayes
+# pcLVbayes
 
 > **Status: Beta (experimental)** — APIs and defaults may change; validate on your data and report issues.
 
-Bayesian **pairwise gLV-inspired** regressions for amplicon time-series.
+Bayesian **pairwise compositional Lotka-Volterra** regressions for amplicon time-series.
 Includes **correlation-based screening**, **Δt-aware OU residuals**, K×R **repeated K-fold**
 with **Kalman ELPD**, tidy outputs, and diagnostics. Built on **cmdstanr/CmdStan**.
 
@@ -14,7 +14,7 @@ with **Kalman ELPD**, tidy outputs, and diagnostics. Built on **cmdstanr/CmdStan
 ## Licensing (Pre-release)
 
 This pre-release is **view-only via the official GitFront link** and **not licensed for redistribution or use**.  
-A stable open-source release is planned under **MIT** or **GPL-3**.  
+A stable open-source release is planned under **GPL-3**.  
 See `LICENSE` for preview-only terms.
 
 This repository is temporarily viewable via GitFront for a conference demo at the
@@ -168,5 +168,5 @@ BiocManager::install("phyloseq")
 
 # Dev install (post-release; example)
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("gyeongjunCho/pGLVbayes")
+remotes::install_github("gyeongjunCho/pcLVbayes")
 ```
