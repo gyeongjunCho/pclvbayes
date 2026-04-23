@@ -26,8 +26,12 @@ transformed data {
 }
 
 parameters {
-  // random intercepts (non-centered)
+  // global intercept
   real r0;
+
+  // subject random intercepts (non-centered)
+  vector[S] r0_raw;
+  real<lower=0> sd_r0;
 
   // coefficients
   real a_ii;
@@ -45,7 +49,9 @@ parameters {
 }
 
 transformed parameters {
-  vector[N] mu = r0 + a_ii .* xi + a_ij .* xj;
+  // vector[N] mu = r0 + a_ii .* xi + a_ij .* xj;
+  vector[S] r0_sub = sd_r0 * r0_raw;
+  vector[N] mu = r0 + r0_sub[sid] + a_ii .* xi + a_ij .* xj;
 
   // build e via whitening in stationary-SD parameterization
   vector[N] e;
@@ -62,6 +68,9 @@ transformed parameters {
 
 model {
   r0        ~ normal(0, 1);
+
+  r0_raw    ~ normal(0, 1);
+  sd_r0     ~ normal(0, 0.5);
 
   a_ii      ~ normal(0, 0.7);
   a_ij      ~ normal(0, 0.7);

@@ -1,5 +1,5 @@
-Package: pglvbayes
-Title: Bayesian Pairwise gLV Regression for Microbiome Time-Series
+Package: pclvbayes
+Title: Bayesian Pairwise compositional Lotka-Volterra
 Version: 0.0.0.9000
 Authors@R: c(person(given="Gyeongjun", family="Cho",
     email="chogj88@korea.kr", role=c("aut","cre"),
@@ -23,15 +23,23 @@ Imports:
     tibble,
     matrixStats,
     phyloseq,
-    tidyr
-Suggests:
+    tidyr,
     progressr,
     loo,
     metafor,
     qvalue
+Suggests:
+    progressr,
+    loo,
+    metafor,
+    qvalue,
+    testthat,
+    knitr,
+    rmarkdown,
+    roxygen2
 Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
+RoxygenNote: 7.3.2
 SystemRequirements: CmdStan (install via cmdstanr::install_cmdstan()); C++ toolchain (Rtools/CLT/build-essential), GNU make
 BuildVignettes: false
