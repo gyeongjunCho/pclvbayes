@@ -457,32 +457,42 @@
 .make_triplet_row <- function(i, df, subj_minpos, lib,
                               zero_mode_alr, minpos_alpha, eps_fixed,
                               lib_eps_c, rest_floor_frac, minpos_base) {
-  xi <- df$xi_raw[i]; xj <- df$xj_raw[i]; xr <- df$rest_raw[i]
+
+  # 항상 numeric(1)로 강제 (NULL/list도 안전하게 NA로)
+  xi <- as.numeric(df$xi_raw[i])[1]
+  xj <- as.numeric(df$xj_raw[i])[1]
+  xr <- as.numeric(df$rest_raw[i])[1]
+
   eps_t <- switch(zero_mode_alr,
                   "minpos_time" = {
-                    base_pos <- c(if (xi > 0) xi, if (xj > 0) xj, if (xr > 0) xr)
+                    base_pos <- c(if (is.finite(xi) && xi > 0) xi,
+                                  if (is.finite(xj) && xj > 0) xj,
+                                  if (is.finite(xr) && xr > 0) xr)
                     if (length(base_pos)) minpos_alpha * min(base_pos) else eps_fixed
                   },
                   "minpos_subject" = {
-                    mp <- subj_minpos[i]
+                    mp <- as.numeric(subj_minpos[i])[1]
                     if (is.finite(mp) && mp > 0) minpos_alpha * mp else eps_fixed
                   },
                   "lib" = {
-                    L <- lib[i]; if (!is.finite(L) || L <= 0) L <- 1
+                    L <- as.numeric(lib[i])[1]
+                    if (!is.finite(L) || L <= 0) L <- 1
                     max(eps_fixed, lib_eps_c / L)
                   },
                   "fixed" = eps_fixed)
-  xi <- if (xi > 0) xi else eps_t
-  xj <- if (xj > 0) xj else eps_t
-  xr <- if (xr > 0) xr else eps_t
+
+  xi <- if (is.finite(xi) && xi > 0) xi else eps_t
+  xj <- if (is.finite(xj) && xj > 0) xj else eps_t
+  xr <- if (is.finite(xr) && xr > 0) xr else eps_t
   xr <- max(xr, rest_floor_frac * eps_t)
 
   s <- xi + xj + xr
   if (!is.finite(s) || s <= 0) s <- 1
-  xi_ <- xi / s; xj_ <- xj / s; xr_ <- xr / s
 
+  xi_ <- xi / s; xj_ <- xj / s; xr_ <- xr / s
   eps_star <- eps_t / s
-  c(xi_, xj_, xr_, eps_star)
+
+  c(as.numeric(xi_)[1], as.numeric(xj_)[1], as.numeric(xr_)[1], as.numeric(eps_star)[1])
 }
 
 #' Build model inputs for pairwise gLV regressions
@@ -2180,7 +2190,18 @@
   kfold_outer_rounds_local <- 0L
 
   # 0) 페어 데이터 구성 ---------------------------------------------------------
+  # allow custom pair builder (e.g., cross-kingdom mixing)
+if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
+  pair_df <- ctx$pair_builder(
+    target = target,
+    partner = partner,
+    ctx = ctx,
+    eps = eps,
+    min_pairs = min_pairs
+  )
+} else {
   pair_df <- .build_pair_df_smoothed(sm_mat, meta_df, partner, target, eps, min_pairs)
+}
   if (is.null(pair_df))
     return(NULL)
   std_by_subj_eff <- if (isTRUE(compute_elpd))
