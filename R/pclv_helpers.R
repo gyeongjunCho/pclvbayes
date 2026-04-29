@@ -2183,7 +2183,7 @@
     mod <- cmdstanr::cmdstan_model(stan_file = NULL, exe_file = ctx$mod_exe_file)
   } else {
     # 안전한 폴백: exe 경로가 누락/손상되면 캐시에서 로드(재컴파일은 캐시 히트 시 생략됨)
-    mod <- get_glv_model(quiet = quiet)
+    mod <- get_pclv_model(quiet = quiet)
   }
 
   # 안전 초기화(ELPD 비활성 시도 포함)
