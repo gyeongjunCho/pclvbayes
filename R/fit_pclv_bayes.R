@@ -290,7 +290,7 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   progress      <- match.arg(progress)
 
   # Stan model (nu_fixed + use_student_t 지원 가정)
-  mod <- get_glv_model(quiet = quiet)
+  mod <- get_pclv_model(quiet = quiet)
 
   # metadata & matrix
   meta_df <- .get_sample_meta(physeq, subject_col, time_col)

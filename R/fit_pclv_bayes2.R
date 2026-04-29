@@ -178,9 +178,9 @@ fit_pclv_bayes2 <- function(physeq_1,
   )
 
   # ---- build ctx (borrow the same ctx keys as fit_pclv_bayes) ----
-  # We reuse get_glv_model() to obtain the compiled exe, then point workers at it.
+  # We reuse get_pclv_model() to obtain the compiled exe, then point workers at it.
   # (The patched glv_helpers2 step-0 will call ctx$pair_builder if present.)
-  mod <- get_glv_model(quiet = isTRUE(dots$quiet))
+  mod <- get_pclv_model(quiet = isTRUE(dots$quiet))
 
   # Taxa vector is the concatenation; we will fit ONLY cross pairs via pair_idx.
   taxa_vec <- c(taxa_vec_1, taxa_vec_2)

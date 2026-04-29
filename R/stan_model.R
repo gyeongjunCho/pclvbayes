@@ -4,11 +4,11 @@
 
 #' @keywords internal
 #' Load & cache the single AR(1) cmdstan model
-get_glv_model <- function(quiet = TRUE, rebuild = FALSE) {
+get_pclv_model <- function(quiet = TRUE, rebuild = FALSE) {
   if (!is.null(.pGLV_env$mod) && !isTRUE(rebuild)) return(.pGLV_env$mod)
 
   pkg <- tryCatch(utils::packageName(), error = function(e) "pglvbayes")
-  stan_file <- system.file("stan", "glv_pairwise.stan", package = pkg, mustWork = TRUE)
+  stan_file <- system.file("stan", "pclv.stan", package = pkg, mustWork = TRUE)
 
   has_cmdstan <- !is.na(tryCatch(cmdstanr::cmdstan_version(), error = function(e) NA))
   if (!has_cmdstan) {
