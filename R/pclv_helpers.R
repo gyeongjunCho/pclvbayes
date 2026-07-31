@@ -1,5 +1,7 @@
 ##### R/glv_helpers.R
 
+.PCLV_CORE_ALR_CAP <- 12
+
 #' Get abundance matrix with taxa as rows
 #'
 #' Coerces the \code{otu_table} from a \pkg{phyloseq} object to a numeric
@@ -2228,7 +2230,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     eps_fixed = eps_fixed,
     lib_eps_c = lib_eps_c,
     rest_floor_frac = rest_floor_frac,
-    alr_cap = 12,
+    alr_cap = .PCLV_CORE_ALR_CAP,
     smooth_scale = smooth_scale,
     alr_spline_df = alr_spline_df,
     alr_spline_spar = alr_spline_spar,

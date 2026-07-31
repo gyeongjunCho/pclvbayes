@@ -176,6 +176,9 @@ test_that("irregular-time OU indexes and dt reset by subject", {
 })
 
 test_that("directed fitting currently applies a fixed effective ALR cap", {
+  expect_false("alr_cap" %in% names(formals(pclvbayes::fit_pclv_bayes)))
+  expect_equal(pclvbayes:::.PCLV_CORE_ALR_CAP, 12)
+
   observed <- new.env(parent = emptyenv())
 
   local_mocked_bindings(
@@ -245,8 +248,7 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
     pf_history_size = 1,
     pf_max_lbfgs_iters = 1,
     pf_psis_resample = FALSE,
-    pair_builder = pair_builder,
-    alr_cap = 2
+    pair_builder = pair_builder
   )
 
   result <- pclvbayes:::.run_one(
@@ -259,7 +261,6 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
 
   expect_null(result)
   expect_equal(observed$alr_cap, 12)
-  expect_false(identical(observed$alr_cap, ctx$alr_cap))
 })
 
 test_that("NULL directed results discard the whole pair", {

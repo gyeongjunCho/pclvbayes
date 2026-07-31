@@ -27,7 +27,6 @@ fit_pclv_bayes(
   eps_fixed = 1e-06,
   lib_eps_c = 0.65,
   rest_floor_frac = 1,
-  alr_cap = Inf,
   smooth_scale = c("logra", "alr"),
   alr_spline_df = NULL,
   alr_spline_spar = NULL,
@@ -100,8 +99,6 @@ fraction of rows; default \code{0.15}.}
 \item{lib_eps_c}{Library-size scaled pseudo-count constant; default \code{0.65}.}
 
 \item{rest_floor_frac}{Floor fraction for the rest component; default \code{1.0}.}
-
-\item{alr_cap}{Hard cap for ALR magnitude; \code{Inf} to use adaptive theoretical caps.}
 
 \item{smooth_scale}{Smoothing scale for optional per-subject spline on predictors;
 one of \code{"logra"}, \code{"alr"}.}
