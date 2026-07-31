@@ -114,7 +114,6 @@
 #' @param eps_fixed Fixed pseudo-count floor; default \code{1e-6}.
 #' @param lib_eps_c Library-size scaled pseudo-count constant; default \code{0.65}.
 #' @param rest_floor_frac Floor fraction for the rest component; default \code{1.0}.
-#' @param alr_cap Hard cap for ALR magnitude; \code{Inf} to use adaptive theoretical caps.
 #' @param smooth_scale Smoothing scale for optional per-subject spline on predictors;
 #' one of \code{"logra"}, \code{"alr"}.
 #' @param alr_spline_df,alr_spline_spar,alr_spline_cv Controls for spline smoothing if used.
@@ -206,7 +205,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   eps_fixed = 1e-6,
   lib_eps_c = 0.65,
   rest_floor_frac = 1.0,
-  alr_cap = Inf,
   smooth_scale = c("logra", "alr"),
   alr_spline_df = NULL,
   alr_spline_spar = NULL,
