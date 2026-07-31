@@ -331,7 +331,7 @@ test_that("directed fitting uses the fixed canonical Core choices", {
     .make_pair_inputs_glv = function(...) {
       args <- list(...)
       observed$alr_cap <- args$alr_cap
-      NULL
+      pclvbayes:::.pclv_failure("test_seam", "captured", list())
     },
     .package = "pclvbayes"
   )
@@ -394,11 +394,12 @@ test_that("directed fitting uses the fixed canonical Core choices", {
     progress_local = "none"
   )
 
-  expect_null(result)
+  expect_s3_class(result, "pclv_failure")
+  expect_identical(result$reason, "captured")
   expect_equal(observed$alr_cap, 12)
 })
 
-test_that("NULL directed results discard the whole pair", {
+test_that("a failed direction does not discard its opposite direction", {
   calls <- list()
   run_one_double <- function(
     target,
@@ -414,7 +415,13 @@ test_that("NULL directed results discard the whole pair", {
       seed_override = seed_override,
       progress_local = progress_local
     )
-    if (length(calls) == 1L) NULL else list(n_pairs = 1)
+    if (length(calls) == 1L) return(NULL)
+    success <- pclvbayes:::.failed_direction_result(
+      pclvbayes:::.pclv_failure("test", "unused", list())
+    )
+    success$ok <- TRUE
+    success$failure <- NULL
+    success
   }
 
   ctx <- list(marker = "ctx")
@@ -429,7 +436,11 @@ test_that("NULL directed results discard the whole pair", {
     seed_base = 7
   )
 
-  expect_null(result)
+  expect_s3_class(result, "tbl_df")
+  expect_false(result$direction_ok_ij)
+  expect_true(result$direction_ok_ji)
+  expect_s3_class(result$failure_ij[[1]], "pclv_failure")
+  expect_identical(result$failure_ij[[1]]$reason, "missing_result")
   expect_length(calls, 2)
   expect_identical(calls[[1]]$target, "a")
   expect_identical(calls[[1]]$partner, "b")
@@ -550,11 +561,10 @@ test_that("K-fold aggregation preserves unavailable and partial evidence", {
   expect_equal(result$nu_fold_means, 5)
   expect_equal(sum(is.finite(result$elpd_subject)), 1)
   expect_length(result$failures, 3)
-  expect_named(
-    result$failures[[1]],
-    c("stage", "reason", "predictor", "observed_sd", "required_sd",
-      "repetition", "fold", "test_subjects")
-  )
+  expect_true(all(c(
+    "ok", "stage", "reason", "details", "predictor",
+    "observed_sd", "required_sd", "repetition", "fold", "test_subjects"
+  ) %in% names(result$failures[[1]])))
 })
 
 test_that("pointwise ELPD and weights require successful common evidence", {
