@@ -105,7 +105,6 @@
 #' @param resid_mode One of \code{"ou"}, \code{"wn"}; sets the residual process (OU or white-noise).
 #' @param nz_partner_min_frac Drop subjects whose partner predictor is non-zero in fewer than this
 #' fraction of rows; default \code{0.15}.
-#' @param standardize_by_subject If \code{TRUE}, z-standardize within subject (train-only); default \code{TRUE}.
 #'
 #' @param zero_mode_alr Mode for zero-aware replacement in the ALR triplet; one of
 #' \code{"minpos_time"}, \code{"minpos_subject"}, \code{"lib"}, \code{"fixed"}.
@@ -187,7 +186,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   lag = 1,
   resid_mode = c("ou", "wn"),
   use_student_t = TRUE,
-  standardize_by_subject = TRUE,
   nz_partner_min_frac = 0.15,
 
   # --- 빌더 단계(로그-RA) 스무딩 & 최소 요구량 ---
@@ -332,7 +330,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     min_unique_times = min_unique_times,
     # 입력/전처리 설정
     compute_elpd = compute_elpd,
-    standardize_by_subject = standardize_by_subject,
     transform = transform,
     lag = lag,
     zero_mode_alr = zero_mode_alr,

@@ -122,23 +122,25 @@ test_that("lagged predictors and delta ALR rates stay within subjects", {
     eps_fixed = 1e-12,
     alr_cap = 100,
     smooth_scale = "logra",
-    nz_partner_min_frac = 0,
-    standardize_by_subject = FALSE,
-    z_mode = "none"
+    nz_partner_min_frac = 0
   )
 
   expect_equal(out$subject, c("A", "A", "B", "B"))
   expect_equal(out$time, c(2, 5, 4, 10))
+  expected_xi <- alr_i[c(1, 2, 4, 5)]
   expect_equal(
     out$xi,
-    alr_i[c(1, 2, 4, 5)],
+    (expected_xi - mean(expected_xi)) / stats::sd(expected_xi),
     tolerance = 1e-9
   )
+  expected_xj <- alr_j[c(1, 2, 4, 5)]
   expect_equal(
     out$xj,
-    alr_j[c(1, 2, 4, 5)],
+    (expected_xj - mean(expected_xj)) / stats::sd(expected_xj),
     tolerance = 1e-9
   )
+  expect_equal(out$xi_unscaled, expected_xi, tolerance = 1e-9)
+  expect_equal(out$xj_unscaled, expected_xj, tolerance = 1e-9)
   expect_equal(
     out$y,
     c(
@@ -162,20 +164,157 @@ test_that("irregular-time OU indexes and dt reset by subject", {
     pair_in,
     train_subjects = c("A", "B"),
     test_subjects = c("C", "D"),
-    use_global_scaling = FALSE,
     min_pairs = 1
   )
 
   expect_equal(split$train$subject, c("A", "A", "B", "B"))
   expect_equal(split$prev_train, c(0L, 1L, 0L, 3L))
   expect_equal(split$dt_train, c(0, 5, 0, 6))
+  expect_equal(split$train$y, c(2, 5, 1, 6))
 
   expect_equal(split$test$subject, c("C", "C", "D", "D"))
   expect_equal(split$prev_test, c(0L, 1L, 0L, 3L))
   expect_equal(split$dt_test, c(0, 6, 0, 3))
+  expect_equal(split$test$y, c(4, 7, 3, 8))
 })
 
+test_that("Core scaling is global for full data and training-only for held-out subjects", {
+  pair_in <- data.frame(
+    subject = rep(c("train_a", "train_b", "test"), each = 2),
+    time = rep(c(0, 3), 3),
+    y = c(1, 2, 3, 4, 100, 200),
+    xi = c(1, 3, 5, 7, 101, 103),
+    xj = c(2, 4, 8, 10, 202, 204)
+  )
+
+  train_rows <- pair_in$subject != "test"
+  canonical <- pair_in
+  canonical$xi_unscaled <- canonical$xi
+  canonical$xj_unscaled <- canonical$xj
+  canonical$xi <- (canonical$xi - mean(canonical$xi)) / stats::sd(canonical$xi)
+  canonical$xj <- (canonical$xj - mean(canonical$xj)) / stats::sd(canonical$xj)
+
+  expect_equal(mean(canonical$xi), 0, tolerance = 1e-12)
+  expect_equal(stats::sd(canonical$xi), 1, tolerance = 1e-12)
+  expect_equal(mean(canonical$xj), 0, tolerance = 1e-12)
+  expect_equal(stats::sd(canonical$xj), 1, tolerance = 1e-12)
+  expect_equal(canonical$y, pair_in$y)
+
+  xi_mean <- mean(pair_in$xi[train_rows])
+  xi_sd <- stats::sd(pair_in$xi[train_rows])
+  xj_mean <- mean(pair_in$xj[train_rows])
+  xj_sd <- stats::sd(pair_in$xj[train_rows])
+
+  split <- pclvbayes:::.build_train_test(
+    canonical,
+    train_subjects = c("train_a", "train_b"),
+    test_subjects = "test",
+    min_pairs = 1
+  )
+
+  expect_equal(split$train$xi, (c(1, 3, 5, 7) - xi_mean) / xi_sd)
+  expect_equal(split$train$xj, (c(2, 4, 8, 10) - xj_mean) / xj_sd)
+  expect_equal(split$test$xi, (c(101, 103) - xi_mean) / xi_sd)
+  expect_equal(split$test$xj, (c(202, 204) - xj_mean) / xj_sd)
+  expect_equal(split$train$y, c(1, 2, 3, 4))
+  expect_equal(split$test$y, c(100, 200))
+
+  failure <- pclvbayes:::.build_train_test(
+    data.frame(subject = c("train", "train", "test"), time = c(0, 2, 5),
+               y = c(2, 4, 8), xi = c(3, 3, 9), xj = c(1, 2, 3)),
+    "train", "test", min_pairs = 1
+  )
+  expect_s3_class(failure, "pclv_failure")
+  expect_identical(failure$stage, "kfold_training")
+})
+
+
+test_that("Core predictor variation validation is deterministic", {
+  xi_failure <- pclvbayes:::.validate_predictor_variation(
+    c(2, 2, 2), c(1, 2, 3), "full_data"
+  )
+  expect_s3_class(xi_failure, "pclv_failure")
+  expect_identical(xi_failure$reason, "insufficient_predictor_variation")
+  expect_identical(xi_failure$predictor, "xi")
+  expect_equal(xi_failure$observed_sd, 0)
+  expect_equal(xi_failure$required_sd, sqrt(.Machine$double.eps) * 2)
+
+  xj_failure <- pclvbayes:::.validate_predictor_variation(
+    c(1, 2, 3), c(4, 4, 4), "full_data"
+  )
+  expect_s3_class(xj_failure, "pclv_failure")
+  expect_identical(xj_failure$predictor, "xj")
+
+  near_failure <- pclvbayes:::.validate_predictor_variation(
+    c(1, 1 + 1e-10, 1 + 2e-10), c(1, 2, 3), "full_data"
+  )
+  expect_s3_class(near_failure, "pclv_failure")
+  expect_lte(near_failure$observed_sd, near_failure$required_sd)
+
+  expect_null(pclvbayes:::.validate_predictor_variation(
+    c(1, 2, 3), c(2, 4, 8), "full_data"
+  ))
+})
+
+test_that("full-data validation occurs on post-lag ALR predictors", {
+  make_pair <- function(constant) {
+    varying <- seq(0.10, 0.20, length.out = 6)
+    if (constant == "xi") {
+      xj <- varying
+      xi <- (1 - xj) / 3
+    } else {
+      xi <- varying
+      xj <- (1 - xi) / 3
+    }
+    data.frame(subject = "A", time = 0:5, xi_raw = xi, xj_raw = xj)
+  }
+  build <- function(x) pclvbayes:::.make_pair_inputs_glv(
+    x, transform = "alr", lag = 1, zero_mode_alr = "fixed",
+    eps_fixed = 1e-8, alr_cap = 12, smooth_scale = "logra",
+    nz_partner_min_frac = 0
+  )
+
+  xi_failure <- build(make_pair("xi"))
+  expect_s3_class(xi_failure, "pclv_failure")
+  expect_identical(xi_failure$stage, "full_data")
+  expect_identical(xi_failure$predictor, "xi")
+
+  xj_failure <- build(make_pair("xj"))
+  expect_s3_class(xj_failure, "pclv_failure")
+  expect_identical(xj_failure$stage, "full_data")
+  expect_identical(xj_failure$predictor, "xj")
+})
+
+test_that("fold validation uses training predictors without changing y", {
+  pair_in <- data.frame(
+    subject = c(rep("train", 3), rep("test", 2)),
+    time = c(0, 2, 5, 0, 7), y = c(1, 2, 3, 20, 30),
+    xi = c(1, 1 + 1e-10, 1 + 2e-10, 1e12, -1e12),
+    xj = c(1, 2, 4, 1e12, -1e12)
+  )
+  failure <- pclvbayes:::.build_train_test(
+    pair_in, "train", "test", min_pairs = 1
+  )
+  expect_s3_class(failure, "pclv_failure")
+  expect_identical(failure$stage, "kfold_training")
+  expect_identical(failure$predictor, "xi")
+
+  valid <- pair_in
+  valid$xi[valid$subject == "train"] <- c(1, 2, 4)
+  split <- pclvbayes:::.build_train_test(valid, "train", "test", min_pairs = 1)
+  expect_false(inherits(split, "pclv_failure"))
+  expect_equal(split$train$y, c(1, 2, 3))
+  expect_equal(split$test$y, c(20, 30))
+
+  changed <- valid
+  changed$xi[changed$subject == "test"] <- c(8e15, -8e15)
+  changed$xj[changed$subject == "test"] <- c(-9e15, 9e15)
+  changed <- pclvbayes:::.build_train_test(changed, "train", "test", min_pairs = 1)
+  expect_equal(changed$train$xi, split$train$xi)
+  expect_equal(changed$train$xj, split$train$xj)
+})
 test_that("directed fitting currently applies a fixed effective ALR cap", {
+  expect_false("standardize_by_subject" %in% names(formals(pclvbayes::fit_pclv_bayes)))
   expect_false("alr_cap" %in% names(formals(pclvbayes::fit_pclv_bayes)))
   expect_equal(pclvbayes:::.PCLV_CORE_ALR_CAP, 12)
 
@@ -210,7 +349,6 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
     eps = 1e-6,
     min_pairs = 1,
     compute_elpd = FALSE,
-    standardize_by_subject = FALSE,
     transform = "alr",
     lag = 1,
     zero_mode_alr = "fixed",
@@ -344,7 +482,8 @@ test_that("LFSR conversion and model weights retain normalization", {
       each = 2
     ),
     subject = rep(c("s1", "s2"), 4),
-    elpd = c(-1, -2, -3, -4, -2, -2, -1, -1)
+    elpd = c(-1, -2, -3, -4, -2, -2, -1, -1),
+    n_test = rep(1L, 8)
   )
 
   weights <- pclvbayes:::.compute_pseudobma_weights_cross(
@@ -358,4 +497,116 @@ test_that("LFSR conversion and model weights retain normalization", {
   expect_equal(as.numeric(sums), rep(1, length(sums)), tolerance = 1e-12)
   expect_true(all(is.finite(weights$weight)))
   expect_true(all(weights$weight >= 0 & weights$weight <= 1))
+})
+
+test_that("K-fold aggregation preserves unavailable and partial evidence", {
+  calls <- new.env(parent = emptyenv())
+  calls$n <- c(A = 0L, B = 0L)
+  fold_double <- function(...) {
+    args <- list(...)
+    held_out <- args[[6]]
+    calls$n[[held_out]] <- calls$n[[held_out]] + 1L
+    if (held_out == "A" || calls$n[[held_out]] == 2L) {
+      return(structure(
+        list(
+          stage = "kfold_training",
+          reason = "insufficient_predictor_variation",
+          predictor = "xj",
+          observed_sd = 0,
+          required_sd = sqrt(.Machine$double.eps)
+        ),
+        class = c("pclv_failure", "list")
+      ))
+    }
+    list(
+      elpd = stats::setNames(-5, held_out),
+      elpd_ppd = stats::setNames(-2.5, held_out),
+      n_obs = stats::setNames(2L, held_out),
+      fold_diag = data.frame(
+        n_retries = 0L, nu_used = 5, ebfmi_min = 0.9,
+        worst_rhat = 1, min_ess_bulk = 500,
+        treedepth_hits = 0L, n_divergent = 0L
+      )
+    )
+  }
+
+  local_mocked_bindings(
+    .fold_fit_and_score = fold_double,
+    .package = "pclvbayes"
+  )
+  result <- pclvbayes:::.repkfold_eval(
+    mod = NULL, stan_list_base = list(), sample_args_base = list(seed = 1),
+    pair_in = data.frame(
+      subject = rep(c("A", "B"), each = 2), time = rep(0:1, 2),
+      y = 1:4, xi = c(1, 2, 3, 4), xj = c(2, 4, 6, 8)
+    ),
+    K = 2, R = 2, resid_mode = "ou", n_workers_kfold = 1,
+    min_pairs = 1
+  )
+
+  expect_true(is.na(result$elpd_subject[["A"]]))
+  expect_equal(result$elpd_subject[["B"]], -5)
+  expect_equal(result$subject_success_counts, c(A = 0L, B = 1L))
+  expect_equal(result$subject_failure_counts, c(A = 2L, B = 1L))
+  expect_equal(result$subject_test_counts, c(A = 0L, B = 2L))
+  expect_equal(result$total_successful_evaluations, 1L)
+  expect_equal(sum(is.finite(result$elpd_subject)), 1)
+  expect_length(result$failures, 3)
+  expect_named(
+    result$failures[[1]],
+    c("stage", "reason", "predictor", "observed_sd", "required_sd",
+      "repetition", "fold", "test_subjects")
+  )
+})
+
+test_that("pointwise ELPD and weights require successful common evidence", {
+  pair <- tibble::tibble(
+    i = "target", j = "predator",
+    kfold_subject_ids_ij = list(c("A", "B")),
+    kfold_subject_ij = list(c(A = NA_real_, B = -5)),
+    kfold_subject_ppd_ij = list(c(A = NA_real_, B = -2.5)),
+    kfold_elpd_method_ij = "kalman-ou",
+    kfold_subject_counts_ij = list(c(A = 0L, B = 2L)),
+    kfold_subject_ids_ji = list(NULL),
+    kfold_subject_ji = list(NULL),
+    kfold_subject_ppd_ji = list(NULL),
+    kfold_elpd_method_ji = NA_character_,
+    kfold_subject_counts_ji = list(NULL)
+  )
+  pointwise <- pclvbayes:::.expand_cross_pw(pair)
+  expect_true(is.na(pointwise$elpd[pointwise$subject == "A"]))
+  expect_equal(pointwise$n_test[pointwise$subject == "A"], 0L)
+  expect_equal(pointwise$n_test[pointwise$subject == "B"], 2L)
+
+  evidence <- tibble::tibble(
+    from = rep(c("p1", "p2"), each = 3), to = "target",
+    subject = rep(c("A", "B", "C"), 2),
+    elpd = c(NA, -2, -2.5, -1, -3, -3.5),
+    elpd_ppd = c(NA, -2, -2.5, -1, -3, -3.5),
+    n_test = c(0L, 2L, 2L, 1L, 2L, 2L)
+  )
+  unavailable <- pclvbayes:::.compute_pseudobma_weights_cross(
+    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 3
+  )
+  expect_equal(nrow(unavailable), 0)
+
+  weights <- pclvbayes:::.compute_pseudobma_weights_cross(
+    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 2
+  )
+  expect_equal(sum(weights$weight), 1)
+  expect_equal(sort(weights$from), c("p1", "p2"))
+
+  stacking_unavailable <- pclvbayes:::.compute_stacking_weights_cross(
+    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 3
+  )
+  expect_equal(nrow(stacking_unavailable), 0)
+  stacking <- pclvbayes:::.compute_stacking_weights_cross(
+    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 2
+  )
+  if (requireNamespace("loo", quietly = TRUE)) {
+    expect_equal(sum(stacking$stacking), 1, tolerance = 1e-8)
+    expect_equal(sort(stacking$from), c("p1", "p2"))
+  } else {
+    expect_equal(nrow(stacking), 0)
+  }
 })
