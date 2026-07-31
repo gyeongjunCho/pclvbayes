@@ -41,50 +41,6 @@
   .predictor_variation_failure(xj, "xj", stage)
 }
 
-#' Get abundance matrix with taxa as rows
-#'
-#' Coerces the \code{otu_table} from a \pkg{phyloseq} object to a numeric
-#' matrix and ensures taxa are on rows (transposes when samples are rows).
-#'
-#' @param physeq A \pkg{phyloseq} object.
-#' @return A numeric matrix with taxa as rows and samples as columns.
-#' @noRd
-#' @keywords internal
-.get_abund_matrix_precomputed <- function(physeq) {
-  mat <- as(otu_table(physeq), "matrix")
-  if (!taxa_are_rows(physeq)) mat <- t(mat)
-  mat
-}
-
-#' Extract minimal sample metadata (Sample/subject/time)
-#'
-#' Builds a compact data frame containing sample IDs and user-specified
-#' subject and time columns, coercing \code{time} to numeric when possible.
-#'
-#' @param physeq A \pkg{phyloseq} object.
-#' @param subject_col Column name in \code{sample_data} indicating subject ID.
-#' @param time_col Column name in \code{sample_data} indicating time.
-#' @return A data frame with columns \code{Sample}, \code{subject}, \code{time}.
-#' @noRd
-#' @keywords internal
-.get_sample_meta <- function(physeq, subject_col, time_col) {
-  md <- data.frame(
-    sample = sample_names(physeq),
-    as(sample_data(physeq), "data.frame"),
-    check.names = FALSE
-  )
-  md <- md |>
-    dplyr::transmute(
-      Sample  = sample,
-      subject = .data[[subject_col]],
-      time    = .data[[time_col]]
-    )
-  if (!is.numeric(md$time)) suppressWarnings(md$time <- as.numeric(md$time))
-  md
-}
-
-
-
 #' Per-subject spline smoothing of relative abundances (log-scale)
 #'
 #' For each taxon and subject, fits a robust smoothing spline on
@@ -113,8 +69,9 @@
                    dimnames = dimnames(mat_rel))
   col_idx_all <- match(meta_df$Sample, colnames(mat_rel))
 
-  taxa_use <- intersect(taxa_list, rownames(mat_rel))
-  if (!length(taxa_use)) return(sm_mat)
+  if (!all(taxa_list %in% rownames(mat_rel)))
+    stop("Validated taxa invariant violated.")
+  taxa_use <- taxa_list
 
   for (tx in taxa_use) {
     vec_pred <- rep(NA_real_, nrow(meta_df))
@@ -561,9 +518,13 @@
                                   alr_spline_spar = NULL,
                                   alr_spline_cv = TRUE,
                                   nz_partner_min_frac = 0.15) {
-  zero_mode_alr <- match.arg(zero_mode_alr)
-  minpos_base   <- match.arg(minpos_base)
-  smooth_scale  <- match.arg(smooth_scale)
+  zero_mode_alr <- zero_mode_alr[[1L]]
+  minpos_base <- minpos_base[[1L]]
+  smooth_scale <- smooth_scale[[1L]]
+  if (!(zero_mode_alr %in% c("minpos_time", "minpos_subject", "lib", "fixed")) ||
+      !(minpos_base %in% c("ij", "triplet")) ||
+      !(smooth_scale %in% c("logra", "alr")))
+    stop("Validated canonical preprocessing option invariant violated.")
 
   if (is.null(pair_df)) {
     pair_df <- .select_smoothed_pair_rows(
@@ -2219,18 +2180,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   # CmdStanR는 pathfinder fit을 init에 바로 받을 수 있음.
   # 체인 수보다 PF draw가 적으면 자동으로(with replacement) 뽑아 씀.
   # 참고: cmdstanr reference (model-method-pathfinder, init에 CmdStanPathfinder 허용). :contentReference[oaicite:1]{index=1}
-  user_init_valid <- is.null(init) || is.function(init) ||
-    (is.numeric(init) && length(init) == 1L && is.finite(init)) ||
-    (is.list(init) && length(init) > 0L)
-  if (!user_init_valid) stop("Unsupported or malformed init specification.")
-  if (is.list(init) && !is.function(init)) {
-    per_chain <- is.list(init[[1L]])
-    if (per_chain && (length(init) != chains || any(vapply(init, function(z) !length(z), logical(1)))))
-      stop("Malformed per-chain init specification.")
-    if (!per_chain && (is.null(names(init)) || any(!nzchar(names(init)))))
-      stop("Malformed named init specification.")
-  }
-
   initialization_provenance <- list(
     requested = if (use_pathfinder_init) "pathfinder" else "user_or_default",
     pathfinder_status = if (use_pathfinder_init) "not_run" else "not_requested",
