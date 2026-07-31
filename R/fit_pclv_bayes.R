@@ -407,16 +407,10 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
           utils::setTxtProgressBar(pb, task_k)
         }
 
-        if (!is.null(row)) {
-          k <- k + 1L
-          out[[k]] <- row
-          if (progress == "verbose") {
-            cat(sprintf("pair %s-%s done\n", taxa_vec[i], taxa_vec[j]))
-          }
-        } else {
-          if (progress == "verbose") {
-            cat(sprintf("pair %s-%s skipped\n", taxa_vec[i], taxa_vec[j]))
-          }
+        k <- k + 1L
+        out[[k]] <- row
+        if (progress == "verbose") {
+          cat(sprintf("pair %s-%s done\n", taxa_vec[i], taxa_vec[j]))
         }
       }
     }
@@ -477,7 +471,7 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     }
   }
 
-  res <- dplyr::bind_rows(purrr::compact(out))
+  res <- dplyr::bind_rows(out)
   rownames(res) <- NULL
 
   cross_tbl <- .mk_cross(res)

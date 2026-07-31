@@ -9,6 +9,14 @@
 .PCLV_CORE_ELPD_MODE <- "kalman"
 .PCLV_CORE_SPLINE <- list(df = NULL, spar = NULL, cv = TRUE)
 
+.pclv_failure <- function(stage, reason, details = list()) {
+  out <- c(list(ok = FALSE, stage = stage, reason = reason, details = details), details)
+  out <- out[!duplicated(names(out))]
+  structure(out, class = c("pclv_failure", "list"))
+}
+
+.is_pclv_failure <- function(x) inherits(x, "pclv_failure")
+
 .predictor_variation_failure <- function(x, predictor, stage) {
   finite_x <- x[is.finite(x)]
   scale <- max(c(1, abs(finite_x)))
@@ -19,16 +27,9 @@
     return(NULL)
   }
 
-  structure(
-    list(
-      stage = stage,
-      reason = "insufficient_predictor_variation",
-      predictor = predictor,
-      observed_sd = observed_sd,
-      required_sd = required_sd
-    ),
-    class = c("pclv_failure", "list")
-  )
+  .pclv_failure(stage, "insufficient_predictor_variation", list(
+    predictor = predictor, observed_sd = observed_sd, required_sd = required_sd
+  ))
 }
 
 .validate_predictor_variation <- function(xi, xj, stage) {
@@ -38,10 +39,6 @@
   }
 
   .predictor_variation_failure(xj, "xj", stage)
-}
-
-.failure_null <- function(failure) {
-  structure(NULL, pclv_failure = failure)
 }
 
 #' Get abundance matrix with taxa as rows
@@ -469,8 +466,8 @@
               is.finite(dt) & dt > min_dt]
   }), use.names = FALSE)
   pair_df <- pair_df[keep, , drop = FALSE]
-  if (nrow(pair_df) < min_pairs) return(NULL)
-  if (stats::sd(pair_df$xi_raw) < min_sd || stats::sd(pair_df$xj_raw) < min_sd) return(NULL)
+  if (nrow(pair_df) < min_pairs) return(.pclv_failure("preprocessing", "insufficient_rows", list(observed_rows = nrow(pair_df), required_rows = min_pairs)))
+  if (stats::sd(pair_df$xi_raw) < min_sd || stats::sd(pair_df$xj_raw) < min_sd) return(.pclv_failure("preprocessing", "insufficient_raw_variation", list(required_sd = min_sd)))
   pair_df
 }
 
@@ -556,7 +553,7 @@
     pair_df <- .select_smoothed_pair_rows(
       sm_mat, meta_df, j, i, min_pairs, min_dt, min_sd
     )
-    if (is.null(pair_df)) return(NULL)
+    if (.is_pclv_failure(pair_df)) return(pair_df)
   }
 
   stopifnot(all(c("subject","time","xi_raw","xj_raw") %in% names(pair_df)))
@@ -663,7 +660,7 @@
 
   ok <- is.finite(dat$y) & is.finite(dat$xi) & is.finite(dat$xj) & is.finite(dat$time) & keep_mask
   dat <- dat[ok, , drop = FALSE]
-  if (!nrow(dat)) return(NULL)
+  if (!nrow(dat)) return(.pclv_failure("preprocessing", "no_valid_lagged_rows", list()))
 
   variation_failure <- .validate_predictor_variation(dat$xi, dat$xj, "full_data")
   if (!is.null(variation_failure)) {
@@ -1180,14 +1177,27 @@
                     .or(sample_args$iter_warmup, "NA"),
                     .or(sample_args$step_size, "NA")))
 
-    fit <- .call_sample_silently(mod, sample_args, silent = silent_sampler)
+    fit <- tryCatch(
+      .call_sample_silently(mod, sample_args, silent = silent_sampler),
+      error = function(e) .pclv_failure(
+        "sampling", "cmdstan_execution_failed",
+        list(message = conditionMessage(e), attempt = attempt)
+      )
+    )
+    final_args <- sample_args
+    if (.is_pclv_failure(fit)) {
+      if (attempt >= max_retries) {
+        return(list(fit = NULL, diag = NULL, n_retries = attempt,
+                    fit_failed = TRUE, final_args = final_args, failure = fit))
+      }
+      attempt <- attempt + 1L
+      next
+    }
 
     diag <- .summarise_diag(
       fit,
       max_treedepth = .or(sample_args$max_treedepth, base_args$max_treedepth)
     )
-
-    final_args <- sample_args
 
     eb_vec <- .ebfmi_chainwise_from_energy(fit)
     eb_str <- if (length(eb_vec)) paste(sprintf("%.3f", eb_vec), collapse=",") else "NA"
@@ -1203,11 +1213,36 @@
   }
 
   list(
-    fit = fit,
-    diag = diag,
-    n_retries = attempt,
-    fit_failed = fit_failed,
-    final_args = final_args
+    fit = fit, diag = diag, n_retries = attempt,
+    fit_failed = fit_failed, final_args = final_args,
+    failure = if (fit_failed) .pclv_failure(
+      "sampling", "sampler_diagnostics_failed",
+      list(n_retries = attempt, diagnostics = diag)
+    ) else NULL
+  )
+}
+
+.failed_direction_result <- function(failure) {
+  na_diag <- list(worst_rhat = NA_real_, min_ess_bulk = NA_real_,
+                  min_ess_tail = NA_real_, n_divergent = NA_integer_,
+                  n_treedepth_hit = NA_integer_, ebfmi_min = NA_real_,
+                  ebfmi_med = NA_real_)
+  list(
+    ok = FALSE, failure = failure, n_pairs = NA_integer_,
+    a_mean = NA_real_, a_sd = NA_real_, a_q2.5 = NA_real_, a_q97.5 = NA_real_,
+    p_sign2 = NA_real_, aii_mean = NA_real_, aii_sd = NA_real_,
+    aii_q2.5 = NA_real_, aii_q97.5 = NA_real_, p_sign2_self = NA_real_,
+    nu_mean = NA_real_, nu_median = NA_real_, nu_q05 = NA_real_, nu_q95 = NA_real_,
+    diag = na_diag, kfold_mean = NA_real_, kfold_method = NA_character_,
+    kfold_subject = list(NULL), kfold_subject_ppd = list(NULL),
+    kfold_subject_ids = list(NULL), kfold_subject_counts = list(NULL),
+    kfold_subject_success = list(NULL), kfold_subject_fail = list(NULL),
+    kfold_success_total = 0L, kfold_failures = list(list(failure)),
+    kfold_splits = list(NULL), kfold_seed_used = NA_integer_,
+    kfold_sd = NA_real_, kfold_se = NA_real_, kfold_n_subjects = 0L,
+    kfold_retry_total = NA_integer_, kfold_retry_mean = NA_real_,
+    kfold_nu_fold_means = list(NULL), kfold_outer_rounds = 0L,
+    kfold_failed = TRUE, kfold_n_folds_ok = 0L, kfold_n_folds_fail = NA_integer_
   )
 }
 
@@ -1248,17 +1283,18 @@
     progress_local = if (mute_logs) "none" else progress
   )
 
-  if (inherits(res_ij, "pclv_failure")) {
-    return(.failure_null(res_ij))
-  }
-  if (inherits(res_ji, "pclv_failure")) {
-    return(.failure_null(res_ji))
-  }
+  if (is.null(res_ij)) res_ij <- .pclv_failure("directed_fit", "missing_result", list(direction = "ij"))
+  if (is.null(res_ji)) res_ji <- .pclv_failure("directed_fit", "missing_result", list(direction = "ji"))
 
-  if (is.null(res_ij) || is.null(res_ji)) return(NULL)
+  failure_ij <- if (.is_pclv_failure(res_ij)) res_ij else NULL
+  failure_ji <- if (.is_pclv_failure(res_ji)) res_ji else NULL
+  if (!is.null(failure_ij)) res_ij <- .failed_direction_result(failure_ij)
+  if (!is.null(failure_ji)) res_ji <- .failed_direction_result(failure_ji)
 
   tibble::as_tibble_row(list(
     i = ti, j = pj,
+    direction_ok_ij = is.null(failure_ij), direction_ok_ji = is.null(failure_ji),
+    failure_ij = list(failure_ij), failure_ji = list(failure_ji),
     n_pairs_ij = res_ij$n_pairs, n_pairs_ji = res_ji$n_pairs,
     a_ij_mean = res_ij$a_mean, a_ij_sd = res_ij$a_sd,
     a_ij_q2.5 = res_ij$a_q2.5, a_ij_q97.5 = res_ij$a_q97.5,
@@ -1288,7 +1324,7 @@
     kfold_elpd_mean_ji = res_ji$kfold_mean,
     kfold_elpd_method_ij = res_ij$kfold_method,
     kfold_elpd_method_ji = res_ji$kfold_method,
-    kfold_K = kfold_K, kfold_R = kfold_R,
+    kfold_K = if (is.null(kfold_K)) NA_integer_ else kfold_K, kfold_R = if (is.null(kfold_R)) NA_integer_ else kfold_R,
     kfold_subject_ij         = res_ij$kfold_subject,
     kfold_subject_ppd_ij     = res_ij$kfold_subject_ppd,
     kfold_subject_ids_ij     = res_ij$kfold_subject_ids,
@@ -1335,13 +1371,11 @@
 
 .validate_nu_draws <- function(draws_df, stage) {
   if (!("nu" %in% names(draws_df))) {
-    return(structure(list(stage = stage, reason = "missing_nu_draws"),
-                     class = c("pclv_failure", "list")))
+    return(.pclv_failure(stage, "missing_nu_draws", list()))
   }
   nu <- as.numeric(draws_df$nu)
   if (length(nu) != nrow(draws_df) || any(!is.finite(nu)) || any(nu <= 2)) {
-    return(structure(list(stage = stage, reason = "invalid_nu_draws"),
-                     class = c("pclv_failure", "list")))
+    return(.pclv_failure(stage, "invalid_nu_draws", list()))
   }
   NULL
 }
@@ -1612,7 +1646,7 @@
   tr <- subset(pair_in, subject %in% train_subjects)
   te <- subset(pair_in, subject %in% test_subjects)
   if (!nrow(tr) || !nrow(te))
-    return(NULL)
+    return(.pclv_failure("kfold_split", "empty_train_or_test", list()))
   trd <- mk_prev_dt(tr)
   ted <- mk_prev_dt(te)
   variation_failure <- .validate_predictor_variation(trd$df$xi, trd$df$xj, "kfold_training")
@@ -1633,7 +1667,7 @@
 
   # --- Guard: insufficient train samples per fold ---
   if (nrow(trd$df) < min_pairs)
-    return(NULL)
+    return(.pclv_failure("kfold_training", "insufficient_rows", list(observed_rows = nrow(trd$df), required_rows = min_pairs)))
 
   list(
     train = trd$df,
@@ -1676,8 +1710,7 @@
   if (inherits(pts, "pclv_failure")) {
     return(pts)
   }
-  if (is.null(pts))
-    return(NULL)
+
 
   sl <- stan_list_base
   sl$N   <- nrow(pts$train)
@@ -1735,6 +1768,7 @@
     freeze_retry_hypers = freeze_retry_hypers   # ★ 하이퍼를 바꾸지 않는 리트라이
   )
   fit <- tryfit$fit
+  if (!is.null(tryfit$failure)) return(tryfit$failure)
 
   # 방어적 동일성 확인(디버그용; 필요시 주석 처리)
   fa <- tryfit$final_args
@@ -1754,7 +1788,7 @@
       is.null(llm$full) ||
       !is.matrix(llm$full) || ncol(llm$full) == 0) {
     # 테스트 데이터가 비정상인 폴드는 실패로 처리
-    return(NULL)
+    return(.pclv_failure("kfold_scoring", "invalid_pointwise_loglik", list()))
   }
   elpd_vec <- stats::setNames(apply(llm$full, 2, .log_mean_exp), llm$subjects)
   elpd_ppd_vec <- elpd_vec / pmax(llm$n_obs, 1L)
@@ -1876,21 +1910,22 @@
       min_pairs = min_pairs
     )
     if (is.null(result)) {
-      result <- structure(
-        list(
-          stage = "kfold_scoring",
-          reason = "fold_evaluation_failed",
-          predictor = NA_character_,
-          observed_sd = NA_real_,
-          required_sd = NA_real_
-        ),
-        class = c("pclv_failure", "list")
-      )
+      result <- .pclv_failure("kfold_scoring", "fold_evaluation_failed",
+                              list(predictor = NA_character_))
     }
-    if (inherits(result, "pclv_failure")) {
+    if (.is_pclv_failure(result)) {
+      if (is.null(result$ok) || is.null(result$details)) {
+        legacy_details <- result[setdiff(names(result), c("ok", "stage", "reason", "details"))]
+        result <- .pclv_failure(result$stage, result$reason, legacy_details)
+      }
+      if (is.null(result$predictor)) result$predictor <- NA_character_
       result$repetition <- task$r
       result$fold <- task$k
       result$test_subjects <- task$te
+      result$details$predictor <- result$predictor
+      result$details$repetition <- task$r
+      result$details$fold <- task$k
+      result$details$test_subjects <- task$te
     }
     result
   }
@@ -2108,6 +2143,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     eps = eps,
     min_pairs = min_pairs
   )
+  if (is.null(pair_df)) return(.pclv_failure("preprocessing", "pair_builder_no_data", list()))
 } else {
   pair_df <- NULL
 }
@@ -2132,8 +2168,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   if (inherits(pair_in, "pclv_failure")) {
     return(pair_in)
   }
-  if (is.null(pair_in) || nrow(pair_in) < min_pairs)
-    return(NULL)
+  if (nrow(pair_in) < min_pairs)
+    return(.pclv_failure("preprocessing", "insufficient_analysis_rows", list(observed_rows = nrow(pair_in), required_rows = min_pairs)))
 
   # 결측/비유한 제거
   pair_in <- pair_in[is.finite(pair_in$y) &
@@ -2141,7 +2177,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
                        is.finite(pair_in$xj) &
                        is.finite(pair_in$time), , drop = FALSE]
   if (!nrow(pair_in))
-    return(NULL)
+    return(.pclv_failure("preprocessing", "no_finite_analysis_rows", list()))
 
   # 1) prev/dt 구성(AR(1)용) ----------------------------------------------------
   pair_in <- pair_in[order(pair_in$subject, pair_in$time), , drop = FALSE]
@@ -2344,6 +2380,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     cat(sprintf("%s pair: main run completed\n", pair_tag))
 
   fit_full   <- res_try$fit
+  if (!is.null(res_try$failure)) return(res_try$failure)
   diag       <- res_try$diag
   n_retries  <- res_try$n_retries
   fit_failed <- res_try$fit_failed
