@@ -13,7 +13,6 @@ fit_pclv_bayes(
   lag = 1,
   resid_mode = c("ou", "wn"),
   use_student_t = TRUE,
-  standardize_by_subject = TRUE,
   nz_partner_min_frac = 0.15,
   eps = 1e-06,
   spline_df = NULL,
@@ -77,8 +76,6 @@ fit_pclv_bayes(
 
 \item{use_student_t}{If \code{TRUE}, use Student-t observation noise (also used in K-fold scoring);
 in \code{kalman} scoring, this is approximated via a variance expansion (\code{nu/(nu - 2)}) when \code{nu > 2}.}
-
-\item{standardize_by_subject}{If \code{TRUE}, z-standardize within subject (train-only); default \code{TRUE}.}
 
 \item{nz_partner_min_frac}{Drop subjects whose partner predictor is non-zero in fewer than this
 fraction of rows; default \code{0.15}.}

@@ -86,6 +86,20 @@
       sub_pw$val <- as.numeric(sub_pw[[val_col]])
     }
 
+    eligible <- is.finite(sub_pw$val) & is.finite(sub_pw$n_test) & sub_pw$n_test > 0
+    sub_pw <- sub_pw[eligible, , drop = FALSE]
+    if (!nrow(sub_pw)) next
+    evidence <- tidyr::pivot_wider(
+      sub_pw[, c("subject", "from", "n_test")],
+      names_from = "from", values_from = "n_test"
+    )
+    evidence_matrix <- as.matrix(evidence[, setdiff(names(evidence), "subject"), drop = FALSE])
+    evidence_ok <- apply(evidence_matrix, 1L, function(x) {
+      all(is.finite(x) & x > 0) && length(unique(x)) == 1L
+    })
+    common_subjects <- evidence$subject[evidence_ok]
+    sub_pw <- sub_pw[sub_pw$subject %in% common_subjects, , drop = FALSE]
+    if (!nrow(sub_pw)) next
     wide <- tidyr::pivot_wider(
       sub_pw[, c("subject","from","val")],
       names_from = "from", values_from = "val"
@@ -165,6 +179,20 @@
     } else {
       sub$val <- as.numeric(sub$elpd)
     }
+    eligible <- is.finite(sub$val) & is.finite(sub$n_test) & sub$n_test > 0
+    sub <- sub[eligible, , drop = FALSE]
+    if (!nrow(sub)) next
+    evidence <- tidyr::pivot_wider(
+      sub[, c("subject", "from", "n_test")],
+      names_from = "from", values_from = "n_test"
+    )
+    evidence_matrix <- as.matrix(evidence[, setdiff(names(evidence), "subject"), drop = FALSE])
+    evidence_ok <- apply(evidence_matrix, 1L, function(x) {
+      all(is.finite(x) & x > 0) && length(unique(x)) == 1L
+    })
+    common_subjects <- evidence$subject[evidence_ok]
+    sub <- sub[sub$subject %in% common_subjects, , drop = FALSE]
+    if (!nrow(sub)) next
     wide <- tidyr::pivot_wider(sub[, c("subject","from","val")],
                                names_from = "from", values_from = "val")
     X <- as.matrix(wide[ , setdiff(names(wide), "subject"), drop = FALSE])

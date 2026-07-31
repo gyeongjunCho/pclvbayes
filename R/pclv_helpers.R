@@ -2,6 +2,41 @@
 
 .PCLV_CORE_ALR_CAP <- 12
 
+.predictor_variation_failure <- function(x, predictor, stage) {
+  finite_x <- x[is.finite(x)]
+  scale <- max(c(1, abs(finite_x)))
+  required_sd <- sqrt(.Machine$double.eps) * scale
+  observed_sd <- stats::sd(x)
+
+  if (is.finite(observed_sd) && observed_sd > required_sd) {
+    return(NULL)
+  }
+
+  structure(
+    list(
+      stage = stage,
+      reason = "insufficient_predictor_variation",
+      predictor = predictor,
+      observed_sd = observed_sd,
+      required_sd = required_sd
+    ),
+    class = c("pclv_failure", "list")
+  )
+}
+
+.validate_predictor_variation <- function(xi, xj, stage) {
+  failure <- .predictor_variation_failure(xi, "xi", stage)
+  if (!is.null(failure)) {
+    return(failure)
+  }
+
+  .predictor_variation_failure(xj, "xj", stage)
+}
+
+.failure_null <- function(failure) {
+  structure(NULL, pclv_failure = failure)
+}
+
 #' Get abundance matrix with taxa as rows
 #'
 #' Coerces the \code{otu_table} from a \pkg{phyloseq} object to a numeric
@@ -193,27 +228,6 @@
   pair_df
 }
 
-#' Robust z-score with caps and NA/Inf guards
-#'
-#' Centers and scales a numeric vector using finite entries only, replaces
-#' non-finite results with zero, and caps by \code{[-cap, cap]}.
-#'
-#' @param v Numeric vector.
-#' @param cap Positive cap for absolute z-scores.
-#' @return A numeric vector of capped z-scores.
-#' @noRd
-#' @keywords internal
-.z <- function(v, cap = 5){
-  v_fin <- v[is.finite(v)]
-  m <- if (length(v_fin)) mean(v_fin) else 0
-  s <- if (length(v_fin) > 1) sd(v_fin) else 1
-  if (!is.finite(s) || s == 0) s <- 1
-  z <- (v - m) / s
-  z[!is.finite(z)] <- 0
-  z[z >  cap] <-  cap
-  z[z < -cap] <- -cap
-  z
-}
 
 #' Safely extract common parameter draws as a data frame
 #'
@@ -501,7 +515,7 @@
 #'
 #' Creates lagged predictors and \code{ΔALR_i/Δt} response under either
 #' ALR or raw-RA transforms, with zero-aware ALR safeguards, optional
-#' ALR smoothing, partner non-zero filters, and subject/global z-scaling.
+#' ALR smoothing, partner non-zero filters, and global predictor scaling.
 #'
 #' @param pair_df Tibble from \code{.build_pair_df_smoothed()}.
 #' @param transform Either \code{"alr"} or \code{"raw"} for predictors.
@@ -516,11 +530,8 @@
 #' @param smooth_scale One of \code{"logra"} (pre-smoothed) or \code{"alr"} (inline).
 #' @param alr_spline_df,alr_spline_spar,alr_spline_cv Spline controls for ALR smoothing.
 #' @param nz_partner_min_frac Minimum fraction of non-zero partner entries per subject.
-#' @param standardize_by_subject Logical; subject-wise z-standardization.
-#' @param z_mode One of \code{"subject"}, \code{"global"}, or \code{"none"}.
-#' @param z_external Optional list of global means/SDs when \code{z_mode="global"}.
 #' @return Data frame with columns \code{subject,time,y,xi,xj} and attributes
-#'   \code{smooth_edf_mean}, \code{smooth_scale}, \code{smoothed}, optionally \code{z_stats}.
+#'   \code{smooth_edf_mean}, \code{smooth_scale}, and \code{smoothed}.
 #' @noRd
 #' @keywords internal
 .make_pair_inputs_glv <- function(pair_df,
@@ -537,15 +548,11 @@
                                   alr_spline_df = NULL,
                                   alr_spline_spar = NULL,
                                   alr_spline_cv = TRUE,
-                                  nz_partner_min_frac = 0.15,
-                                  standardize_by_subject = TRUE,
-                                  z_mode = c("subject","global","none"),
-                                  z_external = NULL) {
+                                  nz_partner_min_frac = 0.15) {
   transform     <- match.arg(transform)
   zero_mode_alr <- match.arg(zero_mode_alr)
   minpos_base   <- match.arg(minpos_base)
   smooth_scale  <- match.arg(smooth_scale)
-  z_mode        <- match.arg(z_mode)
 
   stopifnot(all(c("subject","time","xi_raw","xj_raw") %in% names(pair_df)))
   df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
@@ -680,46 +687,31 @@
     xj = as.numeric(xj)
   )
 
-  z_stats <- NULL
-  if (z_mode == "none") {
-    # no standardization
-  } else if (!is.null(z_external) && z_mode == "global") {
-    mu_y  <- z_external$mu_y;  sd_y  <- z_external$sd_y
-    mu_xi <- z_external$mu_xi; sd_xi <- z_external$sd_xi
-    mu_xj <- z_external$mu_xj; sd_xj <- z_external$sd_xj
-    if (!is.finite(sd_y)  || sd_y  <= 0) sd_y  <- 1
-    if (!is.finite(sd_xi) || sd_xi <= 0) sd_xi <- 1
-    if (!is.finite(sd_xj) || sd_xj <= 0) sd_xj <- 1
-    dat$y  <- (dat$y  - mu_y)  / sd_y
-    dat$xi <- (dat$xi - mu_xi) / sd_xi
-    dat$xj <- (dat$xj - mu_xj) / sd_xj
-  } else {
-    if (isTRUE(standardize_by_subject) && z_mode == "subject") {
-      by_s2 <- split(seq_len(nrow(dat)), dat$subject)
-      dat$y  <- unsplit(lapply(by_s2, function(ix) .z(dat$y[ix])),  dat$subject)
-      dat$xi <- unsplit(lapply(by_s2, function(ix) .z(dat$xi[ix])), dat$subject)
-      dat$xj <- unsplit(lapply(by_s2, function(ix) .z(dat$xj[ix])), dat$subject)
-    } else {
-      mu_y  <- mean(dat$y[is.finite(dat$y)],  na.rm = TRUE); sd_y  <- stats::sd(dat$y,  na.rm = TRUE); if (!is.finite(sd_y)  || sd_y  == 0) sd_y  <- 1
-      mu_xi <- mean(dat$xi[is.finite(dat$xi)], na.rm = TRUE); sd_xi <- stats::sd(dat$xi, na.rm = TRUE); if (!is.finite(sd_xi) || sd_xi == 0) sd_xi <- 1
-      mu_xj <- mean(dat$xj[is.finite(dat$xj)], na.rm = TRUE); sd_xj <- stats::sd(dat$xj, na.rm = TRUE); if (!is.finite(sd_xj) || sd_xj == 0) sd_xj <- 1
-      dat$y  <- (dat$y  - mu_y)  / sd_y
-      dat$xi <- (dat$xi - mu_xi) / sd_xi
-      dat$xj <- (dat$xj - mu_xj) / sd_xj
-      z_stats <- list(mu_y = mu_y, sd_y = sd_y,
-                      mu_xi = mu_xi, sd_xi = sd_xi,
-                      mu_xj = mu_xj, sd_xj = sd_xj)
-    }
-  }
-
   ok <- is.finite(dat$y) & is.finite(dat$xi) & is.finite(dat$xj) & is.finite(dat$time) & keep_mask
   dat <- dat[ok, , drop = FALSE]
   if (!nrow(dat)) return(NULL)
 
+  variation_failure <- .validate_predictor_variation(dat$xi, dat$xj, "full_data")
+  if (!is.null(variation_failure)) {
+    return(variation_failure)
+  }
+
+
+  mu_xi <- mean(dat$xi)
+  sd_xi <- stats::sd(dat$xi)
+  if (!is.finite(sd_xi) || sd_xi <= 0) sd_xi <- 1
+  mu_xj <- mean(dat$xj)
+  sd_xj <- stats::sd(dat$xj)
+  if (!is.finite(sd_xj) || sd_xj <= 0) sd_xj <- 1
+
+  dat$xi_unscaled <- dat$xi
+  dat$xj_unscaled <- dat$xj
+  dat$xi <- (dat$xi - mu_xi) / sd_xi
+  dat$xj <- (dat$xj - mu_xj) / sd_xj
+
   attr(dat, "smooth_edf_mean") <- smooth_edf_mean
   attr(dat, "smooth_scale")    <- smooth_scale
   attr(dat, "smoothed")        <- smooth_scale %in% c("alr","logra")
-  if (!is.null(z_stats)) attr(dat, "z_stats") <- z_stats
 
   dat
 }
@@ -1297,6 +1289,13 @@
     progress_local = if (mute_logs) "none" else progress
   )
 
+  if (inherits(res_ij, "pclv_failure")) {
+    return(.failure_null(res_ij))
+  }
+  if (inherits(res_ji, "pclv_failure")) {
+    return(.failure_null(res_ji))
+  }
+
   if (is.null(res_ij) || is.null(res_ji)) return(NULL)
 
   tibble::as_tibble_row(list(
@@ -1331,6 +1330,10 @@
     kfold_subject_ppd_ij     = res_ij$kfold_subject_ppd,
     kfold_subject_ids_ij     = res_ij$kfold_subject_ids,
     kfold_subject_counts_ij  = res_ij$kfold_subject_counts,
+    kfold_subject_success_ij = res_ij$kfold_subject_success,
+    kfold_subject_fail_ij    = res_ij$kfold_subject_fail,
+    kfold_success_total_ij   = res_ij$kfold_success_total,
+    kfold_failures_ij        = res_ij$kfold_failures,
     kfold_splits_ij          = res_ij$kfold_splits,
     kfold_seed_used_ij       = res_ij$kfold_seed_used,
     kfold_sd_ij              = res_ij$kfold_sd,
@@ -1347,6 +1350,10 @@
     kfold_subject_ppd_ji     = res_ji$kfold_subject_ppd,
     kfold_subject_ids_ji     = res_ji$kfold_subject_ids,
     kfold_subject_counts_ji  = res_ji$kfold_subject_counts,
+    kfold_subject_success_ji = res_ji$kfold_subject_success,
+    kfold_subject_fail_ji    = res_ji$kfold_subject_fail,
+    kfold_success_total_ji   = res_ji$kfold_success_total,
+    kfold_failures_ji        = res_ji$kfold_failures,
     kfold_splits_ji          = res_ji$kfold_splits,
     kfold_seed_used_ji       = res_ji$kfold_seed_used,
     kfold_sd_ji              = res_ji$kfold_sd,
@@ -1638,18 +1645,16 @@
 #' Build train/test splits and prev/dt indices
 #'
 #' Creates train/test data frames with previous-row indices and inter-time \code{dt}
-#' per subject; optionally applies train-only global scaling to avoid leakage.
+#' per subject and applies train-only global predictor scaling.
 #'
 #' @param pair_in Full input from \code{.make_pair_inputs_glv()}.
 #' @param train_subjects,test_subjects Character vectors of subject IDs.
-#' @param use_global_scaling Logical; apply scaling based on train only.
 #' @return A list with \code{train}, \code{test}, and index vectors; or \code{NULL}.
 #' @noRd
 #' @keywords internal
 .build_train_test <- function(pair_in,
                               train_subjects,
                               test_subjects,
-                              use_global_scaling = TRUE,
                               min_pairs = 4) {
   mk_prev_dt <- function(df) {
     df <- df[order(df$subject, df$time), , drop = FALSE]
@@ -1677,28 +1682,33 @@
          prev = prev,
          dt = dtv)
   }
+
+  if (all(c("xi_unscaled", "xj_unscaled") %in% names(pair_in))) {
+    pair_in$xi <- pair_in$xi_unscaled
+    pair_in$xj <- pair_in$xj_unscaled
+    pair_in$xi_unscaled <- NULL
+    pair_in$xj_unscaled <- NULL
+  }
   tr <- subset(pair_in, subject %in% train_subjects)
   te <- subset(pair_in, subject %in% test_subjects)
   if (!nrow(tr) || !nrow(te))
     return(NULL)
   trd <- mk_prev_dt(tr)
   ted <- mk_prev_dt(te)
-  # --- ★ Train-only global scaling (OOF leakage guard for K-fold) ---
-  if (isTRUE(use_global_scaling)) {
-    sc <- list(
-      y_m  = mean(trd$df$y),
-      y_s  = sd(trd$df$y),
-      xi_m = mean(trd$df$xi),
-      xi_s = sd(trd$df$xi),
-      xj_m = mean(trd$df$xj),
-      xj_s = sd(trd$df$xj)
-    )
-    zs <- function(x, m, s)
-      (x - m) / ifelse(is.finite(s) && s > 0, s, 1)
-    for (nm in c("y", "xi", "xj")) {
-      trd$df[[nm]] <- zs(trd$df[[nm]], sc[[paste0(nm, "_m")]], sc[[paste0(nm, "_s")]])
-      ted$df[[nm]] <- zs(ted$df[[nm]], sc[[paste0(nm, "_m")]], sc[[paste0(nm, "_s")]])
-    }
+  variation_failure <- .validate_predictor_variation(trd$df$xi, trd$df$xj, "kfold_training")
+  if (!is.null(variation_failure)) {
+    return(variation_failure)
+  }
+
+  sc <- list(
+    xi_m = mean(trd$df$xi), xi_s = stats::sd(trd$df$xi),
+    xj_m = mean(trd$df$xj), xj_s = stats::sd(trd$df$xj)
+  )
+  if (!is.finite(sc$xi_s) || sc$xi_s <= 0) sc$xi_s <- 1
+  if (!is.finite(sc$xj_s) || sc$xj_s <= 0) sc$xj_s <- 1
+  for (nm in c("xi", "xj")) {
+    trd$df[[nm]] <- (trd$df[[nm]] - sc[[paste0(nm, "_m")]]) / sc[[paste0(nm, "_s")]]
+    ted$df[[nm]] <- (ted$df[[nm]] - sc[[paste0(nm, "_m")]]) / sc[[paste0(nm, "_s")]]
   }
 
   # --- Guard: insufficient train samples per fold ---
@@ -1756,7 +1766,10 @@
   } else {
     elpd_mode <- match.arg(elpd_mode, c("indep","kalman"))
   }
-  pts <- .build_train_test(pair_in, tr, te, use_global_scaling = TRUE)
+  pts <- .build_train_test(pair_in, tr, te)
+  if (inherits(pts, "pclv_failure")) {
+    return(pts)
+  }
   if (is.null(pts))
     return(NULL)
 
@@ -1888,7 +1901,12 @@
       NA_integer_
   )
 
-  list(elpd = elpd_vec, elpd_ppd = elpd_ppd_vec, fold_diag = fd)
+  list(
+    elpd = elpd_vec,
+    elpd_ppd = elpd_ppd_vec,
+    n_obs = stats::setNames(as.integer(llm$n_obs), llm$subjects),
+    fold_diag = fd
+  )
 }
 
 #' Repeated K-fold evaluation (subject-level) with diagnostics payload
@@ -1971,7 +1989,7 @@
 
   # 폴드별 실행 함수
   run_task <- function(task) {
-    .fold_fit_and_score(
+    result <- .fold_fit_and_score(
       mod,
       stan_list_base,
       sample_args_base,
@@ -1983,11 +2001,29 @@
       elpd_mode = elpd_mode,
       silent_sampler,
       max_retries = max_retries,
-      nu_fixed_override   = nu_fixed_kfold,     # ← ν 고정 주입
+      nu_fixed_override = nu_fixed_kfold,
       freeze_retry_hypers = freeze_retry_hypers,
       seed_override = task$seed,
       min_pairs = min_pairs
     )
+    if (is.null(result)) {
+      result <- structure(
+        list(
+          stage = "kfold_scoring",
+          reason = "fold_evaluation_failed",
+          predictor = NA_character_,
+          observed_sd = NA_real_,
+          required_sd = NA_real_
+        ),
+        class = c("pclv_failure", "list")
+      )
+    }
+    if (inherits(result, "pclv_failure")) {
+      result$repetition <- task$r
+      result$fold <- task$k
+      result$test_subjects <- task$te
+    }
+    result
   }
 
   # 실행: 순차 또는 병렬
@@ -2013,44 +2049,57 @@
   }
 
   subs <- sort(unique(pair_in$subject))
-  agg      <- setNames(numeric(length(subs)), subs)
-  cnt      <- setNames(integer(length(subs)), subs)
-  agg_ppd  <- setNames(numeric(length(subs)), subs)
-  cnt_ppd  <- setNames(integer(length(subs)), subs)
+  agg <- setNames(numeric(length(subs)), subs)
+  cnt <- setNames(integer(length(subs)), subs)
+  agg_ppd <- setNames(numeric(length(subs)), subs)
+  cnt_ppd <- setNames(integer(length(subs)), subs)
+  fail_cnt <- setNames(integer(length(subs)), subs)
+  successful_obs <- setNames(integer(length(subs)), subs)
 
   fold_diag_df <- list()
+  fold_failures <- list()
 
   n_ok <- 0L
   n_fail <- 0L
 
   for (el in res_list) {
-    if (is.null(el)) {
+    if (inherits(el, "pclv_failure")) {
       n_fail <- n_fail + 1L
+      fold_failures[[length(fold_failures) + 1L]] <- el
+      failed_subjects <- intersect(el$test_subjects, subs)
+      fail_cnt[failed_subjects] <- fail_cnt[failed_subjects] + 1L
     } else {
       n_ok <- n_ok + 1L
-      # elpd
       idx <- names(el$elpd)
-      agg[idx]     <- agg[idx]     + el$elpd
-      cnt[idx]     <- cnt[idx]     + 1L
+      agg[idx] <- agg[idx] + el$elpd
+      cnt[idx] <- cnt[idx] + 1L
       if (!is.null(el$elpd_ppd)) {
         agg_ppd[idx] <- agg_ppd[idx] + el$elpd_ppd
         cnt_ppd[idx] <- cnt_ppd[idx] + 1L
       }
-      # fold diag
+      if (!is.null(el$n_obs)) {
+        obs_idx <- intersect(names(el$n_obs), subs)
+        successful_obs[obs_idx] <- successful_obs[obs_idx] + as.integer(el$n_obs[obs_idx])
+      }
       fold_diag_df[[length(fold_diag_df) + 1L]] <- data.frame(
-        n_retries      = el$fold_diag$n_retries,
-        nu_used        = el$fold_diag$nu_used,
-        ebfmi_min      = el$fold_diag$ebfmi_min,
-        worst_rhat     = el$fold_diag$worst_rhat,
-        min_ess_bulk   = el$fold_diag$min_ess_bulk,
+        n_retries = el$fold_diag$n_retries,
+        nu_used = el$fold_diag$nu_used,
+        ebfmi_min = el$fold_diag$ebfmi_min,
+        worst_rhat = el$fold_diag$worst_rhat,
+        min_ess_bulk = el$fold_diag$min_ess_bulk,
         treedepth_hits = el$fold_diag$treedepth_hits,
-        n_divergent    = el$fold_diag$n_divergent
+        n_divergent = el$fold_diag$n_divergent
       )
     }
   }
-
-  elpd_subject     <- agg / pmax(cnt, 1L)
-  elpd_subject_ppd <- agg_ppd / pmax(cnt_ppd, 1L)
+  elpd_subject <- rep(NA_real_, length(subs))
+  names(elpd_subject) <- subs
+  has_elpd <- cnt > 0L
+  elpd_subject[has_elpd] <- agg[has_elpd] / cnt[has_elpd]
+  elpd_subject_ppd <- rep(NA_real_, length(subs))
+  names(elpd_subject_ppd) <- subs
+  has_ppd <- cnt_ppd > 0L
+  elpd_subject_ppd[has_ppd] <- agg_ppd[has_ppd] / cnt_ppd[has_ppd]
   elpd_mean    <- if (length(elpd_subject)) mean(elpd_subject[is.finite(elpd_subject)], na.rm = TRUE) else NA_real_
   elpd_mean_ppd<- if (length(elpd_subject_ppd)) mean(elpd_subject_ppd[is.finite(elpd_subject_ppd)], na.rm = TRUE) else NA_real_
 
@@ -2105,11 +2154,15 @@
     # reproducibility payload for pseudo-BMA/stacking
     splits_df = splits_df,
     subject_ids = subs_all,
-    subject_test_counts = subject_test_counts,
+    subject_test_counts = successful_obs,
+    subject_success_counts = cnt,
+    subject_failure_counts = fail_cnt,
+    total_successful_evaluations = sum(cnt),
     fold_diag = fd,
     retry_total = retry_total,
     retry_mean  = retry_mean,
-    nu_used_counts = nu_counts
+    nu_used_counts = nu_counts,
+    failures = fold_failures
   )
 }
 
@@ -2138,7 +2191,6 @@
   eps                  <- ctx$eps
   min_pairs            <- ctx$min_pairs
   compute_elpd         <- ctx$compute_elpd
-  standardize_by_subject <- ctx$standardize_by_subject
   transform            <- ctx$transform
   lag                  <- ctx$lag
   zero_mode_alr        <- ctx$zero_mode_alr
@@ -2206,19 +2258,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
 }
   if (is.null(pair_df))
     return(NULL)
-  std_by_subj_eff <- if (isTRUE(compute_elpd))
-    FALSE
-  else
-    standardize_by_subject
-  if (isTRUE(compute_elpd) && isTRUE(standardize_by_subject)) {
-    if (!quiet) {
-      message(
-        "compute_elpd=TRUE with standardize_by_subject=TRUE: ",
-        "disabling subject-wise standardization to avoid OOF leakage; ",
-        "K-fold will apply train-only scaling."
-      )
-    }
-  }
 
   pair_in <- .make_pair_inputs_glv(
     pair_df = pair_df,
@@ -2235,9 +2274,11 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     alr_spline_df = alr_spline_df,
     alr_spline_spar = alr_spline_spar,
     alr_spline_cv = alr_spline_cv,
-    nz_partner_min_frac = nz_partner_min_frac,
-    standardize_by_subject = std_by_subj_eff
+    nz_partner_min_frac = nz_partner_min_frac
   )
+  if (inherits(pair_in, "pclv_failure")) {
+    return(pair_in)
+  }
   if (is.null(pair_in) || nrow(pair_in) < min_pairs)
     return(NULL)
 
@@ -2686,6 +2727,22 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NULL
       else
         kfold$subject_test_counts),
+    kfold_subject_success = list(if (is.null(kfold))
+      NULL
+      else
+        kfold$subject_success_counts),
+    kfold_subject_fail = list(if (is.null(kfold))
+      NULL
+      else
+        kfold$subject_failure_counts),
+    kfold_success_total = if (is.null(kfold))
+      NA_integer_
+    else
+      kfold$total_successful_evaluations,
+    kfold_failures = list(if (is.null(kfold))
+      NULL
+      else
+        kfold$failures),
     # split manifest (r,k,test_subjects) & seed to ensure same partitions across models
     kfold_splits        = list(if (is.null(kfold))
       NULL
