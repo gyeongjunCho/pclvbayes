@@ -1,6 +1,5 @@
 ##### R/fit_pclv_bayes.R
-
-#' Pairwise Bayesian **pcLV** fitting (bidirectional) with OU/white-noise residuals
+#' Pairwise Bayesian **pcLV** Core fitting with irregular-time OU residuals
 #'
 #' @description
 #' This function belongs to the **pGLVbayes** framework, which extends the
@@ -10,55 +9,32 @@
 #'
 #' Conceptually, the gLV equations are reformulated on the additive
 #' log-ratio (ALR) scale to handle compositional constraints, and are then
-#' estimated in a **pairwise Bayesian regression** structure with OU or
-#' white-noise residuals. Each unordered taxon pair `{i, j}` is fitted in
+#' estimated in a **pairwise Bayesian regression** structure with irregular-time
+#' OU residuals. Each unordered taxon pair `{i, j}` is fitted in
 #' both directions (j → i and i → j), providing directional interaction
 #' coefficients that can be aggregated across subjects.
 #'
-#' Residual processes may follow an OU (Ornstein–Uhlenbeck, ≈ AR(1))
-#' correlation structure or be modeled as independent Gaussian noise.
-#' Optional Student-t noise and repeated K×R cross-validation with Kalman
-#' ELPD scoring provide robust inference and model comparison.
+#' Residual dependence follows an irregular-time OU process. Student-t observation
+#' noise and repeated subject-level K-fold Kalman ELPD scoring are fixed Core choices.
 #'
 #' In short, **pGLVbayes** generalizes the traditional gLV by introducing
 #' (i) compositional transformation, (ii) pairwise modularization, and
 #' (iii) fully Bayesian estimation with diagnostic-aware sampling.
 #'
 #' @details
-#' **Transforms**
-#' - `transform = "alr"` (recommended): perform zero-aware replacement on the triplet
-#'   (i, j, rest), then compute pair-to-rest ALR:
-#'   `x_i = log(x_i / x_rest)`, `x_j = log(x_j / x_rest)`.
-#'   Response is `y = Delta ALR_i / Delta t` (standardized if configured); predictors are **lagged** ALR.
-#' - `transform = "raw"`: predictors use **lagged relative abundances**; the response remains
-#'   `Delta ALR_i / Delta t`.
+#' The canonical Core uses pair-to-rest ALR predictors at lag 1 and the response
+#' `y = Delta ALR_i / Delta t`. Predictors are globally standardized using full
+#' analysis data for the main fit and training-only statistics within each fold;
+#' the response is not standardized.
 #'
-#' **Validation**
-#' - When `compute_elpd = TRUE`, runs **Repeated K-fold (K x R)** at the **subject level** and computes
-#'   per-subject projection log-likelihood under the **fold-train posterior**, returning the **mean
-#'   ELPD per subject**. **Train-only scaling** is used to avoid out-of-fold leakage.
+#' Repeated subject-level K-fold ELPD is always computed. Held-out observations
+#' are scored with the irregular-time OU Kalman path using a Student-t observation
+#' likelihood with fixed `nu = 5`. Spline smoothing is selected by cross-validation.
+#' Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 #'
-#' **ELPD computation modes (automatic defaults)**
-#' - If `elpd_mode` is `NULL`, the scorer is chosen automatically:
-#'   - `resid_mode = "ou"`  -> `kalman` (exact OU state-space marginal log-likelihood via a Kalman filter).
-#'   - `resid_mode = "wn"`  -> `indep`  (i.i.d. Gaussian likelihood; no state-space).
-#' - You can override with `elpd_mode = "kalman"` or `"indep"` explicitly.
-#' - `kalman` (OU only): irregular-interval OU innovations are integrated as a **linear Gaussian state-space**
-#'   model; measurement variance uses `sigma^2` (or a t->Gaussian variance expansion when `use_student_t = TRUE`).
-#'   When required OU parameters are unavailable, it **falls back** to `indep`.
-#' - `indep`: independent Gaussian scoring. For OU-like dispersion, predictive SD is
-#'   `sd_pred = sqrt(sigma^2 + sd_ou^2)` (or `sigma_pred` if provided); for white-noise, `sd_pred = sqrt(sigma^2)`.
-#'
-#' **Noise model & scoring**
-#' - Optional **Student-t** observation noise via `use_student_t = TRUE` (also used in K-fold scoring).
-#' - For `elpd_mode = "kalman"` (OU), predictive uncertainty is handled **inside** the Kalman filter with
-#'   OU transition `a_t = exp(-lambda * delta_t)` and process noise `q_t = sd_ou^2 * (1 - a_t^2)`;
-#'   measurement variance uses `sigma^2` (or its t-variance expansion when `nu > 2`).
-#'
-#' **Sampling robustness**
-#' - A diagnostics-aware **retry** policy (up to `max_retries`) monitors divergences, tree depth,
-#'   and E-BFMI; if needed, it **escalates `nu_fix` within 4 ~ 7** while keeping other sampler controls
-#'   stable for fold runs. Diagnostics are returned for downstream filtering.
+#' - A diagnostics-aware **retry** policy (up to `max_retries`) monitors divergences,
+#'   tree depth, and E-BFMI while retaining fixed Student-t `nu = 5`.
+#'   Diagnostics are returned for downstream filtering.
 #' - Optional **Pathfinder** initialization (`use_pathfinder_init = TRUE`) uses
 #'   `cmdstanr::pathfinder()` to obtain near-posterior inits (and mass-matrix info) before HMC.
 #'   When enabled and `iter_warmup >= 1500`, the warmup is **auto-shortened** to
@@ -98,11 +74,6 @@
 #' @param pf_max_lbfgs_iters Integer; maximum L-BFGS iterations per path (default e.g. \code{1000}).
 #' @param pf_psis_resample Logical; if \code{TRUE}, use PSIS-importance resampling inside Pathfinder.
 #'
-#' @param compute_elpd Logical; if \code{TRUE}, run **Repeated K-fold** (subject-level) and return mean
-#' ELPD per subject; default \code{TRUE}.
-#' @param transform One of \code{"alr"} (recommended) or \code{"raw"}.
-#' @param lag Integer lag for predictors (within subject); default \code{1}.
-#' @param resid_mode One of \code{"ou"}, \code{"wn"}; sets the residual process (OU or white-noise).
 #' @param nz_partner_min_frac Drop subjects whose partner predictor is non-zero in fewer than this
 #' fraction of rows; default \code{0.15}.
 #'
@@ -122,12 +93,6 @@
 #' When \code{"bar"} and \pkg{progressr} is available, outer/K-fold progress bars are displayed.
 #' @param progress_every Update frequency for the legacy sequential progress bar; default \code{1}.
 #'
-#' @param use_student_t If \code{TRUE}, use Student-t observation noise (also used in K-fold scoring);
-#' in `kalman` scoring, this is approximated via a variance expansion (`nu/(nu - 2)`) when `nu > 2`.
-#'
-#' @param elpd_mode Character or \code{NULL}. One of \code{"kalman"}, \code{"indep"}.
-#' If \code{NULL} (recommended), defaults to \code{"kalman"} when \code{resid_mode = "ou"} and to
-#' \code{"indep"} when \code{resid_mode = "wn"}. You may override explicitly if needed.
 #'
 #' @param kfold_K Number of folds K; default \code{5}.
 #' @param kfold_R Number of repetitions R; default \code{3}.
@@ -137,14 +102,11 @@
 #' If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested parallelism.
 #'
 #' @param max_retries Maximum sampler retry attempts (diagnostics-aware); default \code{3}.
-#' @param nu_fix Initial fixed `nu` for Student-t; the wrapper may escalate up to 7 on retries; default \code{4}.
 #'
 #' @return
-#' A \code{tibble} with one row per unordered ``pair `{i, j}```, summarizing **both directions**
-#' (j -> i and i -> j) and self-effects: posterior summaries, sign probabilities (PSP/LFSR, reported as
-#' two-sided \code{p_sign2}), key MCMC diagnostics, retry metadata, and (if enabled) **Repeated K-fold**
-#' mean ELPD per subject plus basic fold counts. The ELPD scorer used is reported via \code{kfold$elpd_method}
-#' (either \code{"kalman-ou"} or \code{"indep"}). Aggregation is **subject-uniform** by default.
+#' A list containing directional and self-effect summaries, pointwise repeated
+#' K-fold ELPD, and the raw bidirectional pair table. ELPD uses the
+#' `kalman-ou` method and includes fold-evidence counts.
 #'
 #' @section Progress & Parallel:
 #' - Set global handlers once for pretty bars: \preformatted{
@@ -161,8 +123,6 @@
 #' }
 #' EP_res <- fit_pclv_bayes(
 #'   physeq = EP_phy_obj, subject_col = "plot2", time_col = "week",
-#'   transform = "alr", resid_mode = "ou",  # elpd_mode auto -> "kalman"
-#'   use_student_t = TRUE,
 #'   use_pathfinder_init = TRUE,
 #'   chains = 4, iter_warmup = 1000, iter_sampling = 1500,
 #'   n_workers_outer = 4,   # outer pair loop in parallel
@@ -180,19 +140,10 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   subject_col,
   time_col,
   taxa_vec = NULL,
-
-  # --- 모델/변환 설정 ---
-  transform = c("alr", "raw"),
-  lag = 1,
-  resid_mode = c("ou", "wn"),
-  use_student_t = TRUE,
   nz_partner_min_frac = 0.15,
 
   # --- 빌더 단계(로그-RA) 스무딩 & 최소 요구량 ---
   eps = 1e-6,
-  spline_df = NULL,
-  spline_spar = NULL,
-  spline_cv = TRUE,
   min_unique_times = 3,
   min_pairs = 4,
 
@@ -226,8 +177,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   n_workers_outer = 1L,
 
   # --- ELPD / K-fold ---
-  compute_elpd = TRUE,
-  elpd_mode = NULL,
   kfold_K = 5,
   kfold_R = 3,
   kfold_seed = seed,
@@ -235,7 +184,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
 
   # --- 리트라이 & t-꼬리 제어 ---
   max_retries = 3,
-  nu_fix = 5,
 
   # --- Pathfinder (옵션) ---
   use_pathfinder_init = TRUE,
@@ -272,14 +220,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   }, silent = TRUE)
 
 
-  transform     <- match.arg(transform)
-  resid_mode    <- match.arg(resid_mode)
-  # elpd_mode 자동 디폴트: OU → "kalman", WN → "indep"
-  if (is.null(elpd_mode)) {
-    elpd_mode <- if (identical(resid_mode, "ou")) "kalman" else "indep"
-  } else {
-    elpd_mode <- match.arg(elpd_mode, c("kalman","indep"))
-  }
   zero_mode_alr <- match.arg(zero_mode_alr)
   minpos_base   <- match.arg(minpos_base)
   smooth_scale  <- match.arg(smooth_scale)
@@ -303,9 +243,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     meta_df,
     taxa_vec,
     eps,
-    spline_df,
-    spline_spar,
-    spline_cv,
     min_unique_times
   )
 
@@ -329,9 +266,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     min_pairs = min_pairs,
     min_unique_times = min_unique_times,
     # 입력/전처리 설정
-    compute_elpd = compute_elpd,
-    transform = transform,
-    lag = lag,
     zero_mode_alr = zero_mode_alr,
     minpos_alpha = minpos_alpha,
     minpos_base  = minpos_base,
@@ -345,10 +279,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     nz_partner_min_frac = nz_partner_min_frac,
     # 모델/샘플러 설정
     max_retries = max_retries,
-    nu_fix = nu_fix,
-    use_student_t = use_student_t,
-    elpd_mode = elpd_mode,
-    resid_mode = resid_mode,
     chains = chains,
     iter_warmup = iter_warmup,
     iter_sampling = iter_sampling,

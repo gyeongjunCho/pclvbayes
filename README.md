@@ -13,7 +13,7 @@ with **Kalman ELPD**, tidy outputs, and diagnostics. Built on **cmdstanr/CmdStan
 
 ## Licensing (Pre-release)
 
-This pre-release is **view-only via the official GitFront link** and **not licensed for redistribution or use**.  
+This pre-release is **view-only via the official GitFront link** and **not licensed for redistribution or use**.
 A stable open-source release is planned under **GPL-3**.  
 See `LICENSE` for preview-only terms.
 
@@ -31,69 +31,38 @@ This repository is temporarily viewable via GitFront for a conference demo at th
   Includes **ACF/AR(1) effective-n** correction (`effn_*`) so uneven sampling and autocorrelation are penalized.  
   Use this to shortlist partners before MCMC.
 
-- **Bayesian pairwise gLV (core) — `fit_glv_pairwise()`**  
-  For each unordered pair {i, j}, fits **two ordered** regressions (**j→i**, **i→j**).  
-  Response: **ΔALR\_i / Δt** (standardized upstream as needed). Predictors: **lagged** states of i and j (ALR or raw RA).  
-  Residuals: **OU (≈ AR(1))** with **Δt-aware** persistence **or** **white-noise**; optional **Student-t** observation noise.  
-  Returns directional effects (`a_ij`, `a_ii`/`a_jj`), **posterior sign probabilities** and an **approx. local false sign rate**  
-  *(LFSR ≈ 1 − max{Pr(a>0), Pr(a<0)} from posterior draws)*, **MCMC diagnostics**, and **K×R ELPD per subject**.
+- **Bayesian pairwise pcLV Core — `fit_pclv_bayes()`**
+  For each unordered pair {i, j}, fits two ordered regressions (j→i and i→j). Predictors are lag-1 pair-to-rest ALR values and the response is ΔALR\_i / Δt. The model uses irregular-time OU residuals, Student-t observations with fixed `nu = 5`, and repeated subject-level K-fold Kalman ELPD.
 
 ---
 
-## Transforms
+## Core transformation
 
-- `transform = "alr"` (**recommended**): zero-aware replacement on the triplet **(i, j, rest)**;  
-  predictors are **lagged ALR**, response is **ΔALR\_i / Δt** (then standardized as configured).
-- `transform = "raw"`: predictors use **lagged relative abundances**; the response remains **ΔALR\_i / Δt**.
+The Core uses zero-aware pair-to-rest ALR for the `(i, j, rest)` triplet. Predictors are lag-1 ALR values; the unscaled response is ΔALR\_i / Δt.
 
 ---
 
-## Validation & ELPD (automatic modes)
+## Validation & ELPD
 
-When `compute_elpd = TRUE`, the package runs **Repeated K-fold (K×R)** at the **subject level** and computes
-**per-subject projection log-likelihood** under the **fold-train posterior**, returning the **mean ELPD per subject**.
-**Train-only scaling** is used to avoid out-of-fold leakage.
-
-- If `elpd_mode` is **omitted/NULL**, the scorer is chosen automatically:  
-  - `resid_mode = "ou"` ⟶ **`kalman`** (exact OU state-space marginal log-lik via Kalman filter).  
-  - `resid_mode = "wn"` ⟶ **`indep`** (i.i.d. Gaussian likelihood).
-- You can override with `elpd_mode = "kalman"` or `"indep"` explicitly.
-- **`kalman` (OU only)**: irregular-interval OU innovations are integrated as a **linear Gaussian state-space model**;  
-  measurement variance uses `sigma^2` (or a t→Gaussian variance expansion when `use_student_t = TRUE`).  
-  If required OU parameters are unavailable, it **falls back** to `indep`.
-- **`indep`**: independent Gaussian scoring.  
-  Predictive SD is  
-  \[
-    \text{sd}_{\text{pred}} = \begin{cases}
-      \sqrt{\sigma^2 + \mathrm{sd\_ou}^2} & \text{(OU-like)} \\
-      \sqrt{\sigma^2} & \text{(white-noise)}
-    \end{cases}
-  \]
-  (or uses `sigma_pred` if provided).
+Repeated subject-level K-fold ELPD is always computed. Each fold uses training-only global predictor scaling and Kalman OU scoring. Failed evaluations remain unavailable (`NA`) rather than contributing zero ELPD; model weights use only common successfully evaluated evidence.
 
 ---
 
 ## Noise model & scoring
 
-- Optional **Student-t** observation noise via `use_student_t = TRUE` (also honored during K-fold scoring).  
-- For `elpd_mode="kalman"` (OU), OU transition \(a_t=\exp(-\lambda \Delta t)\) and process noise \(q_t=\mathrm{sd\_ou}^2(1-a_t^2)\)  
-  are handled **inside** the Kalman filter; measurement variance uses `sigma^2` (or its t-variance expansion).
+The Core uses Student-t observation noise with fixed `nu = 5`. Irregular-time OU prediction is scored through the Kalman filter, including the Student-t variance expansion.
 
 ---
 
 ## Sampling robustness
 
-A diagnostics-aware **retry** policy (up to `max_retries`) monitors **divergences**, **tree depth**, and **E-BFMI**.  
-If needed, it **escalates `nu_fixed` within [4, 7]** while keeping other sampler controls stable for fold runs.  
-Diagnostics are returned for downstream filtering.
+A diagnostics-aware retry policy (up to `max_retries`) monitors divergences, tree depth, and E-BFMI while retaining fixed Student-t `nu = 5`. Diagnostics are returned for downstream filtering.
 
 ---
 
-## Residual model — `resid_mode`
+## Residual model
 
-- `"ou"` (**recommended**): Ornstein–Uhlenbeck (≈ AR(1)) residuals with **Δt-aware** persistence; best when residual autocorrelation exists or sampling is uneven.  
-  For ELPD, prefer the **Kalman** marginal-likelihood path.  
-- `"wn"`: white-noise (independent) residuals — useful as a fast baseline or for very short per-subject series.
+The Core uses an irregular-time Ornstein–Uhlenbeck residual process with Δt-aware persistence.
 
 ---
 
@@ -109,7 +78,7 @@ Diagnostics are returned for downstream filtering.
 ## Compositional handling (ALR)
 
 - Recommended: **ALR (pair-to-rest)** on the **(i, j, rest)** triplet with **zero-aware replacement** (optionally capped).  
-- Predictors: **lagged** ALR (or raw RA with `transform = "raw"`). Response: **ΔALR\_i / Δt**.  
+- Predictors: **lag-1 pair-to-rest ALR**. Response: **ΔALR\_i / Δt**.
 - **ILR** was evaluated but **not used** for correlation screening here, as it tended to **inflate negative correlations** in this setting; **ALR** is the default.
 
 ---
@@ -118,9 +87,9 @@ Diagnostics are returned for downstream filtering.
 
 - **Repeated K-fold** at the **subject** level (K×R) yields **per-subject OOF ELPD**.  
 - **No leakage**:
-  - **Train-only scaling/centering** (optionally **per subject**) inside each fold.  
+  - **Train-only global predictor scaling/centering** inside each fold.
   - Fold runs do **not** reuse main-run tuning artifacts.  
-- ELPD is reported with the scorer used (e.g., `"kalman-ou"` or `"indep"`), and **aggregation is subject-uniform** by default.
+- ELPD uses the `"kalman-ou"` scorer, and **aggregation is subject-uniform** by default.
 
 ---
 
