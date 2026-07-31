@@ -1,6 +1,14 @@
 ##### R/glv_helpers.R
 
 .PCLV_CORE_ALR_CAP <- 12
+.PCLV_CORE_TRANSFORM <- "alr"
+.PCLV_CORE_LAG <- 1L
+.PCLV_CORE_RESID_MODE <- "ou"
+.PCLV_CORE_USE_STUDENT_T <- TRUE
+.PCLV_CORE_NU <- 5
+.PCLV_CORE_COMPUTE_ELPD <- TRUE
+.PCLV_CORE_ELPD_MODE <- "kalman"
+.PCLV_CORE_SPLINE <- list(df = NULL, spar = NULL, cv = TRUE)
 
 .predictor_variation_failure <- function(x, predictor, stage) {
   finite_x <- x[is.finite(x)]
@@ -102,9 +110,6 @@
 .precompute_spline_smoothed <- function(mat_rel, meta_df,
                                         taxa_list = rownames(mat_rel),
                                         eps = 1e-6,
-                                        spline_df = NULL,
-                                        spline_spar = NULL,
-                                        spline_cv = TRUE,
                                         min_unique_times = 3) {
   sm_mat <- matrix(NA_real_, nrow = nrow(mat_rel), ncol = ncol(mat_rel),
                    dimnames = dimnames(mat_rel))
@@ -134,9 +139,9 @@
         ylog <- log(pmax(df2$val, 0) + eps)
         rr <- .smooth_spline_robust(
           x = df2$time, y = ylog,
-          spline_df = spline_df,
-          spline_spar = spline_spar,
-          use_cv = isTRUE(spline_cv),
+          spline_df = .PCLV_CORE_SPLINE$df,
+          spline_spar = .PCLV_CORE_SPLINE$spar,
+          use_cv = .PCLV_CORE_SPLINE$cv,
           min_unique = min_unique_times,
           min_df = 3.0,
           max_df = NULL,
@@ -514,11 +519,10 @@
 #' Build model inputs for pairwise gLV regressions
 #'
 #' Creates lagged predictors and \code{ΔALR_i/Δt} response under either
-#' ALR or raw-RA transforms, with zero-aware ALR safeguards, optional
+#' ALR transformation with zero-aware ALR safeguards, optional
 #' ALR smoothing, partner non-zero filters, and global predictor scaling.
 #'
 #' @param pair_df Tibble from \code{.build_pair_df_smoothed()}.
-#' @param transform Either \code{"alr"} or \code{"raw"} for predictors.
 #' @param lag Positive integer lag for predictors within subject.
 #' @param zero_mode_alr Zero-handling mode for ALR (see code for options).
 #' @param minpos_alpha Multiplier for data-driven epsilon.
@@ -535,8 +539,6 @@
 #' @noRd
 #' @keywords internal
 .make_pair_inputs_glv <- function(pair_df,
-                                  transform = c("alr","raw"),
-                                  lag = 1,
                                   zero_mode_alr = c("minpos_time","minpos_subject","lib","fixed"),
                                   minpos_alpha = 0.5,
                                   minpos_base = c("ij","triplet"),
@@ -549,7 +551,6 @@
                                   alr_spline_spar = NULL,
                                   alr_spline_cv = TRUE,
                                   nz_partner_min_frac = 0.15) {
-  transform     <- match.arg(transform)
   zero_mode_alr <- match.arg(zero_mode_alr)
   minpos_base   <- match.arg(minpos_base)
   smooth_scale  <- match.arg(smooth_scale)
@@ -562,12 +563,12 @@
   df$rest_raw <- pmax(0, 1 - df$xi_raw - df$xj_raw)
 
   by_s <- split(seq_len(nrow(df)), df$subject)
-  lagv <- function(v) unsplit(lapply(by_s, function(ix) dplyr::lag(v[ix], lag)), df$subject)
+  lagv <- function(v) unsplit(lapply(by_s, function(ix) dplyr::lag(v[ix], .PCLV_CORE_LAG)), df$subject)
   diff_over_dt <- function(v, t) {
     unsplit(lapply(by_s, function(ix) {
       vi <- v[ix]; ti <- t[ix]
-      vi_lag <- dplyr::lag(vi, lag)
-      dt     <- as.numeric(ti - dplyr::lag(ti, lag))
+      vi_lag <- dplyr::lag(vi, .PCLV_CORE_LAG)
+      dt     <- as.numeric(ti - dplyr::lag(ti, .PCLV_CORE_LAG))
       # 하한: subject 내 양의 dt들의 중앙값의 25% (예)
       dt_pos <- dt[is.finite(dt) & dt > 0]
       dt_min <- if (length(dt_pos)) 0.25 * stats::median(dt_pos) else 1
@@ -654,15 +655,9 @@
     if (!is.finite(smooth_edf_mean)) smooth_edf_mean <- NA_real_
   }
 
-  if (transform == "alr") {
-    xi <- lagv(alr_i)
-    xj <- lagv(alr_j)
-    y  <- diff_over_dt(alr_i, df$time)
-  } else {
-    xi <- lagv(df$xi_raw)
-    xj <- lagv(df$xj_raw)
-    y  <- diff_over_dt(alr_i, df$time)  # response stays ΔALR_i/Δt
-  }
+  xi <- lagv(alr_i)
+  xj <- lagv(alr_j)
+  y <- diff_over_dt(alr_i, df$time)
 
   # 파트너 희소성 필터(옵션)
   if (is.finite(nz_partner_min_frac) && nz_partner_min_frac > 0) {
@@ -1369,34 +1364,20 @@
   ))
 }
 
-#' Subject-level projection log-likelihood (indep or Kalman-OU)
+#' Subject-level Kalman-OU projection log-likelihood
 #'
 #' Computes per-subject log-likelihood of held-out data given posterior draws,
-#' either under an independent Gaussian/t-model or via a Kalman filter for OU residuals.
+#' under the Core irregular-time OU process.
 #'
 #' @param draws_df Posterior draws data frame (at least \code{r0,a_ii,a_ij} and noise params).
 #' @param pair_in Test data with columns \code{y,xi,xj,subject,time}.
-#' @param resid_mode Residual mode, e.g. \code{"ou"} or \code{"wn"}.
-#' @param use_t Logical; enable Student-\eqn{t} scoring if \eqn{\nu} available.
-#' @param fit_full Optional full fit to extract \eqn{\nu} when needed.
 #' @param nu_scalar Optional scalar \eqn{\nu} to use if draws lack \eqn{\nu}.
-#' @param elpd_mode One of \code{"indep"} or \code{"kalman"} (default depends on \code{resid_mode}).
 #' @return A list with matrix \code{full} (draws × subjects), \code{subjects}, and \code{n_obs}.
 #' @noRd
 #' @keywords internal
 .proj_loglik_subject <- function(draws_df,
                                  pair_in,
-                                 resid_mode,
-                                 use_t = FALSE,
-                                 fit_full = NULL,
-                                 nu_scalar = NULL,
-                                 elpd_mode = NULL) {
-  # 자동 디폴트: OU면 kalman, 아니면 indep
-  if (is.null(elpd_mode)) {
-    elpd_mode <- if (identical(resid_mode, "ou")) "kalman" else "indep"
-  } else {
-    elpd_mode <- match.arg(elpd_mode, c("indep","kalman"))
-  }
+                                 nu_scalar = .PCLV_CORE_NU) {
   stopifnot(all(c("y", "xi", "xj", "subject") %in% names(pair_in)))
   subs <- unique(pair_in$subject)
   D    <- nrow(draws_df)
@@ -1417,43 +1398,26 @@
   }
   dt_all <- mk_prev_dt(pair_in)
 
-  # 우선순위: (1) sigma_pred 생성량 → (2) sigma & sd_ou → (3) sigma, sigma_ou, lambda → (4) sigma
-  if (resid_mode == "ou") {
-    if ("sigma_pred" %in% names(draws_df)) {
-      sigma_pred <- draws_df$sigma_pred
-    } else if (all(c("sigma", "sd_ou") %in% names(draws_df))) {
-      sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sd_ou^2)
-    } else if (all(c("sigma", "sigma_ou", "lambda") %in% names(draws_df))) {
-      sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sigma_ou^2 / (2 * pmax(draws_df$lambda, 1e-8)))
-    } else {
-      sigma_pred <- draws_df$sigma
-    }
+  if ("sigma_pred" %in% names(draws_df)) {
+    sigma_pred <- draws_df$sigma_pred
+  } else if (all(c("sigma", "sd_ou") %in% names(draws_df))) {
+    sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sd_ou^2)
+  } else if (all(c("sigma", "sigma_ou", "lambda") %in% names(draws_df))) {
+    sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sigma_ou^2 / (2 * pmax(draws_df$lambda, 1e-8)))
   } else {
-    # "wn"
     sigma_pred <- draws_df$sigma
   }
 
-  nu_vec <- NULL
-  if (isTRUE(use_t)) {
-    if ("nu" %in% names(draws_df)) {
-      nu_vec <- draws_df$nu                     # 1) prefer estimated df (if modeled)
-    } else if (!is.null(nu_scalar) && is.finite(nu_scalar)) {
-      nu_vec <- rep(nu_scalar, nrow(draws_df))  # 2) fallback to fixed df from wrapper
-    } else if (!is.null(fit_full)) {
-      nu_draws <- try(fit_full$draws("nu"), silent = TRUE)
-      if (!inherits(nu_draws, "try-error") &&
-          !is.null(nu_draws)) {
-        nu_vec <- as.numeric(posterior::as_draws_df(nu_draws)[["nu"]])
-      }
-    }
+  nu_vec <- if ("nu" %in% names(draws_df)) {
+    draws_df$nu
+  } else {
+    rep(nu_scalar, nrow(draws_df))
   }
-  # If df unavailable, fall back to Normal scoring downstream
-  use_t <- isTRUE(use_t) && !is.null(nu_vec)
 
   loglik_full <- matrix(NA_real_, nrow = D, ncol = Ssub)
   n_obs_vec   <- integer(Ssub)
 
-  # --- 칼만필터 기반 OU 주변우도 (resid_mode="ou" & elpd_mode="kalman") ---
+  # --- 칼만필터 기반 OU 주변우도 (canonical Core) ---
   .ou_kf_ll_one_subject <- function(draws_df, y, xi, xj, tvec) {
     J <- length(y)
     if (J == 0) return(rep(NA_real_, nrow(draws_df)))
@@ -1466,12 +1430,8 @@
     y_rep  <- matrix(rep(y, each = nrow(draws_df)), nrow = nrow(draws_df))
 
     # 측정잡음 분산 R (t면 ν/(ν-2) 팩터로 가우시안 근사)
-    if (isTRUE(use_t)) {
-      t_fac <- ifelse(nu_vec > 2, nu_vec/(nu_vec - 2), 5.0)
-      R <- (draws_df$sigma^2) * t_fac
-    } else {
-      R <- (draws_df$sigma^2)
-    }
+    t_fac <- ifelse(nu_vec > 2, nu_vec / (nu_vec - 2), 5.0)
+    R <- (draws_df$sigma^2) * t_fac
     R <- pmax(R, 1e-10)
 
     # OU 이산화: a_t, q_t
@@ -1485,10 +1445,7 @@
     } else if (all(c("sigma_ou","lambda") %in% names(draws_df))) {
       sd2 <- (draws_df$sigma_ou^2) / (2 * pmax(draws_df$lambda, 1e-8))
     } else {
-      # 정보 부족 → 독립 근사 fallback
-      return(matrixStats::rowSums2(
-        dnorm(y_rep, mean = mu, sd = matrix(sigma_pred, nrow = nrow(draws_df), ncol = J), log = TRUE)
-      ))
+      stop("OU scoring requires sd_ou or sigma_ou with lambda.")
     }
 
     # 필터 초기화: e0 ~ N(0, sd2)
@@ -1580,31 +1537,7 @@
     J  <- length(ix)
     n_obs_vec[s_idx] <- J
 
-    if (identical(resid_mode, "ou") && identical(elpd_mode, "kalman")) {
-      ll_f <- .ou_kf_ll_one_subject(draws_df, y, xi, xj, tvec)
-    } else {
-      # 독립 근사(레거시)
-      r0_mat  <- matrix(draws_df$r0, nrow = D, ncol = J)
-      aii_xi  <- tcrossprod(draws_df$a_ii, xi)
-      aij_xj  <- tcrossprod(draws_df$a_ij, xj)
-      mu_full <- r0_mat + aii_xi + aij_xj
-      sig_mat <- matrix(sigma_pred, nrow = D, ncol = J)
-      y_mat   <- matrix(rep(y, each = D), nrow = D, ncol = J)
-      if (!is.null(nu_vec)) {
-        nu_mat <- matrix(nu_vec, nrow = D, ncol = J)
-        ll_f <- rowSums(stats::dt((y_mat - mu_full) / sig_mat,
-                                  df = nu_mat,
-                                  log = TRUE
-        ) - log(sig_mat))
-      } else {
-        ll_f <- rowSums(stats::dnorm(
-          y_mat,
-          mean = mu_full,
-          sd = sig_mat,
-          log = TRUE
-        ))
-      }
-    }
+    ll_f <- .ou_kf_ll_one_subject(draws_df, y, xi, xj, tvec)
     loglik_full[, s_idx] <- ll_f
   }
   list(full = loglik_full, subjects = subs, n_obs = n_obs_vec)
@@ -1735,9 +1668,6 @@
 #' @param sample_args_base Base sampler args (re-adapts per fold).
 #' @param pair_in Full input data frame.
 #' @param tr,te Character vectors of train/test subjects.
-#' @param resid_mode Residual mode string.
-#' @param use_t Logical; enable t-scoring if df is available.
-#' @param elpd_mode \code{"indep"} or \code{"kalman"}.
 #' @param nu_fixed_override Optional fixed \eqn{\nu} for all folds.
 #' @param sample_args_override Optional override of sampler args.
 #' @param seed_override Deterministic seed per fold.
@@ -1750,22 +1680,13 @@
                                 pair_in,
                                 tr,
                                 te,
-                                resid_mode,
                                 max_retries = 3,
-                                use_t = FALSE,
-                                elpd_mode = NULL,
                                 silent_sampler = TRUE,
                                 nu_fixed_override = NULL,
                                 sample_args_override = NULL,
                                 freeze_retry_hypers = FALSE,
                                 seed_override = NULL,
                                 min_pairs = min_pairs) {
-  # 자동 디폴트: OU면 kalman, 아니면 indep
-  if (is.null(elpd_mode)) {
-    elpd_mode <- if (identical(resid_mode, "ou")) "kalman" else "indep"
-  } else {
-    elpd_mode <- match.arg(elpd_mode, c("indep","kalman"))
-  }
   pts <- .build_train_test(pair_in, tr, te)
   if (inherits(pts, "pclv_failure")) {
     return(pts)
@@ -1828,8 +1749,8 @@
     max_retries = max_retries,
     # ν 고정 정책: override가 주어지면 그 값으로 **고정**(bump 금지)
     # (훈련 진단만으로 결정된 사전 규칙 → 누출 아님)
-    nu_fix      = if (is.null(nu_fixed_override)) nu_fix else nu_fixed_override,
-    max_nu_cap  = if (is.null(nu_fixed_override)) 7      else nu_fixed_override,
+    nu_fix = if (is.null(nu_fixed_override)) .PCLV_CORE_NU else nu_fixed_override,
+    max_nu_cap = if (is.null(nu_fixed_override)) .PCLV_CORE_NU else nu_fixed_override,
     ebfmi_thresh = 0.30,
     silent_sampler = silent_sampler,
     tag = "kfold",
@@ -1842,27 +1763,10 @@
 
   d <- .safe_draws_df(fit)
   te_df <- pts$test
-  # Resolve df for Student-t scoring without relying on rlang::`%||%`
-  use_t_flag <- isTRUE(use_t)
-  nu_for_score <- NULL
-  if (use_t_flag) {
-    if (!is.null(tryfit$used_nu) && is.finite(tryfit$used_nu)) {
-      nu_for_score <- tryfit$used_nu
-    } else if (!is.null(stan_list_base$nu_fixed) &&
-               is.finite(stan_list_base$nu_fixed)) {
-      nu_for_score <- stan_list_base$nu_fixed
-    } else if (exists("nu_fix") && is.finite(nu_fix)) {
-      nu_for_score <- nu_fix
-    }
-  }
   llm <- .proj_loglik_subject(
-    draws_df   = d,
-    pair_in    = te_df,
-    resid_mode = resid_mode,
-    use_t      = use_t_flag,
-    fit_full   = fit,
-    nu_scalar  = nu_for_score,
-    elpd_mode  = elpd_mode
+    draws_df = d,
+    pair_in = te_df,
+    nu_scalar = .PCLV_CORE_NU
   )
   # --- NEW: subject별 ELPD 벡터와 fold diagnostics 구성 ---
   # llm$full: (draws x n_test_subjects) 행렬, llm$subjects: 테스트 subject 벡터
@@ -1927,21 +1831,12 @@
                            K = 5,
                            R = 3,
                            seed = 123,
-                           resid_mode,
-                           use_t = FALSE,
-                           elpd_mode = NULL,
                            silent_sampler = TRUE,
                            max_retries = 3,
                            n_workers_kfold = 1L,
                            min_pairs = 4,
                            nu_fixed_kfold = NULL,         # ← 1차 K-fold에서 고정할 ν (예: 본계산 used_nu)
                            freeze_retry_hypers = FALSE) { # ← 폴드 내 bump 금지 여부
-  # 자동 디폴트: OU → "kalman", WN → "indep"
-  if (is.null(elpd_mode)) {
-    elpd_mode <- if (identical(resid_mode, "ou")) "kalman" else "indep"
-  } else {
-    elpd_mode <- match.arg(elpd_mode, c("indep","kalman"))
-  }
   splits <- .make_repkfold_splits(pair_in$subject, K, R, seed)
   # --- compact split manifest for reproducibility (r,k,test_subjects)
   splits_df <- ({
@@ -1996,10 +1891,7 @@
       pair_in,
       task$tr,
       task$te,
-      resid_mode,
-      use_t,
-      elpd_mode = elpd_mode,
-      silent_sampler,
+      silent_sampler = silent_sampler,
       max_retries = max_retries,
       nu_fixed_override = nu_fixed_kfold,
       freeze_retry_hypers = freeze_retry_hypers,
@@ -2148,7 +2040,7 @@
     elpd_subject_ppd = elpd_subject_ppd,
     elpd_mean    = elpd_mean,
     elpd_mean_ppd= elpd_mean_ppd,
-    elpd_method  = if (identical(elpd_mode,"kalman") && identical(resid_mode,"ou")) "kalman-ou" else "indep",
+    elpd_method = "kalman-ou",
     n_folds_ok = n_ok,
     n_folds_fail = n_fail,
     # reproducibility payload for pseudo-BMA/stacking
@@ -2190,9 +2082,6 @@
   sm_mat               <- ctx$sm_mat
   eps                  <- ctx$eps
   min_pairs            <- ctx$min_pairs
-  compute_elpd         <- ctx$compute_elpd
-  transform            <- ctx$transform
-  lag                  <- ctx$lag
   zero_mode_alr        <- ctx$zero_mode_alr
   minpos_alpha         <- ctx$minpos_alpha
   minpos_base          <- ctx$minpos_base
@@ -2205,9 +2094,6 @@
   alr_spline_cv        <- ctx$alr_spline_cv
   nz_partner_min_frac  <- ctx$nz_partner_min_frac
   max_retries          <- ctx$max_retries
-  nu_fix               <- ctx$nu_fix
-  use_student_t        <- ctx$use_student_t
-  elpd_mode            <- ctx$elpd_mode
   chains               <- ctx$chains
   iter_warmup          <- ctx$iter_warmup
   iter_sampling        <- ctx$iter_sampling
@@ -2221,7 +2107,6 @@
   n_workers_kfold_eff  <- ctx$n_workers_kfold_eff
   kfold_K              <- ctx$kfold_K
   kfold_R              <- ctx$kfold_R
-  resid_mode           <- ctx$resid_mode
 
   # PF 옵션
   use_pathfinder_init <- isTRUE(ctx$use_pathfinder_init)
@@ -2261,8 +2146,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
 
   pair_in <- .make_pair_inputs_glv(
     pair_df = pair_df,
-    transform = transform,
-    lag = lag,
     zero_mode_alr = zero_mode_alr,
     minpos_alpha = minpos_alpha,
     minpos_base  = minpos_base,
@@ -2339,9 +2222,9 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       sid = as.integer(factor(pair_in$subject)),
       prev = prev,
       dt   = dtv,
-      use_student_t = as.integer(isTRUE(use_student_t)),
+      use_student_t = as.integer(.PCLV_CORE_USE_STUDENT_T),
       # 0/1
-      nu_fixed      = nu_fix                              # 시도별 래퍼에서 업데이트됨
+      nu_fixed = .PCLV_CORE_NU
     )
   )
 
@@ -2484,10 +2367,10 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     base_args = base_args,
     stan_list = stan_list,
     max_retries = max_retries,
-    nu_fix = nu_fix,
+    nu_fix = .PCLV_CORE_NU,
     silent_sampler = silent_sampler,
     ebfmi_thresh = 0.30,
-    max_nu_cap = 7,
+    max_nu_cap = .PCLV_CORE_NU,
     tag = tag_lbl
   )
 
@@ -2509,7 +2392,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   } else {
     d <- .safe_draws_df(fit_full)  # a_ij, a_ii, r0, tau_r, sigma, sigma_ou, lambda, ...
   }
-  if (isTRUE(use_student_t) && !("nu" %in% names(d))) {
+  if (!("nu" %in% names(d))) {
     d$nu <- rep(used_nu, nrow(d))
   }
 
@@ -2532,7 +2415,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   kfold_n_ok   <- NA_integer_
   kfold_n_fail <- NA_integer_
 
-  if (isTRUE(compute_elpd)) {
+  {
     seed_for_kfold <- if (is.null(final_args_main$seed))
       seed_main
     else
@@ -2563,9 +2446,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       K = kfold_K,
       R = kfold_R,
       seed = seed_for_kfold,
-      resid_mode = resid_mode,
-      use_t = isTRUE(use_student_t),
-      elpd_mode = elpd_mode,
       silent_sampler = silent_sampler,
       n_workers_kfold = n_workers_kfold_eff,
       max_retries = max_retries,
@@ -2583,83 +2463,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NA_integer_
     else
       kfold$n_folds_fail
-    # 폴드 훈련-진단 실패가 하나라도 있으면 ν=7로 K-fold **전부 재실행** ---
-    # (정보 누출 아님: 테스트 ELPD/관측은 보지 않고, 훈련 진단만 사용)
     kfold_outer_rounds_local <- 1L
-    bad_count <- 0L
-    if (!is.null(kfold) && is.data.frame(kfold$fold_diag) && nrow(kfold$fold_diag)) {
-      fd <- kfold$fold_diag
-      bad_flag <- with(fd,
-                       (is.finite(n_divergent)     & n_divergent     > 0) |
-                         (is.finite(ebfmi_min)       & ebfmi_min       < 0.30) |
-                         (is.finite(treedepth_hits)  & treedepth_hits  > 0) |
-                         (is.finite(worst_rhat)      & worst_rhat      >= 1.05) |
-                         (is.finite(min_ess_bulk)    & min_ess_bulk    < 400)
-      )
-      bad_count <- sum(bad_flag, na.rm = TRUE)
-    }
-    if (isTRUE(bad_count > 0) && is.finite(nu_kfold_main) && nu_kfold_main < 7) {
-      if (progress_local != "none")
-        cat(sprintf("%s pair: k-fold retrial triggered by TRAIN diagnostics → nu=7 (global)\n", pair_tag))
-      kfold <- .repkfold_eval(
-        mod = mod,
-        stan_list_base   = stan_list,
-        sample_args_base = sargs_kfold,
-        pair_in = pair_in,
-        K = kfold_K,
-        R = kfold_R,
-        seed = seed_for_kfold,
-        resid_mode = resid_mode,
-        use_t = isTRUE(use_student_t),
-        elpd_mode = elpd_mode,
-        silent_sampler = silent_sampler,
-        n_workers_kfold = n_workers_kfold_eff,
-        max_retries = max_retries,
-        nu_fixed_kfold = 7,                   # ← 글로벌 한 단계 상승(최대 1회)
-        freeze_retry_hypers = TRUE
-      )
-      kfold_outer_rounds_local <- 2L
-      if (progress_local != "none")
-        cat(sprintf("%s pair: k-fold evaluation (nu=7) completed\n", pair_tag))
-      kfold_n_ok   <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_ok
-      kfold_n_fail <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_fail
-
-
-      # --- 본계산도 ν=7로 일관화: 테스트 점수는 쓰지 않고, K-fold '훈련 진단' 트리거만으로 재적합 ---
-      # 누출이 아닌 이유:
-      #  (1) ν=7 결정은 오직 K-fold '훈련' 진단(다이버전스/E-BFMI/treedepth/R-hat/ESS)으로만 내림
-      #  (2) 테스트 ELPD/관측치는 보지 않으며, 선택/재적합 판단에 사용되지 않음
-      #  (3) 최종 보고는 사양 확정 후 단일 CV 및 본계산 결과만 사용
-      if (is.finite(nu_final) && nu_final < 7) {
-        if (progress_local != "none")
-          cat(sprintf("%s pair: main refit with nu=7 for spec consistency\n", pair_tag))
-        base_args_refit <- final_args_main
-        # 리핏 시 bump/하이퍼 변경 금지, seed/체인 동일, metric 그대로
-        base_args_refit$data$nu_fixed <- 7
-        base_args_refit$adapt_delta   <- final_args_main$adapt_delta
-        base_args_refit$max_treedepth <- final_args_main$max_treedepth
-        base_args_refit$metric        <- final_args_main$metric
-        # 리핏은 한 번만, bump 금지
-        refit_try <- .sample_with_retry(
-          mod = mod,
-          base_args = base_args_refit,
-          stan_list = base_args_refit$data,
-          max_retries = 0,
-          nu_fix = 7,
-          max_nu_cap = 7,
-          silent_sampler = silent_sampler,
-          freeze_retry_hypers = TRUE,
-          tag = sprintf("%s\u2192%s main-refit-nu7", partner, target)
-        )
-        fit_full <- refit_try$fit
-        diag     <- refit_try$diag
-        nu_final <- 7
-        d <- .safe_draws_df(fit_full)
-        aij <- d$a_ij; aii <- d$a_ii
-        p_sign2_dir  <- .clip01(2 * pmin(mean(aij > 0), mean(aij < 0)))
-        p_sign2_self <- .clip01(2 * pmin(mean(aii > 0), mean(aii < 0)))
-      }
-    }
   }
 
 
@@ -2699,7 +2503,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     kfold_method = if (is.null(kfold)) NA_character_ else kfold$elpd_method,
 
     # 용어 명확화: 바깥 재평가 라운드(outer)만 카운트
-    kfold_outer_rounds = if (isTRUE(compute_elpd)) kfold_outer_rounds_local else 0L,
+    kfold_outer_rounds = kfold_outer_rounds_local,
     kfold_failed = is.null(kfold) ||
       (!is.null(kfold$n_folds_fail) && kfold$n_folds_fail > 0L),
     kfold_n_folds_ok   = if (is.null(kfold))

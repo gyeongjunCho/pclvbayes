@@ -116,8 +116,6 @@ test_that("lagged predictors and delta ALR rates stay within subjects", {
 
   out <- pclvbayes:::.make_pair_inputs_glv(
     pair_df,
-    transform = "alr",
-    lag = 1,
     zero_mode_alr = "fixed",
     eps_fixed = 1e-12,
     alr_cap = 100,
@@ -269,7 +267,7 @@ test_that("full-data validation occurs on post-lag ALR predictors", {
     data.frame(subject = "A", time = 0:5, xi_raw = xi, xj_raw = xj)
   }
   build <- function(x) pclvbayes:::.make_pair_inputs_glv(
-    x, transform = "alr", lag = 1, zero_mode_alr = "fixed",
+    x, zero_mode_alr = "fixed",
     eps_fixed = 1e-8, alr_cap = 12, smooth_scale = "logra",
     nz_partner_min_frac = 0
   )
@@ -313,10 +311,32 @@ test_that("fold validation uses training predictors without changing y", {
   expect_equal(changed$train$xi, split$train$xi)
   expect_equal(changed$train$xj, split$train$xj)
 })
-test_that("directed fitting currently applies a fixed effective ALR cap", {
+test_that("directed fitting uses the fixed canonical Core choices", {
   expect_false("standardize_by_subject" %in% names(formals(pclvbayes::fit_pclv_bayes)))
   expect_false("alr_cap" %in% names(formals(pclvbayes::fit_pclv_bayes)))
   expect_equal(pclvbayes:::.PCLV_CORE_ALR_CAP, 12)
+  deleted <- c(
+    "transform", "lag", "resid_mode", "use_student_t", "nu_fix",
+    "compute_elpd", "elpd_mode", "spline_df", "spline_spar", "spline_cv"
+  )
+  expect_length(intersect(deleted, names(formals(pclvbayes::fit_pclv_bayes))), 0)
+  expect_identical(pclvbayes:::.PCLV_CORE_TRANSFORM, "alr")
+  expect_identical(pclvbayes:::.PCLV_CORE_LAG, 1L)
+  expect_identical(pclvbayes:::.PCLV_CORE_RESID_MODE, "ou")
+  expect_true(pclvbayes:::.PCLV_CORE_USE_STUDENT_T)
+  expect_identical(pclvbayes:::.PCLV_CORE_NU, 5)
+  expect_true(pclvbayes:::.PCLV_CORE_COMPUTE_ELPD)
+  expect_identical(pclvbayes:::.PCLV_CORE_ELPD_MODE, "kalman")
+  expect_null(pclvbayes:::.PCLV_CORE_SPLINE$df)
+  expect_null(pclvbayes:::.PCLV_CORE_SPLINE$spar)
+  expect_true(pclvbayes:::.PCLV_CORE_SPLINE$cv)
+
+  expect_false(any(c("transform", "lag") %in%
+                     names(formals(pclvbayes:::.make_pair_inputs_glv))))
+  expect_false(any(c("resid_mode", "use_t", "elpd_mode") %in%
+                     names(formals(pclvbayes:::.fold_fit_and_score))))
+  expect_false(any(c("resid_mode", "use_t", "elpd_mode") %in%
+                     names(formals(pclvbayes:::.repkfold_eval))))
 
   observed <- new.env(parent = emptyenv())
 
@@ -348,9 +368,6 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
     sm_mat = matrix(numeric(), 0, 0),
     eps = 1e-6,
     min_pairs = 1,
-    compute_elpd = FALSE,
-    transform = "alr",
-    lag = 1,
     zero_mode_alr = "fixed",
     minpos_alpha = 0.5,
     minpos_base = "ij",
@@ -363,9 +380,6 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
     alr_spline_cv = TRUE,
     nz_partner_min_frac = 0,
     max_retries = 0,
-    nu_fix = 5,
-    use_student_t = TRUE,
-    elpd_mode = "kalman",
     chains = 1,
     iter_warmup = 1,
     iter_sampling = 1,
@@ -379,7 +393,6 @@ test_that("directed fitting currently applies a fixed effective ALR cap", {
     n_workers_kfold_eff = 1,
     kfold_K = 2,
     kfold_R = 1,
-    resid_mode = "ou",
     use_pathfinder_init = FALSE,
     pf_num_paths = 1,
     pf_draws = 1,
@@ -540,7 +553,7 @@ test_that("K-fold aggregation preserves unavailable and partial evidence", {
       subject = rep(c("A", "B"), each = 2), time = rep(0:1, 2),
       y = 1:4, xi = c(1, 2, 3, 4), xj = c(2, 4, 6, 8)
     ),
-    K = 2, R = 2, resid_mode = "ou", n_workers_kfold = 1,
+    K = 2, R = 2, n_workers_kfold = 1,
     min_pairs = 1
   )
 
@@ -609,4 +622,24 @@ test_that("pointwise ELPD and weights require successful common evidence", {
   } else {
     expect_equal(nrow(stacking), 0)
   }
+})
+
+test_that("canonical projection scoring is Kalman OU with fixed Student-t nu", {
+  draws <- data.frame(
+    r0 = c(0, 0.1), a_ii = c(-0.2, -0.1), a_ij = c(0.3, 0.2),
+    sigma = c(0.4, 0.5), sd_ou = c(0.2, 0.25), lambda = c(0.7, 0.8),
+    tau_r = c(0, 0)
+  )
+  held_out <- data.frame(
+    subject = c("A", "A", "B", "B"), time = c(0, 2, 1, 5),
+    y = c(0.1, 0.2, -0.1, 0.3), xi = c(-1, 0, 0.5, 1),
+    xj = c(0.2, 0.4, -0.2, 0.1)
+  )
+  scored <- pclvbayes:::.proj_loglik_subject(draws, held_out)
+  expect_equal(dim(scored$full), c(2, 2))
+  expect_true(all(is.finite(scored$full)))
+  expect_equal(scored$subjects, c("A", "B"))
+  expect_equal(scored$n_obs, c(2L, 2L))
+  expect_identical(names(formals(pclvbayes:::.proj_loglik_subject)),
+                   c("draws_df", "pair_in", "nu_scalar"))
 })
