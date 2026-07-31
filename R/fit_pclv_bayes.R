@@ -194,6 +194,19 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   pf_psis_resample = TRUE
 )
 {
+  public_control_names <- setdiff(names(formals(sys.function())),
+                                  c("physeq", "subject_col", "time_col", "taxa_vec"))
+  validated <- .validate_fit_pclv_inputs(
+    physeq, subject_col, time_col, taxa_vec,
+    controls = mget(public_control_names, envir = environment(), inherits = FALSE)
+  )
+  for (nm in names(validated$controls))
+    assign(nm, validated$controls[[nm]], envir = environment())
+  subject_col <- validated$subject_col
+  time_col <- validated$time_col
+  taxa_vec <- validated$taxa_vec
+  meta_df <- validated$meta_df
+  mat_rel <- validated$mat_rel
 
   try({
     .cleanup_stale_csv_start <- function(older_than_hours = 24) {
@@ -219,12 +232,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     .cleanup_stale_csv_start(older_than_hours = 24)
   }, silent = TRUE)
 
-
-  zero_mode_alr <- match.arg(zero_mode_alr)
-  minpos_base   <- match.arg(minpos_base)
-  smooth_scale  <- match.arg(smooth_scale)
-  progress      <- match.arg(progress)
-
   # Stan model (canonical Student-t likelihood)
   mod <- tryCatch(
     get_pclv_model(quiet = quiet),
@@ -232,15 +239,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
                                       list(message = conditionMessage(e)))
   )
   if (.is_pclv_failure(mod)) return(mod)
-
-  # metadata & matrix
-  meta_df <- .get_sample_meta(physeq, subject_col, time_col)
-  mat_rel <- .get_abund_matrix_precomputed(physeq)
-  if (is.null(taxa_vec))
-    taxa_vec <- phyloseq::taxa_names(physeq)
-  taxa_vec <- intersect(taxa_vec, rownames(mat_rel))
-  if (length(taxa_vec) < 2)
-    stop("taxa_vec must contain at least 2 taxa.")
 
   # legacy smoothing on log(RA+eps)
   sm_mat <- .precompute_spline_smoothed(
