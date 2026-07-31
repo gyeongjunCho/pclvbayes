@@ -51,7 +51,7 @@ test_that("malformed initialization stops and retry exhaustion exposes provenanc
   expect_length(out$retry_history, 2)
   expect_equal(vapply(out$retry_history, `[[`, integer(1), "attempt"), 1:2)
   expect_identical(out$failure$details$attempt_history, out$retry_history)
-  expect_equal(vapply(out$retry_history, `[[`, numeric(1), "seed"), c(9, 9))
+  expect_equal(vapply(out$retry_history, `[[`, numeric(1), "seed"), c(9, 10))
   expect_equal(vapply(out$retry_history, `[[`, character(1), "initialization_method"),
                c("scalar", "scalar"))
   expect_true(all(vapply(out$retry_history, `[[`, character(1), "status") == "failed"))

@@ -1012,7 +1012,7 @@
         }
       }
       # 리트라이에서도 seed 고정
-      sample_args$seed <- base_args$seed
+      sample_args$seed <- as.integer(base_args$seed + attempt)
     }
 
     # --- init 가공: 타입 안전 처리 ---
@@ -1150,6 +1150,44 @@
   )
 }
 
+.pair_direction_seeds <- function(seed_base, idx_i, idx_j) {
+  c(ij = as.integer(seed_base + 100000L * idx_i + 1000L * idx_j + 1L),
+    ji = as.integer(seed_base + 100000L * idx_i + 1000L * idx_j + 2L))
+}
+
+.make_pair_tasks <- function(taxa_vec, seed_base) {
+  idx <- utils::combn(seq_along(taxa_vec), 2L, simplify = FALSE)
+  lapply(seq_along(idx), function(k) {
+    ij <- idx[[k]]
+    list(task_index = k, idx_i = ij[[1L]], idx_j = ij[[2L]],
+         taxon_i = taxa_vec[[ij[[1L]]]], taxon_j = taxa_vec[[ij[[2L]]]],
+         seed_base = as.integer(seed_base),
+         direction_seeds = .pair_direction_seeds(seed_base, ij[[1L]], ij[[2L]]))
+  })
+}
+
+.execute_pair_task <- function(task, taxa_vec, run_one, core_ctx, scheduling,
+                               progress = "none", mute_logs = TRUE) {
+  task_ctx <- core_ctx
+  task_ctx$n_workers_kfold_eff <- scheduling$n_workers_kfold_eff
+  result <- .run_pair(
+    task$idx_i, task$idx_j, kfold_K = task_ctx$kfold_K, kfold_R = task_ctx$kfold_R,
+    taxa_vec = taxa_vec, .run_one = run_one, ctx = task_ctx,
+    progress = progress, mute_logs = mute_logs, seed_base = task$seed_base
+  )
+  list(task_index = task$task_index, result = result,
+       direction_seeds = task$direction_seeds)
+}
+
+.assemble_pair_outcomes <- function(outcomes, tasks) {
+  if (length(outcomes) != length(tasks)) stop("Pair outcome count invariant violated.")
+  ord <- order(vapply(outcomes, `[[`, integer(1), "task_index"))
+  observed <- vapply(outcomes[ord], `[[`, integer(1), "task_index")
+  expected <- vapply(tasks, `[[`, integer(1), "task_index")
+  if (!identical(observed, expected)) stop("Pair task ordering invariant violated.")
+  dplyr::bind_rows(lapply(outcomes[ord], `[[`, "result"))
+}
+
 #' Run both directions (j→i and i→j) for a taxon pair
 #'
 #' Executes \code{.run_one()} twice with deterministic seeds and aggregates
@@ -1171,8 +1209,9 @@
   ti <- taxa_vec[[idx_i]]
   pj <- taxa_vec[[idx_j]]
 
-  seed_ij <- as.integer(seed_base + 100000L * idx_i + 1000L * idx_j + 1L)
-  seed_ji <- as.integer(seed_base + 100000L * idx_i + 1000L * idx_j + 2L)
+  direction_seeds <- .pair_direction_seeds(seed_base, idx_i, idx_j)
+  seed_ij <- direction_seeds[["ij"]]
+  seed_ji <- direction_seeds[["ji"]]
 
   res_ij <- .run_one(
     target = ti, partner = pj,

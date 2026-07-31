@@ -294,7 +294,6 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     quiet = quiet,
     silent_sampler = silent_sampler,
     # K-fold/병렬
-    n_workers_kfold_eff = n_workers_kfold_eff,
     kfold_K = kfold_K,
     kfold_R = kfold_R,
 
@@ -323,159 +322,57 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     on.exit(options(old_opt), add = TRUE)  # 함수 종료 시 원복
   }
 
-  # outer loop (both directions per pair) --------------------------------
-  out <- list()
-  k <- 0L
-  n_taxa  <- length(taxa_vec)
-  n_tasks <- 2L * base::choose(n_taxa, 2L)
-  task_k  <- 0L
+  # Canonical unordered-pair tasks; scheduling is the only mode-specific layer.
+  tasks <- .make_pair_tasks(taxa_vec, seed)
+  scheduling <- list(n_workers_kfold_eff = n_workers_kfold_eff)
+  run_task <- function(task, mute_logs) {
+    .execute_pair_task(
+      task = task, taxa_vec = taxa_vec, run_one = .run_one,
+      core_ctx = ctx, scheduling = scheduling,
+      progress = progress, mute_logs = mute_logs
+    )
+  }
 
   if (n_workers_outer <= 1L) {
-    # ====== 순차 모드: 기존 진행바 유지 ======
+    pb <- NULL
     if (progress == "bar") {
-      pb <- utils::txtProgressBar(min = 0,
-                                  max = n_tasks,
-                                  style = 3)
-      on.exit(try(close(pb), silent = TRUE)
-              , add = TRUE)
+      pb <- utils::txtProgressBar(min = 0, max = length(tasks), style = 3)
+      on.exit(try(close(pb), silent = TRUE), add = TRUE)
     }
-
-    say_every_pairs <- 10L
-
-    bump <- function() {
-      task_k <<- task_k + 1L
-      if (progress == "bar" && task_k %% progress_every == 0L) {
-        utils::setTxtProgressBar(pb, task_k)
-      }
+    out <- vector("list", length(tasks))
+    for (task_index in seq_along(tasks)) {
+      out[[task_index]] <- run_task(tasks[[task_index]], mute_logs = FALSE)
+      if (!is.null(pb) && task_index %% progress_every == 0L)
+        utils::setTxtProgressBar(pb, task_index)
+      if (progress == "verbose")
+        cat(sprintf("pair %s-%s done\n", tasks[[task_index]]$taxon_i, tasks[[task_index]]$taxon_j))
     }
-    log_once <- function(tag, res, i_nm, j_nm) {
-      if (progress != "verbose")
-        return(invisible())
-      if (is.null(res)) {
-        cat(sprintf(
-          "[%d/%d] %s: %s → %s | skipped\n",
-          task_k,
-          n_tasks,
-          tag,
-          j_nm,
-          i_nm
-        ))
-        return(invisible())
-      }
-      d <- res$diag
-      cat(
-        sprintf(
-          "[%d/%d] %s: %s → %s | div=%s ebfmi_min=%s rhat=%s ess_bulk=%s\n",
-          task_k,
-          n_tasks,
-          tag,
-          j_nm,
-          i_nm,
-          ifelse(is.finite(d$n_divergent), d$n_divergent, NA),
-          ifelse(
-            is.finite(d$ebfmi_min),
-            sprintf("%.3f", d$ebfmi_min),
-            NA
-          ),
-          ifelse(
-            is.finite(d$worst_rhat),
-            sprintf("%.3f", d$worst_rhat),
-            NA
-          ),
-          ifelse(is.finite(d$min_ess_bulk), d$min_ess_bulk, NA)
-        )
-      )
-    }
-
-    for (i in 1:(n_taxa - 1L)) {
-      for (j in (i + 1L):n_taxa) {
-        row <- .run_pair(
-          i, j,
-          taxa_vec = taxa_vec,
-          .run_one  = .run_one,
-          ctx = ctx,
-          progress = progress,
-          mute_logs = FALSE, seed_base = seed,
-        )
-        # .run_one 내부에서 두 번 호출되므로 2 step 증가
-        bump()
-        bump()
-
-        # 진행바 한 줄 위에 누적 메시지(요약) 출력 후, 바를 다시 그려서 레이아웃 복구
-        if (progress == "bar" && (task_k %% (2L * say_every_pairs) == 0L)) {
-          pct <- 100 * task_k / n_tasks
-          cat(sprintf(
-            "\ncompleted %d / %d tasks (%.1f%%) — last pair %s-%s\n",
-            task_k / 2L, n_tasks / 2L, pct, taxa_vec[i], taxa_vec[j]
-          ))
-          utils::setTxtProgressBar(pb, task_k)
-        }
-
-        k <- k + 1L
-        out[[k]] <- row
-        if (progress == "verbose") {
-          cat(sprintf("pair %s-%s done\n", taxa_vec[i], taxa_vec[j]))
-        }
-      }
-    }
-
   } else {
-    # ====== 병렬 모드: furrr로 쌍 병렬 ======
-    pair_idx <- utils::combn(n_taxa, 2, simplify = FALSE)
-
-    # furrr plan 설정 (PSOCK 권장)
-    op <- future::plan()
-    on.exit(future::plan(op), add = TRUE)
+    old_plan <- future::plan()
+    on.exit(future::plan(old_plan), add = TRUE)
     future::plan(future::multisession, workers = n_workers_outer)
-
-    # 병렬에서는 내부 로그를 끄고, progressr가 있으면 진행바 표시
     if (has_progressr && identical(progress, "bar")) {
       progressr::with_progress({
-        p <- progressr::progressor(steps = length(pair_idx))
+        progressor <- progressr::progressor(steps = length(tasks))
         out <- furrr::future_map(
-          pair_idx,
-          function(idx) {
-            res <- .run_pair(
-              idx[1], idx[2],
-              taxa_vec = taxa_vec,
-              .run_one  = .run_one,
-              ctx = ctx,
-              kfold_K  = kfold_K,
-              kfold_R  = kfold_R,
-              progress = progress,
-              mute_logs = TRUE, seed_base = seed
-            )
-            # 개별 페어 진행 메시지
-            p(message = sprintf("pair %s-%s", taxa_vec[idx[1]], taxa_vec[idx[2]]),
-              amount = 1)
-            res
+          tasks,
+          function(task) {
+            result <- run_task(task, mute_logs = TRUE)
+            progressor(message = sprintf("pair %s-%s", task$taxon_i, task$taxon_j))
+            result
           },
-          .options = furrr::furrr_options(
-            seed = TRUE,
-            globals = TRUE
-          )
+          .options = furrr::furrr_options(seed = TRUE, globals = TRUE)
         )
       })
     } else {
       out <- furrr::future_map(
-        pair_idx,
-        function(idx) .run_pair(
-          idx[1], idx[2],
-          ctx = ctx,
-          taxa_vec = taxa_vec,
-          .run_one  = .run_one,
-          progress = progress,
-          mute_logs = TRUE, seed_base = seed
-        ),
-        .options = furrr::furrr_options(
-          seed = TRUE,
-          globals = TRUE
-        )
+        tasks, function(task) run_task(task, mute_logs = TRUE),
+        .options = furrr::furrr_options(seed = TRUE, globals = TRUE)
       )
     }
   }
 
-  res <- dplyr::bind_rows(out)
+  res <- .assemble_pair_outcomes(out, tasks)
   rownames(res) <- NULL
 
   cross_tbl <- .mk_cross(res)
