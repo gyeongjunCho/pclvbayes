@@ -226,7 +226,12 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   progress      <- match.arg(progress)
 
   # Stan model (canonical Student-t likelihood)
-  mod <- get_pclv_model(quiet = quiet)
+  mod <- tryCatch(
+    get_pclv_model(quiet = quiet),
+    error = function(e) .pclv_failure("model_loading", "canonical_model_compilation_failed",
+                                      list(message = conditionMessage(e)))
+  )
+  if (.is_pclv_failure(mod)) return(mod)
 
   # metadata & matrix
   meta_df <- .get_sample_meta(physeq, subject_col, time_col)
@@ -245,6 +250,7 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     eps,
     min_unique_times
   )
+  if (inherits(sm_mat, "pclv_failure")) return(sm_mat)
 
   # --------------------------------------------------------
   # --- Avoid nested parallelism: if outer-parallel, disable kfold-parallel
