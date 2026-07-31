@@ -98,7 +98,7 @@
 #' @param eps Small constant for log transform stability.
 #' @param spline_df Optional effective degrees of freedom for \code{smooth.spline}.
 #' @param spline_spar Optional \code{spar} parameter for \code{smooth.spline}.
-#' @param spline_cv Logical; use leave-one-out CV (fallbacks to GCV).
+#' @param spline_cv Logical; use the canonical leave-one-out CV spline only.
 #' @param min_unique_times Minimum unique time points required to fit a spline.
 #' @return A taxa-by-samples numeric matrix of smoothed abundances.
 #' @noRd
@@ -107,6 +107,8 @@
                                         taxa_list = rownames(mat_rel),
                                         eps = 1e-6,
                                         min_unique_times = 3) {
+  time_failure <- .validate_subject_times(meta_df$time, meta_df$subject, "spline_smoothing")
+  if (!is.null(time_failure)) return(time_failure)
   sm_mat <- matrix(NA_real_, nrow = nrow(mat_rel), ncol = ncol(mat_rel),
                    dimnames = dimnames(mat_rel))
   col_idx_all <- match(meta_df$Sample, colnames(mat_rel))
@@ -124,7 +126,8 @@
       vals  <- as.numeric(mat_rel[tx, cols])
 
       ok <- is.finite(times) & is.finite(vals)
-      if (!any(ok)) next
+      if (!any(ok)) return(.pclv_failure("spline_smoothing", "no_finite_abundance",
+                                                list(taxon = tx, subject = sb)))
 
       df   <- data.frame(time = times[ok], val = vals[ok])
       df2  <- stats::aggregate(val ~ time, df, mean)
@@ -143,15 +146,16 @@
           max_df = NULL,
           default_df = 4.0
         )
-        pred_log <- try(as.numeric(stats::approx(
-          x = df2$time, y = rr$yhat, xout = times, rule = 2
-        )$y), silent = TRUE)
-        if (inherits(pred_log, "try-error") || !length(pred_log)) pred_log <- rr$yhat
+        if (.is_pclv_failure(rr)) {
+          rr$details$taxon <- tx; rr$details$subject <- sb
+          return(rr)
+        }
+        pred_log <- rr$yhat[match(times, df2$time)]
       }
 
       if (is.null(pred_log)) {
-        const_log <- mean(log(pmax(vals, 0) + eps))
-        pred_log  <- rep(const_log, length(times))
+        return(.pclv_failure("spline_smoothing", "insufficient_unique_times",
+                             list(taxon = tx, subject = sb)))
       }
 
       vec_pred[idx] <- pmax(exp(pred_log) - eps, 0)
@@ -445,6 +449,16 @@
   c(as.numeric(xi_)[1], as.numeric(xj_)[1], as.numeric(xr_)[1], as.numeric(eps_star)[1])
 }
 
+.validate_subject_times <- function(time, subject, stage = "preprocessing") {
+  if (any(!is.finite(time))) return(.pclv_failure(stage, "non_finite_time", list()))
+  by_subject <- split(seq_along(time), subject)
+  bad <- any(vapply(by_subject, function(ix) {
+    length(ix) > 1L && any(diff(sort(time[ix])) <= 0)
+  }, logical(1)))
+  if (bad) return(.pclv_failure(stage, "non_positive_dt", list()))
+  NULL
+}
+
 .select_smoothed_pair_rows <- function(sm_mat, meta_df, j, i,
                                        min_pairs = 4, min_dt = 1e-8, min_sd = 1e-12) {
   stopifnot(all(c("Sample", "subject", "time") %in% names(meta_df)))
@@ -455,6 +469,8 @@
     xj_raw = pmax(as.numeric(sm_mat[j, sample_idx]), 0)
   )
   pair_df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
+  time_failure <- .validate_subject_times(pair_df$time, pair_df$subject)
+  if (!is.null(time_failure)) return(time_failure)
   by_subject <- split(seq_len(nrow(pair_df)), pair_df$subject)
   keep <- unlist(lapply(by_subject, function(ix) {
     if (length(ix) < 2L) return(integer())
@@ -494,14 +510,14 @@
 }
 
 .delta_alr_over_dt <- function(v, time, subject) {
+  time_failure <- .validate_subject_times(time, subject)
+  if (!is.null(time_failure)) return(time_failure)
   by_subject <- split(seq_along(v), subject)
   unsplit(lapply(by_subject, function(ix) {
     vi <- v[ix]; ti <- time[ix]
     vi_lag <- dplyr::lag(vi, .PCLV_CORE_LAG)
     dt <- as.numeric(ti - dplyr::lag(ti, .PCLV_CORE_LAG))
-    dt_pos <- dt[is.finite(dt) & dt > 0]
-    dt_min <- if (length(dt_pos)) 0.25 * stats::median(dt_pos) else 1
-    out <- (vi - vi_lag) / pmax(dt, dt_min)
+    out <- (vi - vi_lag) / dt
     out[!is.finite(dt) | dt <= 0] <- NA_real_
     out
   }), subject)
@@ -558,6 +574,8 @@
 
   stopifnot(all(c("subject","time","xi_raw","xj_raw") %in% names(pair_df)))
   df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
+  time_failure <- .validate_subject_times(df$time, df$subject)
+  if (!is.null(time_failure)) return(time_failure)
 
   df$xi_raw   <- pmax(as.numeric(df$xi_raw), 0)
   df$xj_raw   <- pmax(as.numeric(df$xj_raw), 0)
@@ -597,7 +615,7 @@
     smooth_one <- function(v, t) {
       ok <- is.finite(v) & is.finite(t)
       if (sum(ok) < 3L || length(unique(t[ok])) < 3L) {
-        return(list(y = v, df = NA_real_))
+        return(.pclv_failure("spline_smoothing", "insufficient_unique_times", list()))
       }
       rr <- .smooth_spline_robust(
         x = t[ok], y = v[ok],
@@ -609,10 +627,9 @@
         max_df = NULL,
         default_df = 4.0
       )
+      if (.is_pclv_failure(rr)) return(rr)
       yhat <- rep(NA_real_, length(t))
-      yhat[ok] <- as.numeric(stats::approx(
-        x = t[ok], y = rr$yhat, xout = t[ok], rule = 2
-      )$y)
+      yhat[ok] <- rr$yhat
       list(y = yhat, df = rr$df)
     }
     edf_i <- edf_j <- rep(NA_real_, length(by_s))
@@ -621,6 +638,8 @@
       ix <- by_s[[sname]]
       res_i <- smooth_one(alr_i[ix], df$time[ix])
       res_j <- smooth_one(alr_j[ix], df$time[ix])
+      if (.is_pclv_failure(res_i)) return(res_i)
+      if (.is_pclv_failure(res_j)) return(res_j)
       alr_i[ix] <- res_i$y
       alr_j[ix] <- res_j$y
       edf_i[sname] <- res_i$df
@@ -634,6 +653,7 @@
   xi <- lagv(alr_i)
   xj <- lagv(alr_j)
   y <- .delta_alr_over_dt(alr_i, df$time, df$subject)
+  if (.is_pclv_failure(y)) return(y)
 
   # 파트너 희소성 필터(옵션)
   if (is.finite(nz_partner_min_frac) && nz_partner_min_frac > 0) {
@@ -670,10 +690,14 @@
 
   mu_xi <- mean(dat$xi)
   sd_xi <- stats::sd(dat$xi)
-  if (!is.finite(sd_xi) || sd_xi <= 0) sd_xi <- 1
+  if (!is.finite(sd_xi) || sd_xi <= 0)
+    return(.pclv_failure("standardization", "invalid_internal_scaling_state",
+                         list(predictor = "xi", observed_sd = sd_xi)))
   mu_xj <- mean(dat$xj)
   sd_xj <- stats::sd(dat$xj)
-  if (!is.finite(sd_xj) || sd_xj <= 0) sd_xj <- 1
+  if (!is.finite(sd_xj) || sd_xj <= 0)
+    return(.pclv_failure("standardization", "invalid_internal_scaling_state",
+                         list(predictor = "xj", observed_sd = sd_xj)))
 
   dat$xi_unscaled <- dat$xi
   dat$xj_unscaled <- dat$xj
@@ -771,35 +795,8 @@
   }, add = TRUE)
   sink(out_con); sink(msg_con, type = "message")
 
-  # 4) 1차 시도
-  fit <- try(suppressWarnings(suppressMessages(do.call(mod$sample, args))), silent = TRUE)
-
-  # 5) 실패 시 재시도: (a) init 관련 오류면 폴백, (b) 새 디렉터리/베이스네임 + 병렬체인 1
-  if (inherits(fit, "try-error")) {
-    msg <- tryCatch(as.character(attr(fit, "condition")), error = function(e) "")
-    # init 관련 에러면 init=NULL로 폴백
-    if (length(msg) && any(grepl("'init' contains empty lists|invalid init|bad init", msg, ignore.case = TRUE))) {
-      message("Pathfinder/init not accepted; falling back to default init.")
-      args$init <- NULL
-    }
-    # 재시도 인자: 새 디렉터리/베이스네임 + parallel_chains=1
-    args_retry <- args
-    args_retry$output_dir      <- file.path(output_root, sprintf("run_retry_%s_%s", .now_tag(), .make_uid(6)))
-    dir.create(args_retry$output_dir, recursive = TRUE, showWarnings = FALSE)
-    args_retry$output_basename <- sprintf("glv_pairwise_retry_%s", .make_uid(6))
-    if (!is.null(args_retry$chains)) args_retry$parallel_chains <- 1L
-
-    # 초미니면 재시도 전에도 짧은 지터 한 번 더
-    if (is.numeric(args_retry$iter_warmup) && is.numeric(args_retry$iter_sampling)) {
-      if (args_retry$iter_warmup <= 5L && args_retry$iter_sampling <= 5L) {
-        Sys.sleep(runif(1, 0, 0.25))
-      }
-    }
-
-    fit <- suppressWarnings(suppressMessages(do.call(mod$sample, args_retry)))
-  }
-
-  fit
+  # Sampling errors are handled by .sample_with_retry(); do not retry or alter init here.
+  do.call(mod$sample, args)
 }
 
 
@@ -844,7 +841,7 @@
 #'
 #' Takes approximation draws from a CmdStanPathfinder fit and returns a
 #' per-chain list of named numeric scalars suitable for `sample(init=...)`.
-#' If no usable values are found, returns NULL (caller should fallback).
+#' If no usable values are found, returns NULL; the caller records Pathfinder unavailability before using an approved ordinary initialization.
 #' @noRd
 #' Convert Pathfinder draws into per-chain init lists (strict)
 #'
@@ -897,41 +894,10 @@
   out
 }
 
-#' Make init from PF or fallback to numeric scalar (never returns empty lists)
-#' @noRd
-.init_from_pf_or_scalar <- function(pf_fit, mod, chains, fallback_numeric = 0.2, verbose = FALSE, tag = NULL) {
-  say <- function(...) if (verbose) cat(sprintf("%s %s\n", if (!is.null(tag)) tag else "", sprintf(...)))
-  pf_inits <- NULL
-  try({ pf_inits <- .pf_inits_from_draws(pf_fit, mod, chains = chains) }, silent = TRUE)
-  if (is.null(pf_inits)) {
-    say("Pathfinder draws unusable → fallback numeric init=%.3f", fallback_numeric)
-    return(fallback_numeric)
-  }
-  # 최종 검증: 체인 수/빈리스트/이름 보유
-  if (!is.list(pf_inits) || length(pf_inits) != chains) {
-    say("PF init shape invalid → fallback numeric init=%.3f", fallback_numeric)
-    return(fallback_numeric)
-  }
-  good <- TRUE
-  for (k in seq_len(chains)) {
-    li <- pf_inits[[k]]
-    if (!is.list(li) || length(li) == 0L || !length(names(li))) { good <- FALSE; break }
-    # 모든 값 numeric scalar & finite
-    if (!all(vapply(li, function(v) is.numeric(v) && length(v) == 1L && is.finite(v), logical(1)))) {
-      good <- FALSE; break
-    }
-  }
-  if (!good) {
-    say("PF init contains empty/invalid lists → fallback numeric init=%.3f", fallback_numeric)
-    return(fallback_numeric)
-  }
-  pf_inits
-}
-
-#' Robust wrapper for \code{smooth.spline()} with safe fallbacks
+#' Strict wrapper for \code{smooth.spline()} without scientific fallbacks
 #'
-#' Sorts and aggregates duplicate \code{x}, tries \code{df}/\code{spar}/CV/GCV
-#' strategies in order, and falls back to constant fits when needed.
+#' Fits only the canonical cross-validated spline and returns a structured
+#' failure instead of substituting another smoothing method.
 #'
 #' @param x,y Numeric vectors.
 #' @param spline_df Optional effective degrees of freedom.
@@ -944,83 +910,37 @@
 #' @noRd
 #' @keywords internal
 .smooth_spline_robust <- function(x, y,
-                                  spline_df = NULL,
-                                  spline_spar = NULL,
-                                  use_cv = TRUE,
-                                  min_unique = 3,
-                                  min_df = 3.0,
-                                  max_df = NULL,
-                                  default_df = 4.0) {
+                                  spline_df = NULL, spline_spar = NULL,
+                                  use_cv = TRUE, min_unique = 3,
+                                  min_df = 3.0, max_df = NULL, default_df = 4.0) {
   x <- as.numeric(x); y <- as.numeric(y)
   ok <- is.finite(x) & is.finite(y)
-  x <- x[ok]; y <- y[ok]
-  if (!length(x)) return(list(yhat = y, df = NA_real_))
-
-  # 정렬 + 중복 x 평균 집계(LOOCV 안정화)
-  ord <- order(x); x <- x[ord]; y <- y[ord]
-  df2 <- stats::aggregate(y ~ x, data.frame(x = x, y = y), mean)
-  x_u <- as.numeric(df2$x); y_u <- as.numeric(df2$y)
-
-  # 유니크 시점 부족 → 상수
-  if (length(x_u) < min_unique) {
-    yhat <- rep(stats::mean(y_u), length(x))
-    return(list(yhat = yhat[order(ord)], df = NA_real_))
+  if (!all(ok)) return(.pclv_failure("spline_smoothing", "non_finite_spline_input", list()))
+  if (!isTRUE(use_cv) || !is.null(spline_df) || !is.null(spline_spar)) {
+    stop("Canonical Core spline invariant violated: CV smoothing is required.")
   }
-
-  # df 상한 자동
-  if (is.null(max_df)) {
-    max_df <- max(min(length(x_u) - 1L, 10L), min_df)
+  if (length(unique(x)) < min_unique) {
+    return(.pclv_failure("spline_smoothing", "insufficient_unique_times",
+                         list(observed = length(unique(x)), required = min_unique)))
   }
-
-  try_fit <- function(mode = c("df","spar","cv","gcv")) {
-    mode <- match.arg(mode)
-    if (mode == "df" && !is.null(spline_df)) {
-      df_use <- min(max(spline_df, min_df), max_df)
-      return(suppressWarnings(stats::smooth.spline(x_u, y_u, df = df_use)))
-    }
-    if (mode == "spar" && !is.null(spline_spar)) {
-      return(suppressWarnings(stats::smooth.spline(x_u, y_u, spar = spline_spar)))
-    }
-    if (mode == "cv") {
-      return(suppressWarnings(stats::smooth.spline(x_u, y_u, cv = TRUE, all.knots = TRUE)))
-    }
-    return(suppressWarnings(stats::smooth.spline(x_u, y_u, cv = FALSE, all.knots = TRUE)))
+  ord <- order(x); x_ord <- x[ord]; y_ord <- y[ord]
+  fit <- tryCatch(
+    withCallingHandlers(stats::smooth.spline(x_ord, y_ord, cv = TRUE, all.knots = TRUE), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
+    error = function(e) .pclv_failure("spline_smoothing", "cv_spline_failed",
+                                      list(message = conditionMessage(e)))
+  )
+  if (.is_pclv_failure(fit)) return(fit)
+  yhat <- tryCatch(
+    as.numeric(stats::predict(fit, x = x_ord)$y),
+    error = function(e) .pclv_failure("spline_smoothing", "cv_spline_prediction_failed",
+                                      list(message = conditionMessage(e)))
+  )
+  if (.is_pclv_failure(yhat)) return(yhat)
+  if (length(yhat) != length(x_ord) || any(!is.finite(yhat))) {
+    return(.pclv_failure("spline_smoothing", "invalid_cv_spline_prediction", list()))
   }
-
-  fit <- NULL
-  for (m in c(if (!is.null(spline_df)) "df" else NULL,
-              if (!is.null(spline_spar)) "spar" else NULL,
-              if (isTRUE(use_cv)) "cv" else NULL,
-              "gcv")) {
-    fit <- try(try_fit(m), silent = TRUE)
-    if (!inherits(fit, "try-error")) break
-  }
-
-  # 실패 → 기본 df
-  if (inherits(fit, "try-error") || is.null(fit)) {
-    fit <- try(suppressWarnings(stats::smooth.spline(
-      x_u, y_u, df = min(max(default_df, min_df), max_df)
-    )), silent = TRUE)
-  }
-
-  # 그래도 실패 → 상수
-  if (inherits(fit, "try-error") || is.null(fit)) {
-    yhat <- rep(stats::mean(y_u), length(x))
-    return(list(yhat = yhat[order(ord)], df = NA_real_))
-  }
-
-  # 예측 (외삽 가드)
-  yhat <- try(suppressWarnings(as.numeric(stats::predict(fit, x = x)$y)), silent = TRUE)
-  if (inherits(yhat, "try-error") || !length(yhat) || any(!is.finite(yhat))) {
-    yhat <- suppressWarnings(as.numeric(stats::approx(
-      x = x_u,
-      y = as.numeric(stats::predict(fit, x = x_u)$y),
-      xout = x, rule = 2
-    )$y))
-  }
-
-  df_out <- suppressWarnings(as.numeric(fit$df))
-  list(yhat = yhat[order(ord)], df = ifelse(is.finite(df_out), df_out, NA_real_))
+  inverse <- order(ord)
+  list(yhat = yhat[inverse], df = as.numeric(fit$df), method = "cv")
 }
 
 #' Stable log-mean-exp
@@ -1100,6 +1020,12 @@
             ifelse(is.finite(d$worst_rhat), sprintf("%.3f", d$worst_rhat), NA),
             ifelse(is.finite(d$min_ess_bulk), d$min_ess_bulk, NA))
 
+  # Malformed caller initialization is a programmer error, never repaired.
+  init0 <- base_args$init
+  valid_scalar <- is.numeric(init0) && length(init0) == 1L && is.finite(init0)
+  valid_init <- is.null(init0) || valid_scalar || is.function(init0) || is.list(init0) || inherits(init0, "CmdStanPathfinder") || is.environment(init0)
+  if (!valid_init) stop("Unsupported or malformed init specification.")
+
   # 준비
   base_args <- base_args
   base_args$data <- stan_list
@@ -1107,6 +1033,7 @@
   attempt <- 0L
   fit <- NULL; diag <- NULL; fit_failed <- FALSE
   final_args <- NULL
+  attempt_history <- list()
 
   repeat {
 
@@ -1177,6 +1104,8 @@
                     .or(sample_args$iter_warmup, "NA"),
                     .or(sample_args$step_size, "NA")))
 
+    init_method <- if (is.null(sample_args$init)) "default" else if (is.numeric(sample_args$init)) "scalar" else if (is.function(sample_args$init)) "function" else if (is.list(sample_args$init)) "list" else "pathfinder"
+
     fit <- tryCatch(
       .call_sample_silently(mod, sample_args, silent = silent_sampler),
       error = function(e) .pclv_failure(
@@ -1186,9 +1115,15 @@
     )
     final_args <- sample_args
     if (.is_pclv_failure(fit)) {
+      attempt_history[[length(attempt_history) + 1L]] <- list(
+        attempt = attempt + 1L, seed = sample_args$seed, initialization_method = init_method,
+        adapt_delta = sample_args$adapt_delta, max_treedepth = sample_args$max_treedepth,
+        status = "failed", failure_reason = fit$reason
+      )
       if (attempt >= max_retries) {
+        fit$details$attempt_history <- attempt_history
         return(list(fit = NULL, diag = NULL, n_retries = attempt,
-                    fit_failed = TRUE, final_args = final_args, failure = fit))
+                    fit_failed = TRUE, final_args = final_args, failure = fit, retry_history = attempt_history))
       }
       attempt <- attempt + 1L
       next
@@ -1202,6 +1137,12 @@
     eb_vec <- .ebfmi_chainwise_from_energy(fit)
     eb_str <- if (length(eb_vec)) paste(sprintf("%.3f", eb_vec), collapse=",") else "NA"
     ok <- !.needs_retry(diag, fit, thr = ebfmi_thresh)
+    attempt_history[[length(attempt_history) + 1L]] <- list(
+      attempt = attempt + 1L, seed = sample_args$seed, initialization_method = init_method,
+      adapt_delta = sample_args$adapt_delta, max_treedepth = sample_args$max_treedepth,
+      status = if (ok) "success" else "diagnostic_failure",
+      failure_reason = if (ok) NA_character_ else "sampler_diagnostics_failed"
+    )
 
     message(sprintf("%s%s | %s | E-BFMI chains=[%s]",
                     if (nzchar(tag)) paste0("[",tag,"] ") else "",
@@ -1215,9 +1156,10 @@
   list(
     fit = fit, diag = diag, n_retries = attempt,
     fit_failed = fit_failed, final_args = final_args,
+    retry_history = attempt_history,
     failure = if (fit_failed) .pclv_failure(
       "sampling", "sampler_diagnostics_failed",
-      list(n_retries = attempt, diagnostics = diag)
+      list(n_retries = attempt, diagnostics = diag, attempt_history = attempt_history)
     ) else NULL
   )
 }
@@ -1233,6 +1175,7 @@
     p_sign2 = NA_real_, aii_mean = NA_real_, aii_sd = NA_real_,
     aii_q2.5 = NA_real_, aii_q97.5 = NA_real_, p_sign2_self = NA_real_,
     nu_mean = NA_real_, nu_median = NA_real_, nu_q05 = NA_real_, nu_q95 = NA_real_,
+    diag = na_diag, retry_history = list(NULL), initialization_provenance = list(NULL),
     diag = na_diag, kfold_mean = NA_real_, kfold_method = NA_character_,
     kfold_subject = list(NULL), kfold_subject_ppd = list(NULL),
     kfold_subject_ids = list(NULL), kfold_subject_counts = list(NULL),
@@ -1295,6 +1238,9 @@
     i = ti, j = pj,
     direction_ok_ij = is.null(failure_ij), direction_ok_ji = is.null(failure_ji),
     failure_ij = list(failure_ij), failure_ji = list(failure_ji),
+    retry_history_ij = res_ij$retry_history, retry_history_ji = res_ji$retry_history,
+    initialization_provenance_ij = res_ij$initialization_provenance,
+    initialization_provenance_ji = res_ji$initialization_provenance,
     n_pairs_ij = res_ij$n_pairs, n_pairs_ji = res_ji$n_pairs,
     a_ij_mean = res_ij$a_mean, a_ij_sd = res_ij$a_sd,
     a_ij_q2.5 = res_ij$a_q2.5, a_ij_q97.5 = res_ij$a_q97.5,
@@ -1401,6 +1347,8 @@
 #' @keywords internal
 .proj_loglik_subject <- function(draws_df, pair_in) {
   stopifnot(all(c("y", "xi", "xj", "subject") %in% names(pair_in)))
+  time_failure <- .validate_subject_times(pair_in$time, pair_in$subject, "elpd_scoring")
+  if (!is.null(time_failure)) return(time_failure)
   subs <- unique(pair_in$subject)
   D    <- nrow(draws_df)
   Ssub <- length(subs)
@@ -1420,19 +1368,22 @@
   }
   dt_all <- mk_prev_dt(pair_in)
 
-  if ("sigma_pred" %in% names(draws_df)) {
-    sigma_pred <- draws_df$sigma_pred
-  } else if (all(c("sigma", "sd_ou") %in% names(draws_df))) {
-    sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sd_ou^2)
-  } else if (all(c("sigma", "sigma_ou", "lambda") %in% names(draws_df))) {
-    sigma_pred <- sqrt(draws_df$sigma^2 + draws_df$sigma_ou^2 / (2 * pmax(draws_df$lambda, 1e-8)))
-  } else {
-    sigma_pred <- draws_df$sigma
-  }
-
   nu_failure <- .validate_nu_draws(draws_df, "elpd_scoring")
   if (!is.null(nu_failure)) return(nu_failure)
   nu_vec <- as.numeric(draws_df$nu)
+
+  have_sdou <- "sd_ou" %in% names(draws_df)
+  have_sigma_ou <- all(c("sigma_ou", "lambda") %in% names(draws_df))
+  have_lambda <- "lambda" %in% names(draws_df)
+  have_phi <- "phi" %in% names(draws_df)
+  if (!have_sdou && !have_sigma_ou) stop("OU scoring requires sd_ou or sigma_ou with lambda.")
+  if (!have_lambda && !have_phi) stop("Canonical OU persistence parameter missing.")
+  invalid_ou <- !("sigma" %in% names(draws_df)) || any(!is.finite(draws_df$sigma) | draws_df$sigma <= 0) ||
+    (have_sdou && any(!is.finite(draws_df$sd_ou) | draws_df$sd_ou < 0)) ||
+    (have_sigma_ou && any(!is.finite(draws_df$sigma_ou) | draws_df$sigma_ou < 0 | !is.finite(draws_df$lambda) | draws_df$lambda <= 0)) ||
+    (have_lambda && any(!is.finite(draws_df$lambda) | draws_df$lambda <= 0)) ||
+    (!have_lambda && have_phi && any(!is.finite(draws_df$phi) | draws_df$phi <= 0 | draws_df$phi >= 1))
+  if (invalid_ou) return(.pclv_failure("elpd_scoring", "invalid_ou_draws", list()))
 
   loglik_full <- matrix(NA_real_, nrow = D, ncol = Ssub)
   n_obs_vec   <- integer(Ssub)
@@ -1463,7 +1414,7 @@
     if (have_sdou) {
       sd2 <- (draws_df$sd_ou)^2
     } else if (all(c("sigma_ou","lambda") %in% names(draws_df))) {
-      sd2 <- (draws_df$sigma_ou^2) / (2 * pmax(draws_df$lambda, 1e-8))
+      sd2 <- (draws_df$sigma_ou^2) / (2 * draws_df$lambda)
     } else {
       stop("OU scoring requires sd_ou or sigma_ou with lambda.")
     }
@@ -1487,21 +1438,22 @@
     }
 
     # 시간 루프
-    # 주의: 첫 관측의 dt가 NA일 수 있으므로 dt<=0 → 작은 값으로 보정
+    # The first observation has no predecessor; subsequent dt values were validated.
     dtv <- as.numeric(c(NA, diff(tvec)))
     l2pi <- log(2*pi)
     for (t in seq_len(J)) {
       dt <- dtv[t]
-      if (!is.finite(dt) || dt < 0) dt <- 0        # 첫 관측은 dt=0로 처리
+      if (t == 1L) dt <- 0
+      else if (!is.finite(dt) || dt <= 0) stop("Validated OU time invariant violated.")
       if (have_lambda) {
-        lam <- pmax(draws_df$lambda, 1e-8)
+        lam <- draws_df$lambda
         a_t <- exp(-lam * dt)
       } else if (have_phi) {
-        phi <- pmin(pmax(draws_df$phi, 1e-8), 0.999999)
+        phi <- draws_df$phi
         lam <- -log(phi)
         a_t <- exp(-lam * dt)
       } else {
-        a_t <- rep(0.0, D)
+        stop("Canonical OU persistence parameter missing.")
       }
       q_t <- pmax(sd2 * (1 - a_t^2), 1e-16)
       if (!use_ri) {
@@ -1624,11 +1576,8 @@
         for (k in 2:length(ix)) {
           prev[ix[k]] <- ix[k - 1]
           dt_k <- as.numeric(df$time[ix[k]] - df$time[ix[k - 1]])
-          dtv[ix[k]] <- if (is.finite(dt_k) &&
-                            dt_k > 0)
-            dt_k
-          else
-            1e-6
+          if (!is.finite(dt_k) || dt_k <= 0) stop("Canonical time invariant violated.")
+          dtv[ix[k]] <- dt_k
         }
       }
     }
@@ -1658,8 +1607,12 @@
     xi_m = mean(trd$df$xi), xi_s = stats::sd(trd$df$xi),
     xj_m = mean(trd$df$xj), xj_s = stats::sd(trd$df$xj)
   )
-  if (!is.finite(sc$xi_s) || sc$xi_s <= 0) sc$xi_s <- 1
-  if (!is.finite(sc$xj_s) || sc$xj_s <= 0) sc$xj_s <- 1
+  if (!is.finite(sc$xi_s) || sc$xi_s <= 0)
+    return(.pclv_failure("kfold_training", "invalid_internal_scaling_state",
+                         list(predictor = "xi", observed_sd = sc$xi_s)))
+  if (!is.finite(sc$xj_s) || sc$xj_s <= 0)
+    return(.pclv_failure("kfold_training", "invalid_internal_scaling_state",
+                         list(predictor = "xj", observed_sd = sc$xj_s)))
   for (nm in c("xi", "xj")) {
     trd$df[[nm]] <- (trd$df[[nm]] - sc[[paste0(nm, "_m")]]) / sc[[paste0(nm, "_s")]]
     ted$df[[nm]] <- (ted$df[[nm]] - sc[[paste0(nm, "_m")]]) / sc[[paste0(nm, "_s")]]
@@ -2121,14 +2074,7 @@
   pf_max_lbfgs_iters  <- ctx$pf_max_lbfgs_iters
   pf_psis_resample    <- ctx$pf_psis_resample
 
-  # ---- 병렬 워커에서 Stan 모델 핸들 확보: 이미 빌드된 exe 재사용 ----
-  # cmdstanr는 R6 클래스를 직접 new()로 만들지 말고, cmdstan_model()을 사용해야 함.
-  if (!is.null(ctx$mod_exe_file) && file.exists(ctx$mod_exe_file)) {
-    mod <- cmdstanr::cmdstan_model(stan_file = NULL, exe_file = ctx$mod_exe_file)
-  } else {
-    # 안전한 폴백: exe 경로가 누락/손상되면 캐시에서 로드(재컴파일은 캐시 히트 시 생략됨)
-    mod <- get_pclv_model(quiet = quiet)
-  }
+  # The exact compiled canonical model is loaded after preprocessing succeeds.
 
   # 안전 초기화(ELPD 비활성 시도 포함)
   kfold_outer_rounds_local <- 0L
@@ -2193,11 +2139,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       for (k in 2:length(ix)) {
         prev[ix[k]] <- ix[k - 1]
         dt_k <- as.numeric(pair_in$time[ix[k]] - pair_in$time[ix[k - 1]])
-        dtv[ix[k]] <- if (is.finite(dt_k) &&
-                          dt_k > 0)
-          dt_k
-        else
-          1e-6
+        if (!is.finite(dt_k) || dt_k <= 0) stop("Canonical time invariant violated.")
+        dtv[ix[k]] <- dt_k
       }
     }
   }
@@ -2236,6 +2179,18 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   if (anyDuplicated(nm))
     stan_list <- stan_list[match(unique(nm), nm)]
 
+  # Load only the exact compiled canonical model; workers never compile variants.
+  if (is.null(ctx$mod_exe_file) || !file.exists(ctx$mod_exe_file)) {
+    return(.pclv_failure("model_loading", "compiled_model_unavailable",
+                         list(exe_file = ctx$mod_exe_file)))
+  }
+  mod <- tryCatch(
+    cmdstanr::cmdstan_model(stan_file = NULL, exe_file = ctx$mod_exe_file),
+    error = function(e) .pclv_failure("model_loading", "compiled_model_load_failed",
+                                      list(message = conditionMessage(e), exe_file = ctx$mod_exe_file))
+  )
+  if (.is_pclv_failure(mod)) return(mod)
+
   # --- seed 결정(쌍별/방향별 재현성) -------------------------------------------
   seed_main <- if (!is.null(seed_override))
     as.integer(seed_override)
@@ -2264,99 +2219,54 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   # CmdStanR는 pathfinder fit을 init에 바로 받을 수 있음.
   # 체인 수보다 PF draw가 적으면 자동으로(with replacement) 뽑아 씀.
   # 참고: cmdstanr reference (model-method-pathfinder, init에 CmdStanPathfinder 허용). :contentReference[oaicite:1]{index=1}
+  user_init_valid <- is.null(init) || is.function(init) ||
+    (is.numeric(init) && length(init) == 1L && is.finite(init)) ||
+    (is.list(init) && length(init) > 0L)
+  if (!user_init_valid) stop("Unsupported or malformed init specification.")
+  if (is.list(init) && !is.function(init)) {
+    per_chain <- is.list(init[[1L]])
+    if (per_chain && (length(init) != chains || any(vapply(init, function(z) !length(z), logical(1)))))
+      stop("Malformed per-chain init specification.")
+    if (!per_chain && (is.null(names(init)) || any(!nzchar(names(init)))))
+      stop("Malformed named init specification.")
+  }
+
+  initialization_provenance <- list(
+    requested = if (use_pathfinder_init) "pathfinder" else "user_or_default",
+    pathfinder_status = if (use_pathfinder_init) "not_run" else "not_requested",
+    pathfinder_failure = NULL,
+    actual = if (is.null(init)) "default" else if (is.numeric(init)) "scalar" else if (is.function(init)) "function" else "list"
+  )
   if (use_pathfinder_init) {
-    if (progress_local != "none")
-      cat(sprintf("%s pair: running Pathfinder for inits\n", pair_tag))
     pf_dir <- file.path(tempdir(), sprintf("glvpf_%s", format(Sys.time(), "%Y%m%d%H%M%S")))
     dir.create(pf_dir, recursive = TRUE, showWarnings = FALSE)
-    pf_init_scalar <- 0.05
-    pf_fit <- mod$pathfinder(
-      data    = stan_list,
-      seed    = seed_main,
-      init    = pf_init_scalar,
-      num_paths = pf_num_paths,
-      draws     = pf_draws,
-      history_size    = pf_history_size,
-      max_lbfgs_iters = pf_max_lbfgs_iters,
-      psis_resample   = pf_psis_resample,
-      show_messages   = !silent_sampler,
-      output_dir      = pf_dir,
-      output_basename = paste0("glv_pf_", target, "_", partner)
-    )
-    # ▶ PF 결과를 per-chain init으로 만들되, 한 체인이라도 비면 숫자 스칼라로 강제 폴백
-    base_args$init <- .init_from_pf_or_scalar(
-      pf_fit  = pf_fit,
-      mod     = mod,
-      chains  = chains,
-      # 메인 인자로 숫자 스칼라 init이 왔으면 그 값을 우선 사용, 아니면 0.2
-      fallback_numeric = if (is.numeric(init) && length(init) == 1L && is.finite(init)) init else 0.2,
-      verbose = (progress_local != "none"),
-      tag     = pair_tag
-    )
-    # Pathfinder 사용 시 warmup 단축
-    if (!is.null(iter_warmup) && iter_warmup >= 1500) {
-      base_args$iter_warmup <- max(500L, floor(iter_warmup/2))
+    pf_fit <- tryCatch(mod$pathfinder(
+      data = stan_list, seed = seed_main, init = 0.05,
+      num_paths = pf_num_paths, draws = pf_draws,
+      history_size = pf_history_size, max_lbfgs_iters = pf_max_lbfgs_iters,
+      psis_resample = pf_psis_resample, show_messages = !silent_sampler,
+      output_dir = pf_dir, output_basename = paste0("glv_pf_", target, "_", partner)
+    ), error = function(e) .pclv_failure("initialization", "pathfinder_failed",
+                                         list(message = conditionMessage(e))))
+    if (.is_pclv_failure(pf_fit)) {
+      initialization_provenance$pathfinder_status <- "failed"
+      initialization_provenance$pathfinder_failure <- pf_fit
+    } else {
+      pf_inits <- .pf_inits_from_draws(pf_fit, mod, chains = chains)
+      if (is.null(pf_inits)) {
+        initialization_provenance$pathfinder_status <- "failed"
+        initialization_provenance$pathfinder_failure <- .pclv_failure(
+          "initialization", "pathfinder_draws_unusable", list()
+        )
+      } else {
+        base_args$init <- pf_inits
+        initialization_provenance$pathfinder_status <- "success"
+        initialization_provenance$actual <- "pathfinder"
+        if (!is.null(iter_warmup) && iter_warmup >= 1500)
+          base_args$iter_warmup <- max(500L, floor(iter_warmup / 2))
+      }
     }
   }
-
-  # ---[ NEW ] 추가 유틸: init 유효성 강검증 & 안전 폴백 -------------------------
-  # list-of-lists 형식 점검, 빈 리스트 제거, 체인 수 보정, 전부 실패 시 숫자 init 반환
-  .as_chain_inits_safe <- function(init_obj, chains,
-                                   fallback_numeric = 0.2,
-                                   verbose_tag = NULL) {
-    say <- function(msg) {
-      if (!is.null(verbose_tag)) cat(sprintf("%s %s\n", verbose_tag, msg))
-    }
-    # 1) 숫자 스칼라/함수면 그대로 허용(샘플러가 해석)
-    if (is.numeric(init_obj) && length(init_obj) == 1L && is.finite(init_obj)) {
-      return(init_obj)
-    }
-    if (is.function(init_obj)) {
-      return(init_obj)
-    }
-    # 2) named list면 체인수만큼 복제
-    if (is.list(init_obj) && length(init_obj) > 0L && !is.list(init_obj[[1L]])) {
-      if (!length(names(init_obj))) {
-        say("init named list missing names → fallback numeric init")
-        return(fallback_numeric)
-      }
-      return(rep(list(init_obj), chains))
-    }
-    # 3) list-of-lists면 각 체인 점검
-    if (is.list(init_obj) && length(init_obj) > 0L && is.list(init_obj[[1L]])) {
-      L <- length(init_obj)
-      # 길이 보정
-      if (L != chains) {
-        if (L == 1L) {
-          init_obj <- rep(init_obj, chains)
-        } else {
-          say(sprintf("init length (%d) != chains (%d) → fallback numeric init", L, chains))
-          return(fallback_numeric)
-        }
-      }
-      # 체인별 빈 리스트/NA 제거
-      ok_all <- TRUE
-      for (k in seq_len(chains)) {
-        li <- init_obj[[k]]
-        # 비었거나 이름 없음 → 실패
-        if (!is.list(li) || length(li) == 0L || !length(names(li))) { ok_all <- FALSE; break }
-        # 숫자 아닌 값/NA/Inf 제거
-        keep <- vapply(li, function(v) is.numeric(v) && length(v) == 1L && is.finite(v), logical(1))
-        li <- li[keep]
-        init_obj[[k]] <- li
-        if (length(li) == 0L) { ok_all <- FALSE; break }
-      }
-      if (!ok_all) {
-        say("init contains empty lists after validation → fallback numeric init")
-        return(fallback_numeric)
-      }
-      return(init_obj)
-    }
-    # 4) 나머지 전부 실패 → 숫자 스칼라 폴백
-    say("init type not recognized → fallback numeric init")
-    fallback_numeric
-  }
-
   # 4) 공통 래퍼로 샘플 + 리트라이 ----------------------------------------------
   tag_lbl  <- sprintf("%s\u2192%s main", partner, target)
   pair_tag <- sprintf("%s\u2192%s", partner, target)
@@ -2380,7 +2290,11 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     cat(sprintf("%s pair: main run completed\n", pair_tag))
 
   fit_full   <- res_try$fit
-  if (!is.null(res_try$failure)) return(res_try$failure)
+  if (!is.null(res_try$failure)) {
+    res_try$failure$details$retry_history <- res_try$retry_history
+    res_try$failure$details$initialization_provenance <- initialization_provenance
+    return(res_try$failure)
+  }
   diag       <- res_try$diag
   n_retries  <- res_try$n_retries
   fit_failed <- res_try$fit_failed
@@ -2489,6 +2403,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     diag = diag,
     n_retries = n_retries,
     fit_failed = fit_failed,
+    retry_history = list(res_try$retry_history),
+    initialization_provenance = list(initialization_provenance),
 
     # 스무딩 메타
     smoothed = sflag,
