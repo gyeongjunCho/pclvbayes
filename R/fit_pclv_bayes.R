@@ -29,11 +29,11 @@
 #'
 #' Repeated subject-level K-fold ELPD is always computed. Held-out observations
 #' are scored with the irregular-time OU Kalman path using a Student-t observation
-#' likelihood with fixed `nu = 5`. Spline smoothing is selected by cross-validation.
+#' likelihood with one posterior-estimated `nu > 2` per directed fit. Spline smoothing is selected by cross-validation.
 #' Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 #'
 #' - A diagnostics-aware **retry** policy (up to `max_retries`) monitors divergences,
-#'   tree depth, and E-BFMI while retaining fixed Student-t `nu = 5`.
+#'   tree depth, and E-BFMI without changing the Student-t model or its `nu` prior.
 #'   Diagnostics are returned for downstream filtering.
 #' - Optional **Pathfinder** initialization (`use_pathfinder_init = TRUE`) uses
 #'   `cmdstanr::pathfinder()` to obtain near-posterior inits (and mass-matrix info) before HMC.
@@ -225,7 +225,7 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
   smooth_scale  <- match.arg(smooth_scale)
   progress      <- match.arg(progress)
 
-  # Stan model (nu_fixed + use_student_t 지원 가정)
+  # Stan model (canonical Student-t likelihood)
   mod <- get_pclv_model(quiet = quiet)
 
   # metadata & matrix

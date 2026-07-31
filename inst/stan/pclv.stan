@@ -8,8 +8,6 @@ data {
   array[N] int<lower=1, upper=S> sid;
   array[N] int<lower=0, upper=N> prev;
   vector[N] dt;         // 0 if first within subject, else > 0 (preprocessed)
-  int<lower=0,upper=1> use_student_t;
-  real<lower=2> nu_fixed;     // ← 고정 자유도 (예: 4 또는 7)
 }
 
 transformed data {
@@ -44,6 +42,9 @@ parameters {
   // AR persistence at unit dt
   real<lower=0.01, upper=0.99> phi;
 
+  // shared Student-t degrees of freedom
+  real log_nu_minus_two;
+
   // whitened innovations
   vector[N] z_e;
 }
@@ -52,6 +53,7 @@ transformed parameters {
   // vector[N] mu = r0 + a_ii .* xi + a_ij .* xj;
   vector[S] r0_sub = sd_r0 * r0_raw;
   vector[N] mu = r0 + r0_sub[sid] + a_ii .* xi + a_ij .* xj;
+  real<lower=2> nu = 2 + exp(log_nu_minus_two);
 
   // build e via whitening in stationary-SD parameterization
   vector[N] e;
@@ -78,14 +80,12 @@ model {
   sigma     ~ normal(0, 0.5);
   sd_ou     ~ normal(0, 1.0);
   phi       ~ beta(8, 2); // mean ~0.8
+  log_nu_minus_two ~ normal(log(3), 0.75);
 
   z_e       ~ normal(0, 1);
 
   // likelihood
-  if (use_student_t == 1)
-    y ~ student_t(nu_fixed, mu + e, sigma);
-  else
-    y ~ normal(mu + e, sigma);
+  y ~ student_t(nu, mu + e, sigma);
 }
 
 generated quantities {
@@ -102,8 +102,8 @@ generated quantities {
   real sigma_pred = sqrt(square(sigma) + square(sd_ou));
 
   for (n in 1:N) {
-    log_lik[n] = normal_lpdf(y[n] | mu[n] + e[n], sigma);
-    y_rep[n]   = normal_rng(mu[n] + e[n], sigma);
+    log_lik[n] = student_t_lpdf(y[n] | nu, mu[n] + e[n], sigma);
+    y_rep[n] = student_t_rng(nu, mu[n] + e[n], sigma);
   }
 }
 

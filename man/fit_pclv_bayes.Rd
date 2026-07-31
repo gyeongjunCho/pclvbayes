@@ -154,11 +154,11 @@ the response is not standardized.
 
 Repeated subject-level K-fold ELPD is always computed. Held-out observations
 are scored with the irregular-time OU Kalman path using a Student-t observation
-likelihood with fixed \code{nu = 5}. Spline smoothing is selected by cross-validation.
+likelihood with one posterior-estimated \code{nu > 2} per directed fit. Spline smoothing is selected by cross-validation.
 Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 \itemize{
 \item A diagnostics-aware \strong{retry} policy (up to \code{max_retries}) monitors divergences,
-tree depth, and E-BFMI while retaining fixed Student-t \code{nu = 5}.
+tree depth, and E-BFMI without changing the Student-t model or its \code{nu} prior.
 Diagnostics are returned for downstream filtering.
 \item Optional \strong{Pathfinder} initialization (\code{use_pathfinder_init = TRUE}) uses
 \code{cmdstanr::pathfinder()} to obtain near-posterior inits (and mass-matrix info) before HMC.

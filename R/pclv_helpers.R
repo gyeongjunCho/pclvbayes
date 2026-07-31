@@ -5,7 +5,6 @@
 .PCLV_CORE_LAG <- 1L
 .PCLV_CORE_RESID_MODE <- "ou"
 .PCLV_CORE_USE_STUDENT_T <- TRUE
-.PCLV_CORE_NU <- 5
 .PCLV_CORE_COMPUTE_ELPD <- TRUE
 .PCLV_CORE_ELPD_MODE <- "kalman"
 .PCLV_CORE_SPLINE <- list(df = NULL, spar = NULL, cv = TRUE)
@@ -248,7 +247,7 @@
   keep <- intersect(
     c("a_ij","a_ii","r0",
       "sigma","sd_ou","phi",
-      "sigma_ou","lambda","sigma_pred","tau_r","nu"),
+      "sigma_ou","lambda","sigma_pred","tau_r","nu","log_nu_minus_two"),
     posterior::variables(drw)
   )
   if (!length(keep)) {
@@ -314,7 +313,7 @@
 #' @noRd
 #' @keywords internal
 .summarise_diag <- function(fit,
-                            pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi"),
+                            pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two"),
                             max_treedepth = 12) {
   # (1) 파라미터 요약치: R-hat / ESS (가용한 것만 선택)
   all_dd <- fit$draws()
@@ -1063,29 +1062,25 @@
 #' Sampling wrapper with diagnostics-aware retries
 #'
 #' Runs \code{mod$sample()} and, if needed, retries with safer hyperparameters
-#' (e.g., bumping \code{nu}, higher \code{adapt_delta}, \code{dense_e}) until
+#' (e.g., using higher \code{adapt_delta}, \code{dense_e}) until
 #' diagnostics pass or \code{max_retries} is reached.
 #'
 #' @param mod A \pkg{cmdstanr} model.
 #' @param base_args Baseline argument list for \code{mod$sample()}.
 #' @param stan_list Data list; inserted into \code{base_args$data}.
 #' @param max_retries Maximum retry attempts.
-#' @param nu_fix Base fixed-\eqn{\nu} for t-noise; may be bumped up to \code{max_nu_cap}.
 #' @param silent_sampler Logical; silence sampler output.
 #' @param ebfmi_thresh E-BFMI threshold triggering retries.
-#' @param max_nu_cap Maximum \eqn{\nu} allowed.
 #' @param tag Optional label for progress messages.
 #' @param freeze_retry_hypers If \code{TRUE}, do not alter hyperparameters on retries.
-#' @return A list with \code{fit}, \code{diag}, \code{n_retries}, \code{used_nu},
+#' @return A list with \code{fit}, \code{diag}, \code{n_retries},
 #'   \code{fit_failed}, and \code{final_args}.
 #' @noRd
 #' @keywords internal
 .sample_with_retry <- function(mod, base_args, stan_list,
                                max_retries = 3,
-                               nu_fix,
                                silent_sampler = FALSE,
                                ebfmi_thresh = 0.30,
-                               max_nu_cap = 7,
                                tag = "",
                                freeze_retry_hypers = FALSE) {
 
@@ -1102,6 +1097,7 @@
 
       add("r0", 0); add("a_ii", 0); add("a_ij", 0)
       add("sigma", 0.20); add("sd_ou", 0.40); add("phi", 0.80)
+      add("log_nu_minus_two", log(3))
 
       lst
     }
@@ -1130,23 +1126,12 @@
   # 준비
   base_args <- base_args
   base_args$data <- stan_list
-  nu_fix <- .or(nu_fix, .or(stan_list$nu_fixed, 4L))
 
   attempt <- 0L
-  used_nu <- nu_fix
   fit <- NULL; diag <- NULL; fit_failed <- FALSE
   final_args <- NULL
 
   repeat {
-    # nu bump (freeze면 bump 안 함)
-    if (attempt == 0L) {
-      used_nu <- min(max_nu_cap, nu_fix)
-    } else if (!freeze_retry_hypers) {
-      used_nu <- min(max_nu_cap, nu_fix + min(attempt, 2L))  # +1, +2까지
-    } else {
-      used_nu <- nu_fix
-    }
-    base_args$data$nu_fixed <- used_nu
 
     sample_args <- base_args
     if (attempt > 0L) {
@@ -1207,11 +1192,11 @@
         sample_args$init <- replicate(n, init_obj, simplify = FALSE)
       }
     }
-    message(sprintf("⏩ %sattempt %d/%d | nu_fixed=%d | metric=%s, adapt_delta=%s, warmup=%s, step_size=%s",
-                    if (nzchar(tag)) paste0("[",tag,"] ") else "",
-                    attempt, max_retries, used_nu,
+    message(sprintf("⏩ %sattempt %d/%d | metric=%s, adapt_delta=%s, warmup=%s, step_size=%s",
+                    if (nzchar(tag)) paste0("[", tag, "] ") else "",
+                    attempt, max_retries,
                     .or(sample_args$metric, "NA"),
-                    ifelse(is.null(sample_args$adapt_delta),"NA",sprintf("%.3f", sample_args$adapt_delta)),
+                    ifelse(is.null(sample_args$adapt_delta), "NA", sprintf("%.3f", sample_args$adapt_delta)),
                     .or(sample_args$iter_warmup, "NA"),
                     .or(sample_args$step_size, "NA")))
 
@@ -1241,7 +1226,6 @@
     fit = fit,
     diag = diag,
     n_retries = attempt,
-    used_nu = used_nu,
     fit_failed = fit_failed,
     final_args = final_args
   )
@@ -1302,6 +1286,10 @@
     a_ji_mean = res_ji$a_mean, a_ji_sd = res_ji$a_sd,
     a_ji_q2.5 = res_ji$a_q2.5, a_ji_q97.5 = res_ji$a_q97.5,
     p_sign2_ji = res_ji$p_sign2,
+    nu_mean_ij = res_ij$nu_mean, nu_median_ij = res_ij$nu_median,
+    nu_q05_ij = res_ij$nu_q05, nu_q95_ij = res_ij$nu_q95,
+    nu_mean_ji = res_ji$nu_mean, nu_median_ji = res_ji$nu_median,
+    nu_q05_ji = res_ji$nu_q05, nu_q95_ji = res_ji$nu_q95,
     a_ii_mean = res_ij$aii_mean, a_ii_sd = res_ij$aii_sd,
     a_ii_q2.5 = res_ij$aii_q2.5, a_ii_q97.5 = res_ij$aii_q97.5,
     p_sign2_ii = res_ij$p_sign2_self,
@@ -1336,7 +1324,7 @@
     kfold_n_subjects_ij      = res_ij$kfold_n_subjects,
     kfold_retry_total_ij     = res_ij$kfold_retry_total,
     kfold_retry_mean_ij      = res_ij$kfold_retry_mean,
-    kfold_nu_used_counts_ij  = res_ij$kfold_nu_used_counts,
+    kfold_nu_fold_means_ij  = res_ij$kfold_nu_fold_means,
     kfold_outer_rounds_ij    = res_ij$kfold_outer_rounds,
     kfold_failed_ij          = res_ij$kfold_failed,
     kfold_folds_ok_ij        = res_ij$kfold_n_folds_ok,
@@ -1356,12 +1344,35 @@
     kfold_n_subjects_ji      = res_ji$kfold_n_subjects,
     kfold_retry_total_ji     = res_ji$kfold_retry_total,
     kfold_retry_mean_ji      = res_ji$kfold_retry_mean,
-    kfold_nu_used_counts_ji  = res_ji$kfold_nu_used_counts,
+    kfold_nu_fold_means_ji  = res_ji$kfold_nu_fold_means,
     kfold_outer_rounds_ji    = res_ji$kfold_outer_rounds,
     kfold_failed_ji          = res_ji$kfold_failed,
     kfold_folds_ok_ji        = res_ji$kfold_n_folds_ok,
     kfold_folds_fail_ji      = res_ji$kfold_n_folds_fail
   ))
+}
+
+
+.validate_nu_draws <- function(draws_df, stage) {
+  if (!("nu" %in% names(draws_df))) {
+    return(structure(list(stage = stage, reason = "missing_nu_draws"),
+                     class = c("pclv_failure", "list")))
+  }
+  nu <- as.numeric(draws_df$nu)
+  if (length(nu) != nrow(draws_df) || any(!is.finite(nu)) || any(nu <= 2)) {
+    return(structure(list(stage = stage, reason = "invalid_nu_draws"),
+                     class = c("pclv_failure", "list")))
+  }
+  NULL
+}
+
+.summarise_nu_draws <- function(draws_df) {
+  failure <- .validate_nu_draws(draws_df, "posterior_extraction")
+  if (!is.null(failure)) return(failure)
+  nu <- as.numeric(draws_df$nu)
+  list(nu_mean = mean(nu), nu_median = stats::median(nu),
+       nu_q05 = unname(stats::quantile(nu, 0.05)),
+       nu_q95 = unname(stats::quantile(nu, 0.95)))
 }
 
 #' Subject-level Kalman-OU projection log-likelihood
@@ -1371,13 +1382,10 @@
 #'
 #' @param draws_df Posterior draws data frame (at least \code{r0,a_ii,a_ij} and noise params).
 #' @param pair_in Test data with columns \code{y,xi,xj,subject,time}.
-#' @param nu_scalar Optional scalar \eqn{\nu} to use if draws lack \eqn{\nu}.
 #' @return A list with matrix \code{full} (draws × subjects), \code{subjects}, and \code{n_obs}.
 #' @noRd
 #' @keywords internal
-.proj_loglik_subject <- function(draws_df,
-                                 pair_in,
-                                 nu_scalar = .PCLV_CORE_NU) {
+.proj_loglik_subject <- function(draws_df, pair_in) {
   stopifnot(all(c("y", "xi", "xj", "subject") %in% names(pair_in)))
   subs <- unique(pair_in$subject)
   D    <- nrow(draws_df)
@@ -1408,11 +1416,9 @@
     sigma_pred <- draws_df$sigma
   }
 
-  nu_vec <- if ("nu" %in% names(draws_df)) {
-    draws_df$nu
-  } else {
-    rep(nu_scalar, nrow(draws_df))
-  }
+  nu_failure <- .validate_nu_draws(draws_df, "elpd_scoring")
+  if (!is.null(nu_failure)) return(nu_failure)
+  nu_vec <- as.numeric(draws_df$nu)
 
   loglik_full <- matrix(NA_real_, nrow = D, ncol = Ssub)
   n_obs_vec   <- integer(Ssub)
@@ -1430,7 +1436,7 @@
     y_rep  <- matrix(rep(y, each = nrow(draws_df)), nrow = nrow(draws_df))
 
     # 측정잡음 분산 R (t면 ν/(ν-2) 팩터로 가우시안 근사)
-    t_fac <- ifelse(nu_vec > 2, nu_vec / (nu_vec - 2), 5.0)
+    t_fac <- nu_vec / (nu_vec - 2)
     R <- (draws_df$sigma^2) * t_fac
     R <- pmax(R, 1e-10)
 
@@ -1542,6 +1548,7 @@
   }
   list(full = loglik_full, subjects = subs, n_obs = n_obs_vec)
 }
+
 
 #' Make repeated K-fold splits at the subject level
 #'
@@ -1668,7 +1675,6 @@
 #' @param sample_args_base Base sampler args (re-adapts per fold).
 #' @param pair_in Full input data frame.
 #' @param tr,te Character vectors of train/test subjects.
-#' @param nu_fixed_override Optional fixed \eqn{\nu} for all folds.
 #' @param sample_args_override Optional override of sampler args.
 #' @param seed_override Deterministic seed per fold.
 #' @return A list with \code{elpd}, \code{elpd_ppd}, and \code{fold_diag}; or \code{NULL}.
@@ -1682,7 +1688,6 @@
                                 te,
                                 max_retries = 3,
                                 silent_sampler = TRUE,
-                                nu_fixed_override = NULL,
                                 sample_args_override = NULL,
                                 freeze_retry_hypers = FALSE,
                                 seed_override = NULL,
@@ -1704,9 +1709,6 @@
   sl$prev <- pts$prev_train
   sl$dt  <- pts$dt_train
 
-  # K-fold에서도 ν 고정 주입을 허용 (훈련 진단 기반 글로벌 규칙; 누출 아님)
-  # 이유: override 값은 오직 "훈련 단계의 샘플러 진단"으로만 결정되며,
-  # 테스트 ELPD/관측에는 의존하지 않는다. 폴드 간 동일 ν로 비교 일관성 확보.
 
   # ★ 샘플러 제어는 공유하되, 적응 산출물(step_size/metric)은 폴드마다 재적응
   sa <- if (is.null(sample_args_override))
@@ -1747,10 +1749,6 @@
     base_args  = sa,
     stan_list  = sl,
     max_retries = max_retries,
-    # ν 고정 정책: override가 주어지면 그 값으로 **고정**(bump 금지)
-    # (훈련 진단만으로 결정된 사전 규칙 → 누출 아님)
-    nu_fix = if (is.null(nu_fixed_override)) .PCLV_CORE_NU else nu_fixed_override,
-    max_nu_cap = if (is.null(nu_fixed_override)) .PCLV_CORE_NU else nu_fixed_override,
     ebfmi_thresh = 0.30,
     silent_sampler = silent_sampler,
     tag = "kfold",
@@ -1765,9 +1763,11 @@
   te_df <- pts$test
   llm <- .proj_loglik_subject(
     draws_df = d,
-    pair_in = te_df,
-    nu_scalar = .PCLV_CORE_NU
+    pair_in = te_df
   )
+  if (inherits(llm, "pclv_failure")) {
+    return(llm)
+  }
   # --- NEW: subject별 ELPD 벡터와 fold diagnostics 구성 ---
   # llm$full: (draws x n_test_subjects) 행렬, llm$subjects: 테스트 subject 벡터
   if (is.null(llm) ||
@@ -1782,7 +1782,7 @@
   dg <- tryfit$diag
   fd <- data.frame(
     n_retries      = tryfit$n_retries,
-    nu_used        = tryfit$used_nu,
+    nu_mean        = mean(d$nu),
     ebfmi_min      = if (!is.null(dg$ebfmi_min))
       dg$ebfmi_min
     else
@@ -1820,7 +1820,6 @@
 #'
 #' @inheritParams .fold_fit_and_score
 #' @param n_workers_kfold Number of workers (multisession) for fold-level parallelism.
-#' @param nu_fixed_kfold Fixed \eqn{\nu} to use in all folds (no bump).
 #' @return A list with aggregate ELPD summaries, diagnostics, splits, and counts.
 #' @noRd
 #' @keywords internal
@@ -1835,8 +1834,7 @@
                            max_retries = 3,
                            n_workers_kfold = 1L,
                            min_pairs = 4,
-                           nu_fixed_kfold = NULL,         # ← 1차 K-fold에서 고정할 ν (예: 본계산 used_nu)
-                           freeze_retry_hypers = FALSE) { # ← 폴드 내 bump 금지 여부
+                           freeze_retry_hypers = FALSE) { # retry computational settings remain fixed within folds
   splits <- .make_repkfold_splits(pair_in$subject, K, R, seed)
   # --- compact split manifest for reproducibility (r,k,test_subjects)
   splits_df <- ({
@@ -1893,7 +1891,6 @@
       task$te,
       silent_sampler = silent_sampler,
       max_retries = max_retries,
-      nu_fixed_override = nu_fixed_kfold,
       freeze_retry_hypers = freeze_retry_hypers,
       seed_override = task$seed,
       min_pairs = min_pairs
@@ -1975,7 +1972,7 @@
       }
       fold_diag_df[[length(fold_diag_df) + 1L]] <- data.frame(
         n_retries = el$fold_diag$n_retries,
-        nu_used = el$fold_diag$nu_used,
+        nu_mean = el$fold_diag$nu_mean,
         ebfmi_min = el$fold_diag$ebfmi_min,
         worst_rhat = el$fold_diag$worst_rhat,
         min_ess_bulk = el$fold_diag$min_ess_bulk,
@@ -2006,7 +2003,7 @@
   else
     data.frame(
       n_retries = integer(),
-      nu_used = integer(),
+      nu_mean = double(),
       ebfmi_min = double(),
       worst_rhat = double(),
       min_ess_bulk = double(),
@@ -2022,14 +2019,7 @@
     mean(fd$n_retries, na.rm = TRUE)
   else
     NA_real_
-  nu_counts   <- if (nrow(fd))
-    as.integer(table(fd$nu_used))
-  else
-    integer()
-  names(nu_counts) <- if (nrow(fd))
-    names(table(fd$nu_used))
-  else
-    character()
+  nu_fold_means <- if (nrow(fd)) fd$nu_mean else numeric()
 
 
   list(
@@ -2053,7 +2043,7 @@
     fold_diag = fd,
     retry_total = retry_total,
     retry_mean  = retry_mean,
-    nu_used_counts = nu_counts,
+    nu_fold_means = nu_fold_means,
     failures = fold_failures
   )
 }
@@ -2221,10 +2211,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       S   = n_subj,
       sid = as.integer(factor(pair_in$subject)),
       prev = prev,
-      dt   = dtv,
-      use_student_t = as.integer(.PCLV_CORE_USE_STUDENT_T),
-      # 0/1
-      nu_fixed = .PCLV_CORE_NU
+      dt   = dtv
     )
   )
 
@@ -2367,10 +2354,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     base_args = base_args,
     stan_list = stan_list,
     max_retries = max_retries,
-    nu_fix = .PCLV_CORE_NU,
     silent_sampler = silent_sampler,
     ebfmi_thresh = 0.30,
-    max_nu_cap = .PCLV_CORE_NU,
     tag = tag_lbl
   )
 
@@ -2382,9 +2367,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   diag       <- res_try$diag
   n_retries  <- res_try$n_retries
   fit_failed <- res_try$fit_failed
-  used_nu    <- res_try$used_nu
   final_args_main <- res_try$final_args
-  nu_final        <- used_nu
 
   # 5) 드로우 요약 ---------------------------------------------------------------
   if (quiet) {
@@ -2392,9 +2375,9 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   } else {
     d <- .safe_draws_df(fit_full)  # a_ij, a_ii, r0, tau_r, sigma, sigma_ou, lambda, ...
   }
-  if (!("nu" %in% names(d))) {
-    d$nu <- rep(used_nu, nrow(d))
-  }
+
+  nu_summary <- .summarise_nu_draws(d)
+  if (inherits(nu_summary, "pclv_failure")) return(nu_summary)
 
   # 방어적 체크
   if (!all(c("a_ij", "a_ii") %in% names(d))) {
@@ -2434,10 +2417,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     sargs_kfold$inv_metric  <- NULL   # metric 파일/행렬 강제 금지
     sargs_kfold$metric_file <- NULL
 
-
-    # 본계산에서 사용된 ν로 K-fold 전 폴드 **고정** 실행 (bump 금지) ---
-    nu_kfold_main <- nu_final
-
     kfold <- .repkfold_eval(
       mod = mod,
       stan_list_base   = stan_list,
@@ -2449,7 +2428,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       silent_sampler = silent_sampler,
       n_workers_kfold = n_workers_kfold_eff,
       max_retries = max_retries,
-      nu_fixed_kfold = nu_kfold_main,          # ← ν 고정
       freeze_retry_hypers = TRUE,
       min_pairs = min_pairs
     )
@@ -2485,11 +2463,15 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     aii_q97.5 = stats::quantile(aii, 0.975),
     p_sign2_self = p_sign2_self,
 
+    nu_mean = nu_summary$nu_mean,
+    nu_median = nu_summary$nu_median,
+    nu_q05 = nu_summary$nu_q05,
+    nu_q95 = nu_summary$nu_q95,
+
     # 원시 진단치/리트라이 메타(후처리 summariser에서 필터 예정)
     diag = diag,
     n_retries = n_retries,
     fit_failed = fit_failed,
-    nu_fixed_used = nu_final,
 
     # 스무딩 메타
     smoothed = sflag,
@@ -2592,11 +2574,11 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NA_real_
     else
       kfold$retry_mean,
-    kfold_nu_used_counts = list(if (is.null(kfold) ||
-                                    is.null(kfold$nu_used_counts))
+    kfold_nu_fold_means = list(if (is.null(kfold) ||
+                                    is.null(kfold$nu_fold_means))
       NULL
       else
-        kfold$nu_used_counts)
+        kfold$nu_fold_means)
   )
 }
 
