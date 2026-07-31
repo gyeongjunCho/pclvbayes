@@ -32,7 +32,7 @@ This repository is temporarily viewable via GitFront for a conference demo at th
   Use this to shortlist partners before MCMC.
 
 - **Bayesian pairwise pcLV Core — `fit_pclv_bayes()`**
-  For each unordered pair {i, j}, fits two ordered regressions (j→i and i→j). Predictors are lag-1 pair-to-rest ALR values and the response is ΔALR\_i / Δt. The model uses irregular-time OU residuals, Student-t observations with fixed `nu = 5`, and repeated subject-level K-fold Kalman ELPD.
+  For each unordered pair {i, j}, fits two ordered regressions (j→i and i→j). Predictors are lag-1 pair-to-rest ALR values and the response is ΔALR\_i / Δt. The model uses irregular-time OU residuals, Student-t observations with one posterior-estimated `nu > 2` per directed fit, and repeated subject-level K-fold Kalman ELPD.
 
 ---
 
@@ -50,13 +50,13 @@ Repeated subject-level K-fold ELPD is always computed. Each fold uses training-o
 
 ## Noise model & scoring
 
-The Core uses Student-t observation noise with fixed `nu = 5`. Irregular-time OU prediction is scored through the Kalman filter, including the Student-t variance expansion.
+The Core estimates one shared Student-t degrees-of-freedom parameter per directed fit, constrained by `nu = 2 + exp(log_nu_minus_two)`. Irregular-time OU prediction is scored through the Kalman filter, including the Student-t variance expansion.
 
 ---
 
 ## Sampling robustness
 
-A diagnostics-aware retry policy (up to `max_retries`) monitors divergences, tree depth, and E-BFMI while retaining fixed Student-t `nu = 5`. Diagnostics are returned for downstream filtering.
+A diagnostics-aware retry policy (up to `max_retries`) monitors divergences, tree depth, and E-BFMI without changing the Student-t model or its `nu` prior. Diagnostics are returned for downstream filtering.
 
 ---
 

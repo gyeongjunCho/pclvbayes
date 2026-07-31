@@ -324,7 +324,7 @@ test_that("directed fitting uses the fixed canonical Core choices", {
   expect_identical(pclvbayes:::.PCLV_CORE_LAG, 1L)
   expect_identical(pclvbayes:::.PCLV_CORE_RESID_MODE, "ou")
   expect_true(pclvbayes:::.PCLV_CORE_USE_STUDENT_T)
-  expect_identical(pclvbayes:::.PCLV_CORE_NU, 5)
+  expect_false(exists(".PCLV_CORE_NU", envir = asNamespace("pclvbayes"), inherits = FALSE))
   expect_true(pclvbayes:::.PCLV_CORE_COMPUTE_ELPD)
   expect_identical(pclvbayes:::.PCLV_CORE_ELPD_MODE, "kalman")
   expect_null(pclvbayes:::.PCLV_CORE_SPLINE$df)
@@ -536,7 +536,7 @@ test_that("K-fold aggregation preserves unavailable and partial evidence", {
       elpd_ppd = stats::setNames(-2.5, held_out),
       n_obs = stats::setNames(2L, held_out),
       fold_diag = data.frame(
-        n_retries = 0L, nu_used = 5, ebfmi_min = 0.9,
+        n_retries = 0L, nu_mean = 5, ebfmi_min = 0.9,
         worst_rhat = 1, min_ess_bulk = 500,
         treedepth_hits = 0L, n_divergent = 0L
       )
@@ -563,6 +563,7 @@ test_that("K-fold aggregation preserves unavailable and partial evidence", {
   expect_equal(result$subject_failure_counts, c(A = 2L, B = 1L))
   expect_equal(result$subject_test_counts, c(A = 0L, B = 2L))
   expect_equal(result$total_successful_evaluations, 1L)
+  expect_equal(result$nu_fold_means, 5)
   expect_equal(sum(is.finite(result$elpd_subject)), 1)
   expect_length(result$failures, 3)
   expect_named(
@@ -624,11 +625,11 @@ test_that("pointwise ELPD and weights require successful common evidence", {
   }
 })
 
-test_that("canonical projection scoring is Kalman OU with fixed Student-t nu", {
+test_that("canonical projection scoring is Kalman OU with draw-specific Student-t nu", {
   draws <- data.frame(
     r0 = c(0, 0.1), a_ii = c(-0.2, -0.1), a_ij = c(0.3, 0.2),
     sigma = c(0.4, 0.5), sd_ou = c(0.2, 0.25), lambda = c(0.7, 0.8),
-    tau_r = c(0, 0)
+    tau_r = c(0, 0), nu = c(4, 8)
   )
   held_out <- data.frame(
     subject = c("A", "A", "B", "B"), time = c(0, 2, 1, 5),
@@ -641,5 +642,5 @@ test_that("canonical projection scoring is Kalman OU with fixed Student-t nu", {
   expect_equal(scored$subjects, c("A", "B"))
   expect_equal(scored$n_obs, c(2L, 2L))
   expect_identical(names(formals(pclvbayes:::.proj_loglik_subject)),
-                   c("draws_df", "pair_in", "nu_scalar"))
+                   c("draws_df", "pair_in"))
 })
