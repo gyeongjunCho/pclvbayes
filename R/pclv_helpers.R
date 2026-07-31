@@ -163,77 +163,10 @@
     sm_mat[tx, col_idx_all] <- vec_pred
   }
 
+#' Safely extract common parameter draws as a data frame
   sm_mat
 }
 
-#' Build smoothed pair table and ΔALR/Δt response
-#'
-#' Constructs a per-interval table for a directed pair \code{j -> i}:
-#' computes ALR for taxon \code{i} versus \code{rest} at consecutive times
-#' and returns the per-interval rate \code{(ALR_next - ALR_now)/dt},
-#' alongside raw smoothed abundances \code{xi_raw}, \code{xj_raw}.
-#'
-#' @param sm_mat Smoothed abundance matrix from \code{.precompute_spline_smoothed()}.
-#' @param meta_df Metadata with \code{Sample}, \code{subject}, \code{time}.
-#' @param j Partner taxon name (from-index).
-#' @param i Target taxon name (to-index).
-#' @param eps Small constant for ALR stability.
-#' @param min_pairs Minimum number of valid intervals to return a table.
-#' @param min_dt Minimum positive time difference to accept an interval.
-#' @param min_sd Minimum SD threshold for \code{xi_raw}/\code{xj_raw}.
-#' @return A tibble with columns \code{subject}, \code{time}, \code{y}, \code{xi_raw}, \code{xj_raw}, or \code{NULL}.
-#' @noRd
-#' @keywords internal
-.build_pair_df_smoothed <- function(sm_mat, meta_df, j, i,
-                                    eps = 1e-8,
-                                    min_pairs = 4,
-                                    min_dt = 1e-8,
-                                    min_sd = 1e-12) {
-  stopifnot(all(c("Sample","subject","time") %in% names(meta_df)))
-  idx_i <- match(meta_df$Sample, colnames(sm_mat))
-  xi_all <- as.numeric(sm_mat[i, idx_i])
-  xj_all <- as.numeric(sm_mat[j, idx_i])
-
-  df <- meta_df |>
-    dplyr::mutate(
-      xi_raw = pmax(xi_all, 0),
-      xj_raw = pmax(xj_all, 0)
-    ) |>
-    dplyr::arrange(subject, time)
-
-  pair_df <- df |>
-    dplyr::group_by(subject) |>
-    dplyr::arrange(time, .by_group = TRUE) |>
-    dplyr::mutate(
-      time_next = dplyr::lead(time),
-      xi_next   = dplyr::lead(xi_raw),
-      xj_next   = dplyr::lead(xj_raw),
-      dt        = time_next - time
-    ) |>
-    dplyr::ungroup() |>
-    dplyr::filter(
-      is.finite(time), is.finite(time_next),
-      is.finite(xi_raw), is.finite(xj_raw),
-      is.finite(xi_next), is.finite(xj_next),
-      is.finite(dt), dt > min_dt
-    ) |>
-    dplyr::mutate(
-      rest_now  = pmax(0, 1 - xi_raw - xj_raw),
-      rest_next = pmax(0, 1 - xi_next - xj_next),
-      alr_i_now  = log(pmax(xi_raw,  0) + eps) - log(pmax(rest_now,  0) + eps),
-      alr_i_next = log(pmax(xi_next, 0) + eps) - log(pmax(rest_next, 0) + eps),
-      y = (alr_i_next - alr_i_now) / dt
-    ) |>
-    dplyr::transmute(subject, time, y, xi_raw, xj_raw) |>
-    dplyr::filter(is.finite(y), is.finite(xi_raw), is.finite(xj_raw))
-
-  if (nrow(pair_df) < min_pairs) return(NULL)
-  if (stats::sd(pair_df$xi_raw) < min_sd || stats::sd(pair_df$xj_raw) < min_sd) return(NULL)
-  pair_df
-}
-
-
-#' Safely extract common parameter draws as a data frame
 #'
 #' Selects a subset of typical parameters if available (e.g., \code{a_ij},
 #' \code{a_ii}, \code{r0}, noise and OU parameters) from a CmdStanR fit.
@@ -515,13 +448,75 @@
   c(as.numeric(xi_)[1], as.numeric(xj_)[1], as.numeric(xr_)[1], as.numeric(eps_star)[1])
 }
 
+.select_smoothed_pair_rows <- function(sm_mat, meta_df, j, i,
+                                       min_pairs = 4, min_dt = 1e-8, min_sd = 1e-12) {
+  stopifnot(all(c("Sample", "subject", "time") %in% names(meta_df)))
+  sample_idx <- match(meta_df$Sample, colnames(sm_mat))
+  pair_df <- data.frame(
+    subject = meta_df$subject, time = meta_df$time,
+    xi_raw = pmax(as.numeric(sm_mat[i, sample_idx]), 0),
+    xj_raw = pmax(as.numeric(sm_mat[j, sample_idx]), 0)
+  )
+  pair_df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
+  by_subject <- split(seq_len(nrow(pair_df)), pair_df$subject)
+  keep <- unlist(lapply(by_subject, function(ix) {
+    if (length(ix) < 2L) return(integer())
+    current <- ix[-length(ix)]; next_ix <- ix[-1L]
+    dt <- as.numeric(pair_df$time[next_ix] - pair_df$time[current])
+    current[is.finite(pair_df$time[current]) & is.finite(pair_df$time[next_ix]) &
+              is.finite(pair_df$xi_raw[current]) & is.finite(pair_df$xj_raw[current]) &
+              is.finite(pair_df$xi_raw[next_ix]) & is.finite(pair_df$xj_raw[next_ix]) &
+              is.finite(dt) & dt > min_dt]
+  }), use.names = FALSE)
+  pair_df <- pair_df[keep, , drop = FALSE]
+  if (nrow(pair_df) < min_pairs) return(NULL)
+  if (stats::sd(pair_df$xi_raw) < min_sd || stats::sd(pair_df$xj_raw) < min_sd) return(NULL)
+  pair_df
+}
+
+.build_pair_df_smoothed <- function(sm_mat, meta_df, j, i, eps = 1e-8,
+                                    min_pairs = 4, min_dt = 1e-8, min_sd = 1e-12) {
+  .select_smoothed_pair_rows(sm_mat, meta_df, j, i, min_pairs, min_dt, min_sd)
+}
+
+.pair_to_rest_abundance <- function(xi, xj) pmax(0, 1 - xi - xj)
+
+.pair_alr <- function(trip, alr_cap) {
+  alr_i <- log(trip[, "xi"]) - log(trip[, "xr"])
+  alr_j <- log(trip[, "xj"]) - log(trip[, "xr"])
+  if (is.finite(alr_cap)) {
+    alr_i <- pmax(pmin(alr_i, alr_cap), -alr_cap)
+    alr_j <- pmax(pmin(alr_j, alr_cap), -alr_cap)
+  } else {
+    es <- pmax(trip[, "eps_star"], .Machine$double.eps)
+    cap_vec <- pmin(8, pmax(0, log(pmax(1 - 2 * es, .Machine$double.eps) / es)))
+    alr_i <- pmax(pmin(alr_i, cap_vec), -cap_vec)
+    alr_j <- pmax(pmin(alr_j, cap_vec), -cap_vec)
+  }
+  list(i = alr_i, j = alr_j)
+}
+
+.delta_alr_over_dt <- function(v, time, subject) {
+  by_subject <- split(seq_along(v), subject)
+  unsplit(lapply(by_subject, function(ix) {
+    vi <- v[ix]; ti <- time[ix]
+    vi_lag <- dplyr::lag(vi, .PCLV_CORE_LAG)
+    dt <- as.numeric(ti - dplyr::lag(ti, .PCLV_CORE_LAG))
+    dt_pos <- dt[is.finite(dt) & dt > 0]
+    dt_min <- if (length(dt_pos)) 0.25 * stats::median(dt_pos) else 1
+    out <- (vi - vi_lag) / pmax(dt, dt_min)
+    out[!is.finite(dt) | dt <= 0] <- NA_real_
+    out
+  }), subject)
+}
+
 #' Build model inputs for pairwise gLV regressions
 #'
 #' Creates lagged predictors and \code{ΔALR_i/Δt} response under either
 #' ALR transformation with zero-aware ALR safeguards, optional
 #' ALR smoothing, partner non-zero filters, and global predictor scaling.
 #'
-#' @param pair_df Tibble from \code{.build_pair_df_smoothed()}.
+#' @param pair_df Optional preselected raw pair-abundance table; when NULL, rows are selected from sm_mat and meta_df.
 #' @param lag Positive integer lag for predictors within subject.
 #' @param zero_mode_alr Zero-handling mode for ALR (see code for options).
 #' @param minpos_alpha Multiplier for data-driven epsilon.
@@ -537,7 +532,10 @@
 #'   \code{smooth_edf_mean}, \code{smooth_scale}, and \code{smoothed}.
 #' @noRd
 #' @keywords internal
-.make_pair_inputs_glv <- function(pair_df,
+.make_pair_inputs_glv <- function(pair_df = NULL,
+                                  sm_mat = NULL, meta_df = NULL,
+                                  j = NULL, i = NULL, min_pairs = 4,
+                                  min_dt = 1e-8, min_sd = 1e-12,
                                   zero_mode_alr = c("minpos_time","minpos_subject","lib","fixed"),
                                   minpos_alpha = 0.5,
                                   minpos_base = c("ij","triplet"),
@@ -554,29 +552,22 @@
   minpos_base   <- match.arg(minpos_base)
   smooth_scale  <- match.arg(smooth_scale)
 
+  if (is.null(pair_df)) {
+    pair_df <- .select_smoothed_pair_rows(
+      sm_mat, meta_df, j, i, min_pairs, min_dt, min_sd
+    )
+    if (is.null(pair_df)) return(NULL)
+  }
+
   stopifnot(all(c("subject","time","xi_raw","xj_raw") %in% names(pair_df)))
   df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
 
   df$xi_raw   <- pmax(as.numeric(df$xi_raw), 0)
   df$xj_raw   <- pmax(as.numeric(df$xj_raw), 0)
-  df$rest_raw <- pmax(0, 1 - df$xi_raw - df$xj_raw)
+  df$rest_raw <- .pair_to_rest_abundance(df$xi_raw, df$xj_raw)
 
   by_s <- split(seq_len(nrow(df)), df$subject)
   lagv <- function(v) unsplit(lapply(by_s, function(ix) dplyr::lag(v[ix], .PCLV_CORE_LAG)), df$subject)
-  diff_over_dt <- function(v, t) {
-    unsplit(lapply(by_s, function(ix) {
-      vi <- v[ix]; ti <- t[ix]
-      vi_lag <- dplyr::lag(vi, .PCLV_CORE_LAG)
-      dt     <- as.numeric(ti - dplyr::lag(ti, .PCLV_CORE_LAG))
-      # 하한: subject 내 양의 dt들의 중앙값의 25% (예)
-      dt_pos <- dt[is.finite(dt) & dt > 0]
-      dt_min <- if (length(dt_pos)) 0.25 * stats::median(dt_pos) else 1
-      dt_adj <- pmax(dt, dt_min)
-      out <- (vi - vi_lag) / dt_adj
-      out[!is.finite(dt) | dt <= 0] <- NA_real_
-      out
-    }), df$subject)
-  }
 
   lib <- if ("libsize" %in% names(df)) df$libsize else NA_real_
 
@@ -600,20 +591,9 @@
     numeric(4)
   ))
   colnames(trip) <- c("xi","xj","xr","eps_star")
-  alr_i <- log(trip[, "xi"]) - log(trip[, "xr"])
-  alr_j <- log(trip[, "xj"]) - log(trip[, "xr"])
-
-  if (is.finite(alr_cap)) {
-    alr_i <- pmax(pmin(alr_i,  alr_cap), -alr_cap)
-    alr_j <- pmax(pmin(alr_j,  alr_cap), -alr_cap)
-  } else {
-    es <- pmax(trip[, "eps_star"], .Machine$double.eps)
-    num <- pmax(1 - 2 * es, .Machine$double.eps)
-    B_theory <- log(num / es)
-    cap_vec  <- pmin(8, pmax(0, B_theory))
-    alr_i <- pmax(pmin(alr_i,  cap_vec), -cap_vec)
-    alr_j <- pmax(pmin(alr_j,  cap_vec), -cap_vec)
-  }
+  alr <- .pair_alr(trip, alr_cap)
+  alr_i <- alr$i
+  alr_j <- alr$j
 
   smooth_edf_mean <- NA_real_
   if (smooth_scale == "alr") {
@@ -656,7 +636,7 @@
 
   xi <- lagv(alr_i)
   xj <- lagv(alr_j)
-  y <- diff_over_dt(alr_i, df$time)
+  y <- .delta_alr_over_dt(alr_i, df$time, df$subject)
 
   # 파트너 희소성 필터(옵션)
   if (is.finite(nz_partner_min_frac) && nz_partner_min_frac > 0) {
@@ -2129,13 +2109,13 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     min_pairs = min_pairs
   )
 } else {
-  pair_df <- .build_pair_df_smoothed(sm_mat, meta_df, partner, target, eps, min_pairs)
+  pair_df <- NULL
 }
-  if (is.null(pair_df))
-    return(NULL)
 
   pair_in <- .make_pair_inputs_glv(
     pair_df = pair_df,
+    sm_mat = sm_mat, meta_df = meta_df,
+    j = partner, i = target, min_pairs = min_pairs,
     zero_mode_alr = zero_mode_alr,
     minpos_alpha = minpos_alpha,
     minpos_base  = minpos_base,

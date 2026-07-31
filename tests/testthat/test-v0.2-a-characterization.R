@@ -59,43 +59,27 @@ test_that("cor_meta_resid keeps its screening output contract", {
   ) %in% names(screened$subjectwise)))
 })
 
-test_that("smoothed pair builder uses pair-to-rest ALR and delta-time rate", {
+test_that("canonical smoothed preprocessing preserves pair-to-rest ALR and delta-time rate", {
   sm_mat <- rbind(
-    target = c(0.20, 0.30, 0.25),
-    partner = c(0.30, 0.30, 0.35),
-    other = c(0.50, 0.40, 0.40)
+    target = c(0.20, 0.30, 0.25, 0.35),
+    partner = c(0.30, 0.30, 0.35, 0.25),
+    other = c(0.50, 0.40, 0.40, 0.40)
   )
-  colnames(sm_mat) <- c("s1", "s2", "s3")
+  colnames(sm_mat) <- paste0("s", 1:4)
+  metadata <- data.frame(Sample = colnames(sm_mat), subject = "A", time = c(0, 2, 5, 9))
 
-  metadata <- data.frame(
-    Sample = c("s1", "s2", "s3"),
-    subject = "A",
-    time = c(0, 2, 5)
+  out <- pclvbayes:::.make_pair_inputs_glv(
+    sm_mat = sm_mat, meta_df = metadata, j = "partner", i = "target",
+    min_pairs = 1, min_sd = 0, zero_mode_alr = "fixed", eps_fixed = 1e-12,
+    alr_cap = 100, smooth_scale = "logra", nz_partner_min_frac = 0
   )
-
-  out <- pclvbayes:::.build_pair_df_smoothed(
-    sm_mat,
-    metadata,
-    j = "partner",
-    i = "target",
-    eps = 1e-12,
-    min_pairs = 1,
-    min_sd = 0
-  )
-
-  expected_alr <- log(c(
-    0.20 / 0.50,
-    0.30 / 0.40,
-    0.25 / 0.40
-  ))
-
-  expect_equal(
-    out$y,
-    diff(expected_alr) / c(2, 3),
-    tolerance = 1e-9
-  )
-  expect_equal(out$xi_raw, c(0.20, 0.30))
-  expect_equal(out$xj_raw, c(0.30, 0.30))
+  retained_alr_i <- log(c(0.20 / 0.50, 0.30 / 0.40, 0.25 / 0.40))
+  retained_alr_j <- log(c(0.30 / 0.50, 0.30 / 0.40, 0.35 / 0.40))
+  expected_xi <- retained_alr_i[1:2]
+  expected_xj <- retained_alr_j[1:2]
+  expect_equal(out$y, diff(retained_alr_i) / c(2, 3), tolerance = 1e-9)
+  expect_equal(out$xi_unscaled, expected_xi, tolerance = 1e-9)
+  expect_equal(out$xj_unscaled, expected_xj, tolerance = 1e-9)
 })
 
 test_that("lagged predictors and delta ALR rates stay within subjects", {
