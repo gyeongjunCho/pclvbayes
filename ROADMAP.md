@@ -100,7 +100,9 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
   — indeterminate directions remain explicit and are never treated as zero.
 - [ ] Audit temporary-file and CmdStan output lifecycle
 - [ ] Commit MTIST benchmark infrastructure
-- [ ] Profile R preprocessing, K-fold, memory, serialization, and sampling
+- [x] Profile R preprocessing, K-fold, memory, serialization, and sampling —
+  MTIST 361 baseline separates directly measurable R components from combined
+  CmdStan/process boundaries and ranks measured optimization candidates.
 - [ ] Optimize measured bottlenecks only
 - [ ] Run representative 10-species MTIST benchmarks
 - [ ] Documentation
