@@ -13,7 +13,9 @@
 #'   (a.k.a. pseudo-BMA+; Bayesian bootstrap), and \code{stacking}
 #'   (true stacking if available; otherwise omitted)
 #' - Diagnostics: \code{rhat}, \code{essb}, \code{esst}, \code{div},
-#'   \code{tdhit}, \code{ebfmi_min}, \code{diag_ok}
+#'   \code{tdhit}, \code{ebfmi_min}, \code{diagnostic_class}, and \code{diag_ok}.
+#'   Interaction and residual identifiability are classified separately;
+#'   indeterminate directions remain explicit and are never interpreted as zero.
 #'
 #' @details
 #' \itemize{
@@ -94,6 +96,17 @@ summarize_bayes_pclv <- function(df,
   self  <- tibble::as_tibble(df$self)
   raw   <- tibble::as_tibble(df$raw)
 
+  # Results created before chain-specific reporting are interpreted using the
+  # historical direction_ok contract. New results always carry these fields.
+  for (suffix in c("ij", "ji")) {
+    class_col <- paste0("diagnostic_class_", suffix)
+    ok_col <- paste0("direction_ok_", suffix)
+    if (!class_col %in% names(raw)) {
+      raw[[class_col]] <- if (ok_col %in% names(raw))
+        ifelse(raw[[ok_col]], "converged", "sampler_diagnostics_failed") else "converged"
+    }
+  }
+
   # diagnostics per direction from 'raw'
   cross_diag <- dplyr::bind_rows(
     dplyr::transmute(
@@ -102,7 +115,8 @@ summarize_bayes_pclv <- function(df,
       n_pairs = .data$n_pairs_ij,
       rhat = .data$rhat_ij, essb = .data$essb_ij, esst = .data$esst_ij,
       div = .data$div_ij, tdhit = .data$tdhit_ij,
-      ebfmi_min = .data$ebfmi_min_ij
+      ebfmi_min = .data$ebfmi_min_ij,
+      diagnostic_class_diag = .data$diagnostic_class_ij
     ),
     dplyr::transmute(
       raw,
@@ -110,7 +124,8 @@ summarize_bayes_pclv <- function(df,
       n_pairs = .data$n_pairs_ji,
       rhat = .data$rhat_ji, essb = .data$essb_ji, esst = .data$esst_ji,
       div = .data$div_ji, tdhit = .data$tdhit_ji,
-      ebfmi_min = .data$ebfmi_min_ji
+      ebfmi_min = .data$ebfmi_min_ji,
+      diagnostic_class_diag = .data$diagnostic_class_ji
     )
   )
   self_diag <- dplyr::bind_rows(
@@ -120,7 +135,8 @@ summarize_bayes_pclv <- function(df,
       n_pairs = .data$n_pairs_ij,
       rhat = .data$rhat_ij, essb = .data$essb_ij, esst = .data$esst_ij,
       div = .data$div_ij, tdhit = .data$tdhit_ij,
-      ebfmi_min = .data$ebfmi_min_ij
+      ebfmi_min = .data$ebfmi_min_ij,
+      diagnostic_class = .data$diagnostic_class_ij
     ),
     dplyr::transmute(
       raw,
@@ -128,7 +144,8 @@ summarize_bayes_pclv <- function(df,
       n_pairs = .data$n_pairs_ji,
       rhat = .data$rhat_ji, essb = .data$essb_ji, esst = .data$esst_ji,
       div = .data$div_ji, tdhit = .data$tdhit_ji,
-      ebfmi_min = .data$ebfmi_min_ji
+      ebfmi_min = .data$ebfmi_min_ji,
+      diagnostic_class = .data$diagnostic_class_ji
     )
   )
 
@@ -140,8 +157,10 @@ summarize_bayes_pclv <- function(df,
     cross_merged <- cross |>
       dplyr::left_join(cross_diag, by = c("from","to")) |>
       dplyr::mutate(
-        diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
-                               .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
+        sampler_diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
+                                       .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
+        diagnostic_class = dplyr::coalesce(.data$diagnostic_class, .data$diagnostic_class_diag),
+        diag_ok = .data$sampler_diag_ok & .data$diagnostic_class == "converged",
         a_sign = dplyr::case_when(
           is.finite(.data$a_mean) & .data$a_mean >  0 ~ "+",
           is.finite(.data$a_mean) & .data$a_mean <  0 ~ "-",
@@ -183,7 +202,7 @@ summarize_bayes_pclv <- function(df,
         pseudo_BMA_plus,
         stacking = NA_real_,
         rhat, essb, esst, div, tdhit, ebfmi_min,
-        diag_ok
+        diagnostic_class, sampler_diag_ok, diag_ok
       )
 
     # 4) TRUE stacking도 diag_ok==TRUE 엣지만 사용
@@ -246,8 +265,9 @@ summarize_bayes_pclv <- function(df,
           is.finite(.data$a_self_mean) & .data$a_self_mean <  0 ~ "-",
           TRUE ~ "0"
         ),
-        diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
-                               .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
+        sampler_diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
+                                       .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
+        diag_ok = .data$sampler_diag_ok & .data$diagnostic_class == "converged",
         bayes_FDR = ifelse(.data$diag_ok, .lfsr_safe(.data$p_sign2_self), NA_real_)
       ) |>
       dplyr::transmute(
@@ -263,7 +283,7 @@ summarize_bayes_pclv <- function(df,
         pseudo_BMA_plus = NA_real_,
         stacking = NA_real_,
         rhat, essb, esst, div, tdhit, ebfmi_min,
-        diag_ok
+        diagnostic_class, sampler_diag_ok, diag_ok
       )
 
     if (!is.null(alpha)) {

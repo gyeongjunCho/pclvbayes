@@ -94,15 +94,42 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 
 ### Remaining
 
-- [ ] Strengthen multi-chain diagnostic reporting
-- [ ] Record chain-specific sign agreement and residual-allocation disagreement
-- [x] Audit temporary-file and CmdStan output lifecycle
+- [x] Strengthen multi-chain diagnostic reporting — deterministic interaction
+  and residual identifiability classes now gate interpretation separately.
+- [x] Record chain-specific sign agreement and residual-allocation disagreement
+  — indeterminate directions remain explicit and are never treated as zero.
+- [ ] Audit temporary-file and CmdStan output lifecycle
 - [ ] Commit MTIST benchmark infrastructure
 - [ ] Profile R preprocessing, K-fold, memory, serialization, and sampling
 - [ ] Optimize measured bottlenecks only
 - [ ] Run representative 10-species MTIST benchmarks
 - [ ] Documentation
+- [ ] Reduce and freeze the public `fit_pclv_bayes()` API
 - [ ] Release preparation
+
+### Final public API reduction
+
+Perform only after benchmarking, profiling, and measured optimization are
+complete.
+
+- Classify every public argument as:
+  - required scientific input;
+  - justified user-facing configuration;
+  - computational resource control;
+  - internal implementation detail;
+  - obsolete experimental option.
+- Remove internal numerical constants, fallback controls, retry internals,
+  Pathfinder tuning parameters, and mutually incompatible preprocessing
+  options from the public signature.
+- Do not hide obsolete options inside a large `control` object.
+- Freeze one canonical zero-handling policy.
+- Freeze one canonical smoothing policy.
+- Preserve only reproducibility, sampling effort, K-fold, progress, and
+  resource controls that users genuinely need.
+- Add migration notes for every removed argument.
+- Update documentation and examples.
+- Require package tests and representative benchmark equivalence before
+  release.
 
 ---
 

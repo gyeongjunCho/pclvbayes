@@ -269,6 +269,131 @@
   )
 }
 
+# A chain must put at least this much posterior mass on one sign before that
+# sign is treated as identified. This matches the package's existing 95%
+# posterior-sign interpretation while keeping LFSR filtering separate.
+.PCLV_CHAIN_SIGN_PROB_MIN <- 0.95
+.PCLV_EBFMI_MIN <- 0.30
+`%||%` <- function(x, fallback) if (is.null(x)) fallback else x
+
+.chain_parameter_summary <- function(draws, parameter) {
+  if (!all(c(parameter, ".chain") %in% names(draws))) return(data.frame())
+  pieces <- split(as.numeric(draws[[parameter]]), draws$.chain)
+  rows <- lapply(names(pieces), function(chain) {
+    x <- pieces[[chain]]
+    x <- x[is.finite(x)]
+    if (!length(x)) return(NULL)
+    data.frame(
+      chain = as.integer(chain), parameter = parameter,
+      mean = mean(x), median = stats::median(x),
+      q05 = unname(stats::quantile(x, 0.05)), q95 = unname(stats::quantile(x, 0.95)),
+      positive_probability = mean(x > 0), negative_probability = mean(x < 0),
+      stringsAsFactors = FALSE
+    )
+  })
+  dplyr::bind_rows(rows)
+}
+
+.chain_intervals_overlap <- function(x) {
+  nrow(x) > 0L && all(is.finite(x$q05)) && all(is.finite(x$q95)) &&
+    max(x$q05) <= min(x$q95)
+}
+
+.classify_chain_diagnostics <- function(draws, diag) {
+  empty <- list(
+    diagnostic_class = "sampler_diagnostics_failed",
+    interaction_identifiable = FALSE, residual_identifiable = FALSE,
+    chain_sign_agreement = NA, pooled_sign_probability = NA_real_,
+    chain_aij_means = numeric(), chain_aij_medians = numeric(),
+    chain_aij_positive_probabilities = numeric(), chain_aij_negative_probabilities = numeric(),
+    chain_aij_mean_range = NA_real_, chain_aij_median_range = NA_real_,
+    chain_sign_probability_max_difference = NA_real_,
+    chain_aii_means = numeric(), chain_aii_medians = numeric(),
+    chain_aii_sign_probabilities = numeric(), chain_aii_sign_agreement = NA,
+    chain_residual_summary = data.frame(), residual_median_ranges = numeric(),
+    residual_regime_disagreement = NA,
+    indeterminate_reason = "missing_or_invalid_posterior_draws"
+  )
+  if (!is.data.frame(draws) || !all(c("a_ij", "a_ii", ".chain") %in% names(draws)) ||
+      any(!is.finite(draws$a_ij)) || any(!is.finite(draws$a_ii))) return(empty)
+
+  aij <- .chain_parameter_summary(draws, "a_ij")
+  aii <- .chain_parameter_summary(draws, "a_ii")
+  if (!nrow(aij) || !nrow(aii)) return(empty)
+  n_chains <- nrow(aij)
+  dominant <- ifelse(aij$median > 0, 1L, ifelse(aij$median < 0, -1L, 0L))
+  certain <- pmax(aij$positive_probability, aij$negative_probability) >= .PCLV_CHAIN_SIGN_PROB_MIN
+  sign_agree <- if (n_chains > 1L) all(certain) && length(unique(dominant)) == 1L && dominant[[1L]] != 0L else NA
+  magnitude_agree <- if (n_chains > 1L) .chain_intervals_overlap(aij) else NA
+  pooled_pos <- mean(draws$a_ij > 0)
+  pooled_neg <- mean(draws$a_ij < 0)
+
+  self_dominant <- ifelse(aii$median > 0, 1L, ifelse(aii$median < 0, -1L, 0L))
+  self_certain <- pmax(aii$positive_probability, aii$negative_probability) >= .PCLV_CHAIN_SIGN_PROB_MIN
+  self_agree <- if (n_chains > 1L) all(self_certain) && length(unique(self_dominant)) == 1L && self_dominant[[1L]] != 0L else NA
+
+  residual_parameters <- intersect(c("sigma", "sd_ou", "phi", "lambda", "nu"), names(draws))
+  residual <- dplyr::bind_rows(lapply(residual_parameters, function(p) .chain_parameter_summary(draws, p)))
+  residual_ranges <- numeric()
+  separated <- character()
+  if (nrow(residual)) {
+    by_parameter <- split(residual, residual$parameter)
+    residual_ranges <- vapply(by_parameter, function(x) diff(range(x$median)), numeric(1))
+    if (n_chains > 1L) separated <- names(Filter(function(x) !.chain_intervals_overlap(x), by_parameter))
+  }
+  residual_disagree <- if (n_chains > 1L) length(separated) > 0L else NA
+
+  diag_ok <- is.list(diag) && isTRUE(.ok_diag(
+    diag$worst_rhat, diag$min_ess_bulk, diag$min_ess_tail,
+    diag$n_divergent, diag$n_treedepth_hit, diag$n_draws
+  )) && is.finite(diag$ebfmi_min) && diag$ebfmi_min >= .PCLV_EBFMI_MIN
+  diagnostic_reasons <- character()
+  if (!is.list(diag) || !is.finite(diag$worst_rhat) || diag$worst_rhat >= 1.05) diagnostic_reasons <- c(diagnostic_reasons, "high_rhat")
+  if (!is.list(diag) || !is.finite(diag$min_ess_bulk) || !is.finite(diag$min_ess_tail) || diag$min_ess_bulk <= 400 || diag$min_ess_tail <= 400) diagnostic_reasons <- c(diagnostic_reasons, "low_ess")
+  if (!is.list(diag) || !is.finite(diag$ebfmi_min) || diag$ebfmi_min < .PCLV_EBFMI_MIN) diagnostic_reasons <- c(diagnostic_reasons, "low_ebfmi")
+  if (is.list(diag) && is.finite(diag$n_divergent) && diag$n_divergent > 0) diagnostic_reasons <- c(diagnostic_reasons, "divergences")
+  if (is.list(diag) && is.finite(diag$n_treedepth_hit) && diag$n_treedepth_hit > 0) diagnostic_reasons <- c(diagnostic_reasons, "treedepth_saturation")
+
+  interaction_reasons <- character()
+  if (n_chains > 1L && (length(unique(dominant)) != 1L || dominant[[1L]] == 0L)) {
+    interaction_reasons <- "chain_sign_disagreement"
+  } else if (n_chains > 1L && (!all(certain) || !isTRUE(magnitude_agree))) {
+    interaction_reasons <- "interaction_magnitude_disagreement"
+  }
+  residual_reasons <- character()
+  if (length(separated)) {
+    residual_reasons <- "chain_specific_residual_regime"
+    if (any(c("sigma", "sd_ou") %in% separated)) residual_reasons <- c(residual_reasons, "residual_scale_nonidentifiability")
+    if ("sd_ou" %in% separated && any(c("phi", "lambda") %in% separated)) residual_reasons <- c(residual_reasons, "ou_scale_decay_ridge")
+  }
+
+  if (n_chains == 1L) {
+    diagnostic_class <- if (diag_ok) "converged" else "sampler_diagnostics_failed"
+  } else if (length(interaction_reasons)) {
+    diagnostic_class <- "interaction_indeterminate"
+  } else if (!diag_ok || isTRUE(residual_disagree)) {
+    diagnostic_class <- "interaction_stable_residual_unstable"
+  } else diagnostic_class <- "converged"
+  reasons <- unique(c(interaction_reasons, residual_reasons, diagnostic_reasons))
+
+  list(
+    diagnostic_class = diagnostic_class,
+    interaction_identifiable = diagnostic_class %in% c("converged", "interaction_stable_residual_unstable"),
+    residual_identifiable = identical(diagnostic_class, "converged"),
+    chain_sign_agreement = sign_agree, pooled_sign_probability = max(pooled_pos, pooled_neg),
+    chain_aij_means = stats::setNames(aij$mean, aij$chain), chain_aij_medians = stats::setNames(aij$median, aij$chain),
+    chain_aij_positive_probabilities = stats::setNames(aij$positive_probability, aij$chain),
+    chain_aij_negative_probabilities = stats::setNames(aij$negative_probability, aij$chain),
+    chain_aij_mean_range = diff(range(aij$mean)), chain_aij_median_range = diff(range(aij$median)),
+    chain_sign_probability_max_difference = diff(range(aij$positive_probability)),
+    chain_aii_means = stats::setNames(aii$mean, aii$chain), chain_aii_medians = stats::setNames(aii$median, aii$chain),
+    chain_aii_sign_probabilities = stats::setNames(pmax(aii$positive_probability, aii$negative_probability), aii$chain),
+    chain_aii_sign_agreement = self_agree, chain_residual_summary = residual,
+    residual_median_ranges = residual_ranges, residual_regime_disagreement = residual_disagree,
+    indeterminate_reason = reasons
+  )
+}
+
 #' Local false sign rate from two-sided tail probability
 #'
 #' @param p_two Two-sided tail probability in \code{[0,1]}.
@@ -1140,7 +1265,6 @@
     if (ok || attempt >= max_retries) {
       if (!ok) {
         fit_failed <- TRUE
-        .cleanup_cmdstan_fit_output(fit)
       }
       break
     }
@@ -1157,7 +1281,9 @@
       list(n_retries = attempt, diagnostics = diag, attempt_history = attempt_history)
     ) else NULL
   )
-  fit_owner_transferred <- !fit_failed && !.is_pclv_failure(fit)
+  # A completed fit remains useful for chain-specific interpretation even when
+  # retry diagnostic gates are exhausted. Its caller owns output cleanup.
+  fit_owner_transferred <- !.is_pclv_failure(fit)
   out
 }
 
@@ -1172,6 +1298,17 @@
     p_sign2 = NA_real_, aii_mean = NA_real_, aii_sd = NA_real_,
     aii_q2.5 = NA_real_, aii_q97.5 = NA_real_, p_sign2_self = NA_real_,
     nu_mean = NA_real_, nu_median = NA_real_, nu_q05 = NA_real_, nu_q95 = NA_real_,
+    diagnostic_class = "sampler_diagnostics_failed",
+    interaction_identifiable = FALSE, residual_identifiable = FALSE,
+    chain_sign_agreement = NA, pooled_sign_probability = NA_real_,
+    chain_aij_means = list(numeric()), chain_aij_medians = list(numeric()),
+    chain_aij_positive_probabilities = list(numeric()), chain_aij_negative_probabilities = list(numeric()),
+    chain_aij_mean_range = NA_real_, chain_aij_median_range = NA_real_,
+    chain_sign_probability_max_difference = NA_real_,
+    chain_aii_means = list(numeric()), chain_aii_medians = list(numeric()),
+    chain_aii_sign_probabilities = list(numeric()), chain_aii_sign_agreement = NA,
+    chain_residual_summary = list(data.frame()), residual_median_ranges = list(numeric()),
+    residual_regime_disagreement = NA, indeterminate_reason = list(failure$reason),
     diag = na_diag, retry_history = list(NULL), initialization_provenance = list(NULL),
     diag = na_diag, kfold_mean = NA_real_, kfold_method = NA_character_,
     kfold_subject = list(NULL), kfold_subject_ppd = list(NULL),
@@ -1270,10 +1407,57 @@
   if (!is.null(failure_ij)) res_ij <- .failed_direction_result(failure_ij)
   if (!is.null(failure_ji)) res_ji <- .failed_direction_result(failure_ji)
 
+  # Older internal test doubles predate diagnostic_class; a completed result
+  # without that private field retains the historical converged contract.
+  class_ij <- if (isTRUE(res_ij$ok) && is.null(res_ij$failure)) "converged" else if (is.null(res_ij$diagnostic_class) || is.na(res_ij$diagnostic_class)) "converged" else res_ij$diagnostic_class
+  class_ji <- if (isTRUE(res_ji$ok) && is.null(res_ji$failure)) "converged" else if (is.null(res_ji$diagnostic_class) || is.na(res_ji$diagnostic_class)) "converged" else res_ji$diagnostic_class
+  diagnostic_failure_ij <- if (!is.null(failure_ij)) failure_ij else if (!identical(class_ij, "converged")) res_ij$diagnostic_failure[[1L]] else NULL
+  diagnostic_failure_ji <- if (!is.null(failure_ji)) failure_ji else if (!identical(class_ji, "converged")) res_ji$diagnostic_failure[[1L]] else NULL
+
   tibble::as_tibble_row(list(
     i = ti, j = pj,
-    direction_ok_ij = is.null(failure_ij), direction_ok_ji = is.null(failure_ji),
-    failure_ij = list(failure_ij), failure_ji = list(failure_ji),
+    direction_ok_ij = identical(class_ij, "converged") && is.null(failure_ij),
+    direction_ok_ji = identical(class_ji, "converged") && is.null(failure_ji),
+    failure_ij = list(diagnostic_failure_ij), failure_ji = list(diagnostic_failure_ji),
+    diagnostic_class_ij = class_ij, diagnostic_class_ji = class_ji,
+    interaction_identifiable_ij = res_ij$interaction_identifiable %||% TRUE,
+    interaction_identifiable_ji = res_ji$interaction_identifiable %||% TRUE,
+    residual_identifiable_ij = res_ij$residual_identifiable %||% TRUE,
+    residual_identifiable_ji = res_ji$residual_identifiable %||% TRUE,
+    chain_sign_agreement_ij = res_ij$chain_sign_agreement %||% NA,
+    chain_sign_agreement_ji = res_ji$chain_sign_agreement %||% NA,
+    pooled_sign_probability_ij = res_ij$pooled_sign_probability %||% NA_real_,
+    pooled_sign_probability_ji = res_ji$pooled_sign_probability %||% NA_real_,
+    chain_aij_means_ij = res_ij$chain_aij_means %||% list(numeric()),
+    chain_aij_means_ji = res_ji$chain_aij_means %||% list(numeric()),
+    chain_aij_medians_ij = res_ij$chain_aij_medians %||% list(numeric()),
+    chain_aij_medians_ji = res_ji$chain_aij_medians %||% list(numeric()),
+    chain_sign_probabilities_ij = res_ij$chain_aij_positive_probabilities %||% list(numeric()),
+    chain_sign_probabilities_ji = res_ji$chain_aij_positive_probabilities %||% list(numeric()),
+    chain_negative_sign_probabilities_ij = res_ij$chain_aij_negative_probabilities %||% list(numeric()),
+    chain_negative_sign_probabilities_ji = res_ji$chain_aij_negative_probabilities %||% list(numeric()),
+    chain_aij_mean_range_ij = res_ij$chain_aij_mean_range %||% NA_real_,
+    chain_aij_mean_range_ji = res_ji$chain_aij_mean_range %||% NA_real_,
+    chain_aij_median_range_ij = res_ij$chain_aij_median_range %||% NA_real_,
+    chain_aij_median_range_ji = res_ji$chain_aij_median_range %||% NA_real_,
+    chain_sign_probability_max_difference_ij = res_ij$chain_sign_probability_max_difference %||% NA_real_,
+    chain_sign_probability_max_difference_ji = res_ji$chain_sign_probability_max_difference %||% NA_real_,
+    chain_aii_means_ij = res_ij$chain_aii_means %||% list(numeric()),
+    chain_aii_means_ji = res_ji$chain_aii_means %||% list(numeric()),
+    chain_aii_medians_ij = res_ij$chain_aii_medians %||% list(numeric()),
+    chain_aii_medians_ji = res_ji$chain_aii_medians %||% list(numeric()),
+    chain_aii_sign_probabilities_ij = res_ij$chain_aii_sign_probabilities %||% list(numeric()),
+    chain_aii_sign_probabilities_ji = res_ji$chain_aii_sign_probabilities %||% list(numeric()),
+    chain_aii_sign_agreement_ij = res_ij$chain_aii_sign_agreement %||% NA,
+    chain_aii_sign_agreement_ji = res_ji$chain_aii_sign_agreement %||% NA,
+    chain_residual_summary_ij = res_ij$chain_residual_summary %||% list(data.frame()),
+    chain_residual_summary_ji = res_ji$chain_residual_summary %||% list(data.frame()),
+    residual_median_ranges_ij = res_ij$residual_median_ranges %||% list(numeric()),
+    residual_median_ranges_ji = res_ji$residual_median_ranges %||% list(numeric()),
+    residual_regime_disagreement_ij = res_ij$residual_regime_disagreement %||% NA,
+    residual_regime_disagreement_ji = res_ji$residual_regime_disagreement %||% NA,
+    indeterminate_reason_ij = res_ij$indeterminate_reason %||% list(character()),
+    indeterminate_reason_ji = res_ji$indeterminate_reason %||% list(character()),
     retry_history_ij = res_ij$retry_history, retry_history_ji = res_ji$retry_history,
     initialization_provenance_ij = res_ij$initialization_provenance,
     initialization_provenance_ji = res_ji$initialization_provenance,
@@ -2317,7 +2501,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     cat(sprintf("%s pair: main run completed\n", pair_tag))
 
   fit_full   <- res_try$fit
-  if (!is.null(res_try$failure)) {
+  if (!is.null(res_try$failure) && is.null(fit_full)) {
     res_try$failure$details$retry_history <- res_try$retry_history
     res_try$failure$details$initialization_provenance <- initialization_provenance
     return(res_try$failure)
@@ -2343,6 +2527,30 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     stop("Expected parameters a_ij and a_ii not found in draws.")
   }
 
+  chain_diagnostics <- .classify_chain_diagnostics(d, diag)
+  if (!is.null(res_try$failure) && identical(chain_diagnostics$diagnostic_class, "converged")) {
+    multi_chain <- length(chain_diagnostics$chain_aij_means) > 1L
+    chain_diagnostics$diagnostic_class <- if (multi_chain)
+      "interaction_stable_residual_unstable" else "sampler_diagnostics_failed"
+    chain_diagnostics$residual_identifiable <- FALSE
+    if (!multi_chain) chain_diagnostics$interaction_identifiable <- FALSE
+    chain_diagnostics$indeterminate_reason <- unique(c(
+      chain_diagnostics$indeterminate_reason, "sampler_diagnostics_failed"
+    ))
+  }
+  diagnostic_failure <- NULL
+  if (!identical(chain_diagnostics$diagnostic_class, "converged")) {
+    diagnostic_failure <- .pclv_failure(
+      "posterior_diagnostics", chain_diagnostics$diagnostic_class,
+      list(
+        reasons = chain_diagnostics$indeterminate_reason,
+        interaction_identifiable = chain_diagnostics$interaction_identifiable,
+        residual_identifiable = chain_diagnostics$residual_identifiable,
+        retry_history = res_try$retry_history
+      )
+    )
+  }
+
   aij <- d$a_ij
   aii <- d$a_ii
   p_sign2_dir  <- .clip01(2 * pmin(mean(aij > 0), mean(aij < 0)))
@@ -2357,7 +2565,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   kfold_n_ok   <- NA_integer_
   kfold_n_fail <- NA_integer_
 
-  {
+  if (is.null(diagnostic_failure)) {
     seed_for_kfold <- if (is.null(final_args_main$seed))
       seed_main
     else
@@ -2426,6 +2634,28 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     nu_median = nu_summary$nu_median,
     nu_q05 = nu_summary$nu_q05,
     nu_q95 = nu_summary$nu_q95,
+
+    diagnostic_class = chain_diagnostics$diagnostic_class,
+    interaction_identifiable = chain_diagnostics$interaction_identifiable,
+    residual_identifiable = chain_diagnostics$residual_identifiable,
+    chain_sign_agreement = chain_diagnostics$chain_sign_agreement,
+    pooled_sign_probability = chain_diagnostics$pooled_sign_probability,
+    chain_aij_means = list(chain_diagnostics$chain_aij_means),
+    chain_aij_medians = list(chain_diagnostics$chain_aij_medians),
+    chain_aij_positive_probabilities = list(chain_diagnostics$chain_aij_positive_probabilities),
+    chain_aij_negative_probabilities = list(chain_diagnostics$chain_aij_negative_probabilities),
+    chain_aij_mean_range = chain_diagnostics$chain_aij_mean_range,
+    chain_aij_median_range = chain_diagnostics$chain_aij_median_range,
+    chain_sign_probability_max_difference = chain_diagnostics$chain_sign_probability_max_difference,
+    chain_aii_means = list(chain_diagnostics$chain_aii_means),
+    chain_aii_medians = list(chain_diagnostics$chain_aii_medians),
+    chain_aii_sign_probabilities = list(chain_diagnostics$chain_aii_sign_probabilities),
+    chain_aii_sign_agreement = chain_diagnostics$chain_aii_sign_agreement,
+    chain_residual_summary = list(chain_diagnostics$chain_residual_summary),
+    residual_median_ranges = list(chain_diagnostics$residual_median_ranges),
+    residual_regime_disagreement = chain_diagnostics$residual_regime_disagreement,
+    indeterminate_reason = list(chain_diagnostics$indeterminate_reason),
+    diagnostic_failure = list(diagnostic_failure),
 
     # 원시 진단치/리트라이 메타(후처리 summariser에서 필터 예정)
     diag = diag,
@@ -2559,6 +2789,9 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       a_mean = .data$a_ij_mean,
       a_q2.5 = .data$a_ij_q2.5, a_q97.5 = .data$a_ij_q97.5,
       p_sign2 = .data$p_sign2_ij,
+      diagnostic_class = .data$diagnostic_class_ij,
+      interaction_identifiable = .data$interaction_identifiable_ij,
+      residual_identifiable = .data$residual_identifiable_ij,
       elpd_mean = .data$kfold_elpd_mean_ij,
       elpd_sd   = .data$kfold_sd_ij,
       elpd_se   = .data$kfold_se_ij,
@@ -2570,6 +2803,9 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       a_mean = .data$a_ji_mean,
       a_q2.5 = .data$a_ji_q2.5, a_q97.5 = .data$a_ji_q97.5,
       p_sign2 = .data$p_sign2_ji,
+      diagnostic_class = .data$diagnostic_class_ji,
+      interaction_identifiable = .data$interaction_identifiable_ji,
+      residual_identifiable = .data$residual_identifiable_ji,
       elpd_mean = .data$kfold_elpd_mean_ji,
       elpd_sd   = .data$kfold_sd_ji,
       elpd_se   = .data$kfold_se_ji,
