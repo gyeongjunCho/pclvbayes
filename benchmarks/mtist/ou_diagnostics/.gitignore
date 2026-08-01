@@ -1,0 +1,5 @@
+results/
+*.hpp
+decay_equivalent
+decay_regularized
+variance_allocation
