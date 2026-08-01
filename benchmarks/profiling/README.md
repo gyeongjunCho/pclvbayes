@@ -7,6 +7,12 @@ end-to-end MTIST 361 fits. Run it from the repository root:
 Rscript benchmarks/profiling/run_profile.R
 ```
 
+The repeatable synthetic posterior-summary comparison is:
+
+```sh
+Rscript benchmarks/profiling/run_summary_component.R
+```
+
 The default configuration uses one chain, 50 warmup and 50 retained draws,
 two subject-level folds, no retries, no Pathfinder, and compares one versus two
 outer workers. Model compilation is measured separately and excluded from fit

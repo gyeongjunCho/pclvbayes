@@ -203,15 +203,12 @@
 #' @return A named list of diagnostic summaries.
 #' @noRd
 #' @keywords internal
-.summarise_diag <- function(fit,
-                            pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two"),
-                            max_treedepth = 12) {
-  # (1) 파라미터 요약치: R-hat / ESS (가용한 것만 선택)
-  all_dd <- fit$draws()
-  avail  <- dimnames(all_dd)$variables
+.add_convergence_diag <- function(diag, draws,
+                                  pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two")) {
+  avail <- posterior::variables(draws)
   use_pars <- intersect(pars, avail)
   if (!length(use_pars)) use_pars <- avail
-  sdtab <- posterior::summarise_draws(fit$draws(use_pars))
+  sdtab <- posterior::summarise_draws(posterior::subset_draws(draws, variable = use_pars))
   worst_rhat   <- suppressWarnings(max(sdtab$rhat,      na.rm = TRUE))
   min_ess_bulk <- suppressWarnings(min(sdtab$ess_bulk,  na.rm = TRUE))
   min_ess_tail <- suppressWarnings(min(sdtab$ess_tail,  na.rm = TRUE))
@@ -219,8 +216,15 @@
   if (!is.finite(min_ess_bulk)) min_ess_bulk <- NA_real_
   if (!is.finite(min_ess_tail)) min_ess_tail <- NA_real_
 
-  # (2) 샘플러 진단: divergent__, treedepth__, energy__
-  sdiag_df <- posterior::as_draws_df(fit$sampler_diagnostics())
+  diag$worst_rhat <- worst_rhat
+  diag$min_ess_bulk <- min_ess_bulk
+  diag$min_ess_tail <- min_ess_tail
+  diag
+}
+
+.summarise_sampler_diag <- function(fit, max_treedepth = 12) {
+  sdiag <- fit$sampler_diagnostics()
+  sdiag_df <- posterior::as_draws_df(sdiag)
 
   n_div <- if ("divergent__" %in% names(sdiag_df)) {
     sum(as.integer(sdiag_df[["divergent__"]]), na.rm = TRUE)
@@ -230,8 +234,9 @@
     sum(as.integer(sdiag_df[["treedepth__"]] >= max_treedepth), na.rm = TRUE)
   } else NA_integer_
 
-  # (3) E-BFMI: mean(diff(E)^2) / var(E) (체인별 계산 후 요약)
+  # E-BFMI: mean(diff(E)^2) / var(E), once per chain and attempt.
   ebfmi_min <- ebfmi_med <- NA_real_
+  eb <- numeric()
   if ("energy__" %in% names(sdiag_df)) {
     if (".chain" %in% names(sdiag_df)) {
       eb <- vapply(split(sdiag_df[["energy__"]], sdiag_df[[".chain"]]), function(ev) {
@@ -248,25 +253,35 @@
         v <- stats::var(e)
         if (is.finite(v) && v > 0) {
           val <- mean(diff(e)^2) / v
-          ebfmi_min <- val; ebfmi_med <- val
+          eb <- val; ebfmi_min <- val; ebfmi_med <- val
         }
       }
     }
   }
 
-  # (4) 총 저장 draw 수(스칼라)
-  n_draws <- posterior::ndraws(fit$draws())
+  n_draws <- if (length(dim(sdiag)) >= 2L) prod(dim(sdiag)[1:2]) else nrow(sdiag_df)
 
   list(
-    worst_rhat      = worst_rhat,
-    min_ess_bulk    = min_ess_bulk,
-    min_ess_tail    = min_ess_tail,
+    worst_rhat      = NA_real_,
+    min_ess_bulk    = NA_real_,
+    min_ess_tail    = NA_real_,
     n_divergent     = n_div,
     n_treedepth_hit = n_treedepth_hit,
     ebfmi_min       = ebfmi_min,
     ebfmi_med       = ebfmi_med,
+    ebfmi_chain     = eb,
     n_draws         = as.integer(n_draws)
   )
+}
+
+# Backward-compatible complete diagnostic helper. Canonical retry execution
+# uses .summarise_sampler_diag(); only a retained fit pays for convergence
+# summaries after its selected draws have been materialized once.
+.summarise_diag <- function(fit,
+                            pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two"),
+                            max_treedepth = 12) {
+  draws <- .safe_draws_df(fit)
+  .add_convergence_diag(.summarise_sampler_diag(fit, max_treedepth), draws, pars)
 }
 
 # A chain must put at least this much posterior mass on one sign before that
@@ -391,6 +406,37 @@
     chain_aii_sign_agreement = self_agree, chain_residual_summary = residual,
     residual_median_ranges = residual_ranges, residual_regime_disagreement = residual_disagree,
     indeterminate_reason = reasons
+  )
+}
+
+.build_posterior_summary_bundle <- function(draws, diag) {
+  if (!all(c("a_ij", "a_ii") %in% names(draws)))
+    stop("Expected parameters a_ij and a_ii not found in draws.")
+  nu <- .summarise_nu_draws(draws)
+  if (.is_pclv_failure(nu)) return(nu)
+  aij <- draws$a_ij
+  aii <- draws$a_ii
+  list(
+    coefficients = list(
+      interaction = c(mean = mean(aij), sd = stats::sd(aij),
+                      q025 = unname(stats::quantile(aij, 0.025)),
+                      q975 = unname(stats::quantile(aij, 0.975))),
+      self = c(mean = mean(aii), sd = stats::sd(aii),
+               q025 = unname(stats::quantile(aii, 0.025)),
+               q975 = unname(stats::quantile(aii, 0.975)))
+    ),
+    sign = {
+      interaction_p_two <- .clip01(2 * pmin(mean(aij > 0), mean(aij < 0)))
+      self_p_two <- .clip01(2 * pmin(mean(aii > 0), mean(aii < 0)))
+      list(
+        interaction_p_two = interaction_p_two,
+        interaction_lfsr = .lfsr_from_two_sided(interaction_p_two),
+        self_p_two = self_p_two,
+        self_lfsr = .lfsr_from_two_sided(self_p_two)
+      )
+    },
+    nu = nu,
+    chain = .classify_chain_diagnostics(draws, diag)
   )
 }
 
@@ -1112,7 +1158,7 @@
   .needs_retry <- function(diag, fit = NULL, thr = 0.30) {
     low_eb <- is.finite(diag$ebfmi_min) && (diag$ebfmi_min < thr)
     if (!low_eb && !is.null(fit)) {
-      eb_vec <- .ebfmi_chainwise_from_energy(fit)
+      eb_vec <- diag$ebfmi_chain
       if (length(eb_vec)) low_eb <- any(is.finite(eb_vec) & (eb_vec < thr))
       if (!low_eb) low_eb <- .ebfmi_warn_from_fit(fit, thr = thr)
     }
@@ -1242,12 +1288,12 @@
       next
     }
 
-    diag <- .summarise_diag(
+    diag <- .summarise_sampler_diag(
       fit,
       max_treedepth = .or(sample_args$max_treedepth, base_args$max_treedepth)
     )
 
-    eb_vec <- .ebfmi_chainwise_from_energy(fit)
+    eb_vec <- diag$ebfmi_chain
     eb_str <- if (length(eb_vec)) paste(sprintf("%.3f", eb_vec), collapse=",") else "NA"
     ok <- !.needs_retry(diag, fit, thr = ebfmi_thresh)
     attempt_history[[length(attempt_history) + 1L]] <- list(
@@ -1948,6 +1994,7 @@
   fa <- tryfit$final_args
 
   d <- .safe_draws_df(fit)
+  dg <- .add_convergence_diag(tryfit$diag, d)
   te_df <- pts$test
   llm <- .proj_loglik_subject(
     draws_df = d,
@@ -1967,7 +2014,6 @@
   elpd_vec <- stats::setNames(apply(llm$full, 2, .log_mean_exp), llm$subjects)
   elpd_ppd_vec <- elpd_vec / pmax(llm$n_obs, 1L)
 
-  dg <- tryfit$diag
   fd <- data.frame(
     n_retries      = tryfit$n_retries,
     nu_mean        = mean(d$nu),
@@ -2518,16 +2564,10 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   } else {
     d <- .safe_draws_df(fit_full)  # a_ij, a_ii, r0, tau_r, sigma, sigma_ou, lambda, ...
   }
-
-  nu_summary <- .summarise_nu_draws(d)
-  if (inherits(nu_summary, "pclv_failure")) return(nu_summary)
-
-  # 방어적 체크
-  if (!all(c("a_ij", "a_ii") %in% names(d))) {
-    stop("Expected parameters a_ij and a_ii not found in draws.")
-  }
-
-  chain_diagnostics <- .classify_chain_diagnostics(d, diag)
+  diag <- .add_convergence_diag(diag, d)
+  posterior_summary <- .build_posterior_summary_bundle(d, diag)
+  if (.is_pclv_failure(posterior_summary)) return(posterior_summary)
+  chain_diagnostics <- posterior_summary$chain
   if (!is.null(res_try$failure) && identical(chain_diagnostics$diagnostic_class, "converged")) {
     multi_chain <- length(chain_diagnostics$chain_aij_means) > 1L
     chain_diagnostics$diagnostic_class <- if (multi_chain)
@@ -2551,10 +2591,12 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     )
   }
 
-  aij <- d$a_ij
-  aii <- d$a_ii
-  p_sign2_dir  <- .clip01(2 * pmin(mean(aij > 0), mean(aij < 0)))
-  p_sign2_self <- .clip01(2 * pmin(mean(aii > 0), mean(aii < 0)))
+  interaction_summary <- posterior_summary$coefficients$interaction
+  self_summary <- posterior_summary$coefficients$self
+  p_sign2_dir <- posterior_summary$sign$interaction_p_two
+  p_sign2_self <- posterior_summary$sign$self_p_two
+  nu_summary <- posterior_summary$nu
+  rm(d)
 
   # ----- 6) Repeated K-fold with outer retries ----------------------------------
   kfold <- NULL
@@ -2618,16 +2660,16 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   list(
     n_pairs = nrow(pair_in),
 
-    a_mean  = mean(aij),
-    a_sd = stats::sd(aij),
-    a_q2.5  = stats::quantile(aij, 0.025),
-    a_q97.5 = stats::quantile(aij, 0.975),
+    a_mean  = interaction_summary[["mean"]],
+    a_sd = interaction_summary[["sd"]],
+    a_q2.5  = interaction_summary[["q025"]],
+    a_q97.5 = interaction_summary[["q975"]],
     p_sign2 = p_sign2_dir,
 
-    aii_mean = mean(aii),
-    aii_sd = stats::sd(aii),
-    aii_q2.5 = stats::quantile(aii, 0.025),
-    aii_q97.5 = stats::quantile(aii, 0.975),
+    aii_mean = self_summary[["mean"]],
+    aii_sd = self_summary[["sd"]],
+    aii_q2.5 = self_summary[["q025"]],
+    aii_q97.5 = self_summary[["q975"]],
     p_sign2_self = p_sign2_self,
 
     nu_mean = nu_summary$nu_mean,

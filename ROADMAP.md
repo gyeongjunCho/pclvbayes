@@ -103,7 +103,10 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Profile R preprocessing, K-fold, memory, serialization, and sampling —
   MTIST 361 baseline separates directly measurable R components from combined
   CmdStan/process boundaries and ranks measured optimization candidates.
-- [ ] Optimize measured bottlenecks only
+- [x] Optimize measured posterior-summary bottleneck — sampler-only retry
+  diagnostics now precede one retained scientific summary bundle; measured
+  parent-R time fell without changing Bayesian evidence or downstream ELPD.
+- [ ] Optimize other measured bottlenecks only
 - [ ] Run representative 10-species MTIST benchmarks
 - [ ] Documentation
 - [ ] Reduce and freeze the public `fit_pclv_bayes()` API

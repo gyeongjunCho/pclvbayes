@@ -76,7 +76,7 @@ test_that("retry wrapper cleans a fit when diagnostics are interrupted", {
       attr(fit, "pclv_owned_output_dir") <- owned
       fit
     },
-    .summarise_diag = function(...) stop("diagnostic interruption"),
+    .summarise_sampler_diag = function(...) stop("diagnostic interruption"),
     .package = "pclvbayes"
   )
 

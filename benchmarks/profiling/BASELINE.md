@@ -107,3 +107,52 @@ parent-R time, not child CmdStan or worker CPU. Parent HWM excludes workers;
 temporary disk is before/after rather than peak. The measurements support a
 Stan/process-dominated conclusion but do not distinguish pure NUTS from process
 startup or output handling.
+
+## Posterior-summary optimization (2026-08-02)
+
+The retained scientific order remains sampling/retry, sampler-only attempt
+diagnostics, final-attempt selection, one retained posterior summary bundle,
+Bayesian sign evidence, K-fold ELPD, stacking, and final assembly. Attempt-level
+retry diagnostics no longer load posterior variables or call
+`posterior::summarise_draws()`; they read sampler diagnostics once. The retained
+attempt materializes selected draws once, adds R-hat/ESS once, and reuses an
+immutable bundle for coefficients, quantiles, ν, sign probabilities, and
+multi-chain residual summaries.
+
+The repeatable 4-chain × 2,000-draw component benchmark (15 repetitions) was:
+
+| Path | Median seconds | `summarise_draws()`/invocation | posterior draw loads/invocation |
+|---|---:|---:|---:|
+| Legacy attempt diagnostics | 0.091 | 1 | 3 |
+| Optimized attempt diagnostics | 0.001 | 0 | 0 |
+| Optimized retained final summary | 0.099 | 1 | 1 |
+
+Thus rejected attempts avoid essentially all scientific-summary work. A
+no-retry retained fit still performs one exact posterior convergence summary,
+as scientifically required, but eliminates duplicate CmdStan draw loading.
+The private bundle was 1,168 bytes in the synthetic benchmark and does not
+retain the CmdStan fit or a duplicate draw matrix.
+
+Using the identical MTIST 361 configuration, sequential wall time decreased
+from 83.465 to 78.282 seconds (-5.183 seconds, -6.2%). Active parent-R time fell
+from 5.68 to 1.20 seconds (-78.9%); `summarise_draws()` disappeared from the top
+20 Rprof stacks (previously 4.43 seconds). The two-worker run decreased from
+56.959 to 55.121 seconds (-3.2%), and the two-fold failed-diagnostic probe from
+8.121 to 7.252 seconds (-10.7%). Sequential and parallel scientific signatures
+remained identical.
+
+For this profile, `summarise_draws()` calls fell from eight to six: six retained
+main attempts still required exact convergence summaries, while two rejected
+fold attempts no longer did. Posterior draw loads/conversions fell from 30
+(three attempt loads plus one retained load per main direction, and three per
+rejected fold) to six (one retained load per main direction), an 80% reduction.
+
+Parent-process HWM after the parallel run decreased from 1,033,788 to 1,028,504
+kB (-5,284 kB); final fit objects decreased from 112,504 to 109,464 bytes. These
+single smoke measurements include normal run-to-run process noise, but show no
+material memory regression. Numerical tests preserve means, medians, exact R
+quantiles, sign probabilities, LFSR, R-hat, ESS, all diagnostic classes and
+reasons, one-chain `NA` agreement, and downstream weight immutability.
+
+The maximum end-to-end impact remains modest because CmdStan/process execution
+dominates. No Rcpp or new dependency was introduced.
