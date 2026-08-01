@@ -691,12 +691,11 @@
 #' - (옵션) args$.smoke_mode=TRUE면 parallel_chains <- 1 강제
 #' - init 관련 오류가 나면 1회 폴백(init=NULL) + 새 디렉터리/베이스네임으로 재시도
 .call_sample_silently <- function(mod, args, silent = TRUE) {
-  # 1) silent=FALSE면 그대로 호출
-  if (!isTRUE(silent)) return(do.call(mod$sample, args))
-
-  # 2) 콘솔 무음 + 진행/메시지 억제
-  args$refresh <- 0L
-  args$show_messages <- FALSE
+  # 1) 콘솔 무음 + 진행/메시지 억제
+  if (isTRUE(silent)) {
+    args$refresh <- 0L
+    args$show_messages <- FALSE
+  }
 
   # 유틸
   .make_uid <- function(n = 8L) paste(sample(c(letters, 0:9), n, TRUE), collapse = "")
@@ -731,7 +730,14 @@
     a
   }
 
+  owns_output_dir <- is.null(args$output_dir) || !nzchar(args$output_dir)
   args <- .ensure_outputs(args)
+  owned_output_dir <- if (owns_output_dir) args$output_dir else NULL
+  sample_completed <- FALSE
+  on.exit({
+    if (!sample_completed && !is.null(owned_output_dir))
+      unlink(owned_output_dir, recursive = TRUE, force = TRUE)
+  }, add = TRUE)
 
   # --- 스모크 모드(옵션): 초경량 테스트 시 체인 순차 실행 강제 ---
   if (isTRUE(args$.smoke_mode)) {
@@ -746,18 +752,35 @@
   }
 
   # 3) stdout / message 무음 처리
-  out_con <- file(nullfile(), open = "wt")
-  msg_con <- file(nullfile(), open = "wt")
-  on.exit({
-    try(sink(type = "message"), silent = TRUE)
-    try(sink(), silent = TRUE)
-    try(close(msg_con), silent = TRUE)
-    try(close(out_con), silent = TRUE)
-  }, add = TRUE)
-  sink(out_con); sink(msg_con, type = "message")
+  if (isTRUE(silent)) {
+    out_con <- file(nullfile(), open = "wt")
+    msg_con <- file(nullfile(), open = "wt")
+    on.exit({
+      try(sink(type = "message"), silent = TRUE)
+      try(sink(), silent = TRUE)
+      try(close(msg_con), silent = TRUE)
+      try(close(out_con), silent = TRUE)
+    }, add = TRUE)
+    sink(out_con); sink(msg_con, type = "message")
+  }
 
   # Sampling errors are handled by .sample_with_retry(); do not retry or alter init here.
-  do.call(mod$sample, args)
+  fit <- do.call(mod$sample, args)
+  if (!is.null(owned_output_dir))
+    attr(fit, "pclv_owned_output_dir") <- owned_output_dir
+  sample_completed <- TRUE
+  fit
+}
+
+# Remove only a sampler directory created and owned by .call_sample_silently().
+# User-supplied output directories are never marked as owned and are preserved.
+.cleanup_cmdstan_fit_output <- function(fit) {
+  owned <- attr(fit, "pclv_owned_output_dir", exact = TRUE)
+  if (is.character(owned) && length(owned) == 1L && nzchar(owned)) {
+    unlink(owned, recursive = TRUE, force = TRUE)
+    attr(fit, "pclv_owned_output_dir") <- NULL
+  }
+  invisible(NULL)
 }
 
 
@@ -995,6 +1018,10 @@
   fit <- NULL; diag <- NULL; fit_failed <- FALSE
   final_args <- NULL
   attempt_history <- list()
+  fit_owner_transferred <- FALSE
+  on.exit({
+    if (!fit_owner_transferred) .cleanup_cmdstan_fit_output(fit)
+  }, add = TRUE)
 
   repeat {
 
@@ -1110,11 +1137,18 @@
                     if (ok) "✅ diag ok" else "⚠️ diag warn",
                     .fmt_diag(diag), eb_str))
 
-    if (ok || attempt >= max_retries) { if (!ok) fit_failed <- TRUE; break }
+    if (ok || attempt >= max_retries) {
+      if (!ok) {
+        fit_failed <- TRUE
+        .cleanup_cmdstan_fit_output(fit)
+      }
+      break
+    }
+    .cleanup_cmdstan_fit_output(fit)
     attempt <- attempt + 1L
   }
 
-  list(
+  out <- list(
     fit = fit, diag = diag, n_retries = attempt,
     fit_failed = fit_failed, final_args = final_args,
     retry_history = attempt_history,
@@ -1123,6 +1157,8 @@
       list(n_retries = attempt, diagnostics = diag, attempt_history = attempt_history)
     ) else NULL
   )
+  fit_owner_transferred <- !fit_failed && !.is_pclv_failure(fit)
+  out
 }
 
 .failed_direction_result <- function(failure) {
@@ -1722,6 +1758,7 @@
   )
   fit <- tryfit$fit
   if (!is.null(tryfit$failure)) return(tryfit$failure)
+  on.exit(.cleanup_cmdstan_fit_output(fit), add = TRUE)
 
   # 방어적 동일성 확인(디버그용; 필요시 주석 처리)
   fa <- tryfit$final_args
@@ -2226,8 +2263,9 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     actual = if (is.null(init)) "default" else if (is.numeric(init)) "scalar" else if (is.function(init)) "function" else "list"
   )
   if (use_pathfinder_init) {
-    pf_dir <- file.path(tempdir(), sprintf("glvpf_%s", format(Sys.time(), "%Y%m%d%H%M%S")))
+    pf_dir <- tempfile(pattern = "glvpf_", tmpdir = tempdir())
     dir.create(pf_dir, recursive = TRUE, showWarnings = FALSE)
+    on.exit(if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE), add = TRUE)
     pf_fit <- tryCatch(mod$pathfinder(
       data = stan_list, seed = seed_main, init = 0.05,
       num_paths = pf_num_paths, draws = pf_draws,
@@ -2254,6 +2292,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
           base_args$iter_warmup <- max(500L, floor(iter_warmup / 2))
       }
     }
+    if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE)
   }
   # 4) 공통 래퍼로 샘플 + 리트라이 ----------------------------------------------
   tag_lbl  <- sprintf("%s\u2192%s main", partner, target)
@@ -2283,6 +2322,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     res_try$failure$details$initialization_provenance <- initialization_provenance
     return(res_try$failure)
   }
+  on.exit(.cleanup_cmdstan_fit_output(fit_full), add = TRUE)
   diag       <- res_try$diag
   n_retries  <- res_try$n_retries
   fit_failed <- res_try$fit_failed
