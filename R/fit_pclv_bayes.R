@@ -348,28 +348,11 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
         cat(sprintf("pair %s-%s done\n", tasks[[task_index]]$taxon_i, tasks[[task_index]]$taxon_j))
     }
   } else {
-    old_plan <- future::plan()
-    on.exit(future::plan(old_plan), add = TRUE)
-    future::plan(future::multisession, workers = n_workers_outer)
-    if (has_progressr && identical(progress, "bar")) {
-      progressr::with_progress({
-        progressor <- progressr::progressor(steps = length(tasks))
-        out <- furrr::future_map(
-          tasks,
-          function(task) {
-            result <- run_task(task, mute_logs = TRUE)
-            progressor(message = sprintf("pair %s-%s", task$taxon_i, task$taxon_j))
-            result
-          },
-          .options = furrr::furrr_options(seed = TRUE, globals = TRUE)
-        )
-      })
-    } else {
-      out <- furrr::future_map(
-        tasks, function(task) run_task(task, mute_logs = TRUE),
-        .options = furrr::furrr_options(seed = TRUE, globals = TRUE)
-      )
-    }
+    out <- .outer_pair_map(
+      tasks = tasks, taxa_vec = taxa_vec, core_ctx = ctx,
+      scheduling = scheduling, progress = progress,
+      workers = n_workers_outer, has_progressr = has_progressr
+    )
   }
 
   res <- .assemble_pair_outcomes(out, tasks)

@@ -156,3 +156,44 @@ reasons, one-chain `NA` agreement, and downstream weight immutability.
 
 The maximum end-to-end impact remains modest because CmdStan/process execution
 dominates. No Rcpp or new dependency was introduced.
+
+## Outer-worker orchestration optimization (2026-08-02)
+
+The former outer path created one multisession pool per top-level fit, then
+submitted a locally defined closure with automatic global discovery and one
+static chunk per worker. It already restored the caller plan, disabled nested
+K-fold parallelism, reused the parent executable path, and reordered results by
+canonical task ID. The retained change passes explicit immutable worker inputs,
+disables automatic global export, loads only the `pclvbayes` namespace on
+workers, and schedules one future per unordered pair. Task IDs remain canonical,
+so completion order cannot affect direction seeds or final row order.
+
+The five-repetition orchestration benchmark used three canonical task records
+and two persistent workers. Legacy discovered globals serialized to 4,121 bytes
+versus a 1,921-byte explicit payload (-53.4%). Equal-duration microtasks rose
+from a 0.367-second median to 0.397 seconds due to fixed future overhead. With
+task imbalance (0.10, 0.65, 0.65 seconds), load-balanced dispatch reduced the
+median from 1.372 to 0.847 seconds (-38.3%). The fixture combines deterministic
+matrix work and controlled external-process waiting; it supports, but does not
+replace, real sampling evidence.
+
+Two identical post-change MTIST 361 profiles produced sequential times of
+77.669 and 78.590 seconds (median 78.130) and two-worker times of 53.294 and
+52.525 seconds (median 52.910). The committed pre-change profile was 78.282
+seconds sequential and 55.121 seconds with two workers. Sequential time was
+effectively unchanged (-0.2%), while both parallel repeats improved on the
+baseline (median -2.212 seconds, -4.0%). The pre-change value is one retained
+measurement rather than a repeated median, so it is not a precise sampler
+speedup estimate.
+
+Both real profiles had identical sequential/parallel scientific signatures and
+the same six expected short-chain diagnostic classes. Parent HWM after parallel
+execution was 1,027,932 and 1,027,640 kB, below the prior 1,028,504 kB. Temporary
+resources returned to the established lifecycle baseline, no worker remained,
+and the canonical executable timestamp was unchanged.
+
+The change does not reduce or shorten Stan fits. Bayesian evidence still
+precedes K-fold ELPD and stacking, nested K-fold workers remain disabled under
+outer parallelism, and final assembly remains in canonical task order. Real
+per-pair durations and worker idle time remain combined at the current profiling
+boundary and are not claimed as independently measured.
