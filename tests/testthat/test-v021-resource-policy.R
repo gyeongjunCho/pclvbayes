@@ -48,6 +48,107 @@ make_process_snapshot <- function(chain_count = 0L, timestamp = "2026-08-02T00:0
 primary_operation_spec <- function(workers = 2L) build_v021_operation_spec(
   c("pathfinder", "main_fit", "retry_fit", "kfold_fit"), workers)
 
+raw_cmdline <- function(argv, terminal_nul = TRUE) {
+  bytes <- lapply(argv, function(x) c(charToRaw(x), as.raw(0L)))
+  out <- do.call(c, bytes)
+  if (!terminal_nul) out <- head(out, -1L)
+  out
+}
+
+snapshot_with_argv <- function(argv, executable = "/models/pclv", pid = 301L,
+                               ppid = 100L, potential_cmdstan = TRUE,
+                               readable = TRUE) {
+  root <- data.frame(
+    timestamp = "2026-08-02T00:00:00Z", pid = 100L, ppid = 1L,
+    command = "Rscript preflight.R", argv = I(list(c("Rscript", "preflight.R"))),
+    executable = "/usr/bin/R", potential_cmdstan = FALSE, readable = TRUE)
+  child <- data.frame(
+    timestamp = "2026-08-02T00:00:00Z", pid = pid, ppid = ppid,
+    command = paste(argv, collapse = " "), argv = I(list(argv)),
+    executable = executable, potential_cmdstan = potential_cmdstan,
+    readable = readable)
+  rbind(root, child)
+}
+
+test_that("Linux NUL-delimited cmdlines preserve exact argv boundaries", {
+  argv <- c("/models/pclv", "method=sample", "num_samples=2000",
+            "argument containing spaces", "", "id=1")
+  decoded <- .v021_decode_linux_cmdline(raw_cmdline(argv))
+  expect_identical(decoded$argv, argv)
+  expect_identical(decoded$argv[[1L]], "/models/pclv")
+  expect_identical(decoded$argv[[2L]], "method=sample")
+  expect_match(decoded$command, "/models/pclv method=sample num_samples=2000")
+  expect_match(decoded$command, "argument containing spaces  id=1", fixed = TRUE)
+  expect_length(decoded$argv, length(argv))
+
+  old <- paste(rawToChar(raw_cmdline(argv)[as.integer(raw_cmdline(argv)) != 0L],
+                         multiple = TRUE), collapse = "")
+  expect_match(old, "/models/pclvmethod=samplenum_samples=2000", fixed = TRUE)
+  expect_false(grepl("(^|[[:space:]])method=sample([[:space:]]|$)", old))
+})
+
+test_that("Linux cmdline decoding fails closed for malformed or unreadable bytes", {
+  expect_error(.v021_decode_linux_cmdline(character()), "raw vector")
+  expect_error(.v021_decode_linux_cmdline(raw_cmdline(c("/models/pclv", "method=sample"),
+                                                       terminal_nul = FALSE)), "NUL")
+  expect_error(.v021_decode_linux_cmdline(raw_cmdline(c("", "method=sample"))),
+               "executable")
+})
+
+test_that("argv classification recognizes known operations and rejects impostors", {
+  sample <- snapshot_with_argv(c("/models/pclv", "method=sample", "id=1"))
+  classified <- classify_v021_process_snapshot(sample, 100L, "/models/pclv")
+  expect_identical(classified$classification[[2L]], "cmdstan_chain")
+
+  pathfinder <- snapshot_with_argv(c("/models/pclv", "method=pathfinder", "num_paths=8"))
+  classified <- classify_v021_process_snapshot(pathfinder, 100L, "/models/pclv")
+  expect_identical(classified$classification[[2L]], "pathfinder_process")
+
+  for (operation in c("retry", "kfold")) {
+    command <- snapshot_with_argv(c("/models/pclv", "method=sample", paste0("operation=", operation)))
+    classified <- classify_v021_process_snapshot(command, 100L, "/models/pclv")
+    expect_identical(classified$classification[[2L]], "cmdstan_chain")
+  }
+
+  embedded <- snapshot_with_argv(c("/models/pclv", "note=method=sample in text"))
+  classified <- classify_v021_process_snapshot(embedded, 100L, "/models/pclv")
+  expect_identical(classified$classification[[2L]], "unknown_potential_cmdstan")
+
+  unknown <- snapshot_with_argv(c("/models/pclv", "method=mystery"))
+  classified <- classify_v021_process_snapshot(unknown, 100L, "/models/pclv")
+  expect_identical(classified$classification[[2L]], "unknown_potential_cmdstan")
+
+  unrelated <- snapshot_with_argv(c("/tmp/not-stan", "method=sample"),
+                                  executable = "/tmp/not-stan",
+                                  potential_cmdstan = FALSE)
+  classified <- classify_v021_process_snapshot(unrelated, 100L, "/models/pclv")
+  expect_identical(classified$classification[[2L]], "other_descendant")
+})
+
+test_that("an attempt3-shaped eight-chain snapshot is verified without sampling", {
+  root <- snapshot_with_argv(c("R", "--worker"), executable = "/usr/lib/R/bin/exec/R",
+                             pid = 200L, potential_cmdstan = FALSE)
+  chains <- lapply(seq_len(8L), function(i) data.frame(
+    timestamp = "2026-08-02T00:00:00Z", pid = 300L + i,
+    ppid = if (i <= 4L) 201L else 202L,
+    command = paste("/models/pclv", "method=sample", paste0("id=", i)),
+    argv = I(list(c("/models/pclv", "method=sample", paste0("id=", i)))),
+    executable = "/models/pclv", potential_cmdstan = TRUE, readable = TRUE))
+  workers <- data.frame(
+    timestamp = rep("2026-08-02T00:00:00Z", 2L), pid = 201:202,
+    ppid = rep(100L, 2L), command = rep("R --worker", 2L),
+    argv = I(rep(list(c("R", "--worker")), 2L)),
+    executable = rep("/usr/lib/R/bin/exec/R", 2L),
+    potential_cmdstan = FALSE, readable = TRUE)
+  snapshot <- rbind(root[1L, ], workers, do.call(rbind, chains))
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
+  expect_identical(monitor$compliance_status, "compliant")
+})
+
 test_that("the policy records the exact 12-thread, 2-reserved, 10-chain contract", {
   policy <- build_v021_resource_policy()
   expect_identical(policy$policy_schema, "v021_resource_policy_v1")

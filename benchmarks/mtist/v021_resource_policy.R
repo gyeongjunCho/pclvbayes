@@ -276,21 +276,56 @@ with_v021_single_thread_environment <- function(code) {
   descendants
 }
 
+.v021_decode_linux_cmdline <- function(command_raw) {
+  if (!is.raw(command_raw) || !length(command_raw))
+    stop("Linux cmdline must be a non-empty raw vector.")
+  nul <- which(command_raw == as.raw(0L))
+  if (!length(nul) || tail(nul, 1L) != length(command_raw))
+    stop("Linux cmdline must end at a NUL argument boundary.")
+  starts <- c(1L, head(nul, -1L) + 1L)
+  ends <- nul - 1L
+  argv <- Map(function(start, end) {
+    if (end < start) return("")
+    rawToChar(command_raw[start:end])
+  }, starts, ends)
+  argv <- unlist(argv, use.names = FALSE)
+  if (!is.character(argv) || !length(argv) || anyNA(argv) || !nzchar(argv[[1L]]))
+    stop("Linux cmdline does not contain a valid executable argument.")
+  list(argv = argv, command = paste(argv, collapse = " "))
+}
+
+.v021_snapshot_argv <- function(snapshot) {
+  if ("argv" %in% names(snapshot)) {
+    valid <- vapply(snapshot$argv, function(x)
+      is.character(x) && length(x) > 0L && !anyNA(x) && nzchar(x[[1L]]), logical(1))
+    if (!all(valid)) stop("Malformed decoded process argv.")
+    return(snapshot$argv)
+  }
+  lapply(snapshot$command, function(x) {
+    if (!is.character(x) || length(x) != 1L || is.na(x) || !nzchar(x)) character()
+    else strsplit(x, "[[:space:]]+", perl = TRUE)[[1L]]
+  })
+}
+
 classify_v021_process_snapshot <- function(snapshot, root_pid,
                                             known_model_executables = character(),
                                             operation_map = NULL) {
   required <- c("timestamp", "pid", "ppid", "command", "executable",
                 "potential_cmdstan", "readable")
-  if (!is.data.frame(snapshot) || !identical(names(snapshot), required) ||
+  allowed <- append(required, "argv", after = 4L)
+  if (!is.data.frame(snapshot) ||
+      !(identical(names(snapshot), required) || identical(names(snapshot), allowed)) ||
       anyDuplicated(snapshot$pid) || !root_pid %in% snapshot$pid)
     stop("Invalid process snapshot.")
   descendants <- .v021_descendant_pids(snapshot, root_pid)
   out <- snapshot[snapshot$pid %in% descendants, , drop = FALSE]
   out$is_descendant <- out$pid != root_pid
-  sample_process <- grepl("(^|[[:space:]])method[= ]sample([[:space:]]|$)", out$command)
-  pathfinder_process <- grepl(
-    "(^|[[:space:]])method[= ]pathfinder([[:space:]]|$)", out$command)
+  argv <- .v021_snapshot_argv(out)
+  sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
+  pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
   known_executable <- out$executable %in% known_model_executables
+  sample_process <- known_executable & sample_argument
+  pathfinder_process <- known_executable & pathfinder_argument
   r_process <- grepl("(^|/)(R|Rscript)([[:space:]]|$)", out$command)
   out$classification <- "other_descendant"
   out$classification[out$pid == root_pid] <- "parent_r"
@@ -377,20 +412,20 @@ capture_v021_linux_process_snapshot <- function(
     stat <- tryCatch(readLines(stat_path, warn = FALSE, n = 1L), error = function(e) character())
     if (!length(stat)) return(NULL)
     ppid <- suppressWarnings(as.integer(sub("^[0-9]+ \\(.*\\) [A-Z] ([0-9]+).*$", "\\1", stat)))
-    command <- tryCatch(readBin(cmd_path, "raw", n = file.info(cmd_path)$size),
-                        error = function(e) raw())
-    readable <- length(command) > 0L
-    command <- if (length(command)) {
-      paste(rawToChar(command[as.integer(command) != 0L], multiple = TRUE), collapse = "")
-    } else ""
+    command_raw <- tryCatch(readBin(cmd_path, "raw", n = file.info(cmd_path)$size),
+                            error = function(e) raw())
+    decoded <- tryCatch(.v021_decode_linux_cmdline(command_raw), error = function(e) NULL)
+    readable <- !is.null(decoded)
+    argv <- if (readable) decoded$argv else character()
+    command <- if (readable) decoded$command else ""
     executable <- tryCatch(Sys.readlink(file.path(proc_root, pid_text, "exe")),
                            error = function(e) "")
-    potential <- grepl("method[= ]", command) || executable %in% known_model_executables ||
+    potential <- any(grepl("^method=", argv)) || executable %in% known_model_executables ||
       grepl("cmdstan", command, ignore.case = TRUE)
     data.frame(timestamp = as.character(timestamp), pid = as.integer(pid_text),
-               ppid = ppid, command = command, executable = executable,
-               potential_cmdstan = potential, readable = readable,
-               stringsAsFactors = FALSE)
+               ppid = ppid, command = command, argv = I(list(argv)),
+               executable = executable, potential_cmdstan = potential,
+               readable = readable, stringsAsFactors = FALSE)
   })
   snapshot <- do.call(rbind, rows[!vapply(rows, is.null, logical(1))])
   if (is.null(snapshot) || !root_pid %in% snapshot$pid)
