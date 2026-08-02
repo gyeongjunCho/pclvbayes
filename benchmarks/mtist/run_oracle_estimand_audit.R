@@ -188,6 +188,66 @@ summary <- data.frame(
 
 write_tsv <- function(x, name) utils::write.table(x, file.path(result_dir, name),
   sep = "\t", row.names = FALSE, quote = FALSE, na = "NA")
+
+# Empirical sign-reversal susceptibility uses only retained canonical posterior
+# signs. The existing audit provides preprocessing, per-subject, and LOSO
+# comparisons for the six retained confirmation directions; time-window and
+# denominator variants are unavailable and are not fabricated.
+parse_signs <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(integer())
+  vals <- strsplit(x, ";", fixed = TRUE)[[1L]]
+  out <- suppressWarnings(as.integer(sub("^[^=]*=", "", vals)))
+  out[is.finite(out)]
+}
+comparison_rows <- list(); axis_rows <- list(); direction_rows <- list()
+for (i in seq_len(nrow(focused))) {
+  row <- focused[i, ]
+  sens <- sensitivity[sensitivity$direction_index == row$direction_index, , drop = FALSE]
+  subject <- if (nrow(sens)) parse_signs(sens$subject_signs[[1L]]) else integer()
+  loso <- if (nrow(sens)) parse_signs(sens$loso_signs[[1L]]) else integer()
+  axes <- list(
+    preprocessing = c(row$finite_sign),
+    subject = subject,
+    leave_one_subject_out = loso,
+    time_window = NA_integer_,
+    denominator = NA_integer_)
+  axis_notes <- list(
+    preprocessing = "unsmoothed finite-interval projection compared with canonical posterior sign",
+    subject = if (length(subject)) "retained observed-data subject projections" else "not retained by completed audit",
+    leave_one_subject_out = if (length(loso)) "retained observed-data LOSO projections" else "not retained by completed audit",
+    time_window = "no prospectively defined time-window comparison retained",
+    denominator = "no predefined denominator variant retained")
+  classes <- lapply(names(axes), function(a) {
+    vals <- axes[[a]]
+    if (length(vals) == 0L || all(is.na(vals))) return("unavailable")
+    vapply(vals, function(v) oracle_classify_sign_comparison(v, row$long_sign), character(1))
+  }); names(classes) <- names(axes)
+  score <- oracle_empirical_susceptibility(row$long_sign, row$long_positive_probability,
+                                            row$long_lfsr, row$long_class,
+                                            classes, axis_notes)
+  for (a in names(classes)) {
+    cl <- classes[[a]]
+    if (length(cl) == 1L && cl == "unavailable" && is.na(axes[[a]][1L])) {
+      # preserve an explicit unavailable comparison row for auditability
+      cl <- "unavailable"
+    }
+    comparison_rows[[length(comparison_rows) + 1L]] <- data.frame(
+      task_id = row$task_id, direction_index = row$direction_index,
+      source = row$source, target = row$target, axis = a,
+      comparison_index = seq_along(cl), comparison_sign = axes[[a]],
+      canonical_posterior_sign = row$long_sign, classification = cl,
+      stringsAsFactors = FALSE)
+  }
+  ax <- score$axis; if (nrow(ax)) { ax$task_id <- row$task_id; ax$direction_index <- row$direction_index; ax$source <- row$source; ax$target <- row$target; axis_rows[[length(axis_rows)+1L]] <- ax }
+  dr <- score$direction; dr$task_id <- row$task_id; dr$direction_index <- row$direction_index; dr$source <- row$source; dr$target <- row$target; dr$A_sign <- row$A_sign; dr$absolute_A_agreement <- row$long_sign == row$A_sign; direction_rows[[length(direction_rows)+1L]] <- dr
+}
+susceptibility_comparisons <- do.call(rbind, comparison_rows)
+susceptibility_axes <- do.call(rbind, axis_rows)
+susceptibility_directions <- do.call(rbind, direction_rows)
+write_tsv(susceptibility_comparisons, "susceptibility_comparisons.tsv")
+write_tsv(susceptibility_axes, "susceptibility_axes.tsv")
+write_tsv(susceptibility_directions, "susceptibility_directions.tsv")
+
 write_tsv(audit, "all_direction_oracles.tsv")
 write_tsv(focused, "focused_six.tsv")
 write_tsv(contrasts, "instantaneous_contrasts.tsv")
@@ -200,4 +260,6 @@ print(focused[c("source", "target", "A_sign", "contrast_changes_sign",
   "instantaneous_sign", "finite_sign", "noiseless_sign", "observed_sign",
   "long_sign", "primary_category")], row.names = FALSE)
 print(agreement, row.names = FALSE)
+print(susceptibility_axes, row.names = FALSE)
+print(susceptibility_directions, row.names = FALSE)
 print(summary, row.names = FALSE)
