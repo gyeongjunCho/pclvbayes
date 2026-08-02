@@ -328,11 +328,11 @@ with_v021_single_thread_environment <- function(code) {
 
 .v021_snapshot_argv <- function(snapshot) {
   if ("argv" %in% names(snapshot)) {
-    vanished <- "capture_state" %in% names(snapshot) &
-      snapshot$capture_state == "vanished_during_capture"
+    terminal <- "capture_state" %in% names(snapshot) &
+      snapshot$capture_state %in% c("vanished_during_capture", "zombie_process")
     valid <- vapply(snapshot$argv, function(x)
       is.character(x) && length(x) > 0L && !anyNA(x) && nzchar(x[[1L]]), logical(1))
-    if (!all(valid | vanished)) stop("Malformed decoded process argv.")
+    if (!all(valid | terminal)) stop("Malformed decoded process argv.")
     return(snapshot$argv)
   }
   lapply(snapshot$command, function(x) {
@@ -347,17 +347,21 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   required <- c("timestamp", "pid", "ppid", "command", "executable",
                 "potential_cmdstan", "readable")
   allowed <- append(required, "argv", after = 4L)
-  extended <- c("timestamp", "discovery_time", "pid", "ppid", "start_time",
+  extended_v1 <- c("timestamp", "discovery_time", "pid", "ppid", "start_time",
                 "command", "argv", "executable", "potential_cmdstan", "readable",
                 "capture_state", "disappearance_reason")
+  extended <- c("timestamp", "discovery_time", "pid", "ppid", "start_time",
+                "process_state", "command", "argv", "executable",
+                "potential_cmdstan", "readable", "capture_state",
+                "disappearance_reason", "zombie_reason")
   if (!is.data.frame(snapshot) ||
       !(identical(names(snapshot), required) || identical(names(snapshot), allowed) ||
-        identical(names(snapshot), extended)) ||
+        identical(names(snapshot), extended_v1) || identical(names(snapshot), extended)) ||
       anyDuplicated(snapshot$pid) || !root_pid %in% snapshot$pid)
     stop("Invalid process snapshot.")
-  if (identical(names(snapshot), extended)) {
+  if (identical(names(snapshot), extended_v1) || identical(names(snapshot), extended)) {
     states <- c("captured", "vanished_during_capture", "unreadable_live",
-                "ambiguous_identity")
+                "ambiguous_identity", "zombie_process")
     if (anyNA(snapshot$capture_state) || !all(snapshot$capture_state %in% states) ||
         any(snapshot$readable != (snapshot$capture_state == "captured")))
       stop("Invalid process capture state.")
@@ -368,11 +372,21 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
       snapshot$disappearance_reason %in% c("pid_disappeared", "pid_reused")
     if (any(vanished_rows & !valid_vanished))
       stop("Invalid vanished process record.")
+    if (identical(names(snapshot), extended)) {
+      zombie_rows <- snapshot$capture_state == "zombie_process"
+      valid_zombie <- !snapshot$readable & snapshot$process_state == "Z" &
+        !nzchar(snapshot$command) & !nzchar(snapshot$executable) &
+        vapply(snapshot$argv, function(x) is.character(x) && !length(x), logical(1)) &
+        snapshot$zombie_reason == "exited_unreaped"
+      if (any(zombie_rows & !valid_zombie)) stop("Invalid zombie process record.")
+    }
   }
   descendants <- .v021_descendant_pids(snapshot, root_pid)
   vanished <- if ("capture_state" %in% names(snapshot))
     snapshot$capture_state == "vanished_during_capture" else rep(FALSE, nrow(snapshot))
-  out <- snapshot[snapshot$pid %in% descendants | vanished, , drop = FALSE]
+  zombie <- if ("capture_state" %in% names(snapshot))
+    snapshot$capture_state == "zombie_process" else rep(FALSE, nrow(snapshot))
+  out <- snapshot[snapshot$pid %in% descendants | vanished | zombie, , drop = FALSE]
   out$is_descendant <- out$pid != root_pid
   argv <- .v021_snapshot_argv(out)
   sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
@@ -396,6 +410,8 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     out$capture_state == "vanished_during_capture" else rep(FALSE, nrow(out))
   out$classification <- "other_descendant"
   out$classification[out_vanished] <- "vanished_during_capture"
+  if ("capture_state" %in% names(out))
+    out$classification[out$capture_state == "zombie_process"] <- "zombie_process"
   out$classification[out$pid == root_pid] <- "parent_r"
   out$classification[out$is_descendant & r_process] <- "outer_worker"
   out$classification[out$is_descendant & pathfinder_process] <- "pathfinder_process"
@@ -449,9 +465,10 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   peak <- max(counts)
   process_peak <- max(process_counts)
   complete <- all(vapply(snapshots, function(x) {
-    vanished <- if ("capture_state" %in% names(x))
-      x$capture_state == "vanished_during_capture" else rep(FALSE, nrow(x))
-    all(x$readable | vanished)
+    terminal <- if ("capture_state" %in% names(x))
+      x$capture_state %in% c("vanished_during_capture", "zombie_process")
+    else rep(FALSE, nrow(x))
+    all(x$readable | terminal)
   }, logical(1)))
   unknown <- any(records$classification == "unknown_potential_cmdstan")
   state <- if (!complete || unknown) "unverified_process_tree" else "verified"
@@ -488,7 +505,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   start_time <- remainder[[19L]]
   if (is.na(ppid) || !nzchar(start_time) || !grepl("^[0-9]+$", start_time))
     stop("Linux process stat identity is malformed.")
-  list(ppid = ppid, start_time = start_time)
+  list(ppid = ppid, start_time = start_time, process_state = fields[[4L]])
 }
 
 .v021_recheck_linux_process <- function(pid_dir, pid, start_time,
@@ -502,7 +519,11 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
     return(list(state = "ambiguous_identity", reason = "identity_recheck_unreadable"))
   if (!identical(observed$start_time, start_time))
     return(list(state = "vanished_during_capture", reason = "pid_reused"))
-  list(state = "unreadable_live", reason = "live_process_capture_failed")
+  if (identical(observed$process_state, "Z"))
+    return(list(state = "zombie_process", reason = "exited_unreaped",
+                process_state = "Z"))
+  list(state = "unreadable_live", reason = "live_process_capture_failed",
+       process_state = observed$process_state)
 }
 
 capture_v021_linux_process_snapshot <- function(
@@ -527,7 +548,8 @@ capture_v021_linux_process_snapshot <- function(
     parsed <- tryCatch(.v021_parse_linux_stat(stat, as.integer(pid_text)), error = identity)
     if (inherits(parsed, "error")) return(NULL)
     data.frame(pid = as.integer(pid_text), ppid = parsed$ppid,
-               start_time = parsed$start_time, stringsAsFactors = FALSE)
+               start_time = parsed$start_time, process_state = parsed$process_state,
+               stringsAsFactors = FALSE)
   })
   inventory <- do.call(rbind, identities[!vapply(identities, is.null, logical(1))])
   if (is.null(inventory) || !root_pid %in% inventory$pid)
@@ -544,7 +566,8 @@ capture_v021_linux_process_snapshot <- function(
     executable <- tryCatch(executable_reader(file.path(pid_dir, "exe")), error = identity)
     capture_ok <- !inherits(cmd_result, "error") && !inherits(executable, "error") &&
       is.character(executable) && length(executable) == 1L && nzchar(executable)
-    recheck <- if (capture_ok) list(state = "captured", reason = NA_character_) else
+    recheck <- if (capture_ok) list(state = "captured", reason = NA_character_,
+                                   process_state = inventory$process_state[[i]]) else
       .v021_recheck_linux_process(pid_dir, pid, inventory$start_time[[i]],
                                   path_exists, stat_reader)
     readable <- identical(recheck$state, "captured")
@@ -555,10 +578,16 @@ capture_v021_linux_process_snapshot <- function(
       grepl("cmdstan", command, ignore.case = TRUE)
     data.frame(timestamp = as.character(timestamp), discovery_time = discovery_time,
                pid = pid, ppid = inventory$ppid[[i]],
-               start_time = inventory$start_time[[i]], command = command, argv = I(list(argv)),
+               start_time = inventory$start_time[[i]],
+               process_state = if (!is.null(recheck$process_state))
+                 recheck$process_state else inventory$process_state[[i]],
+               command = command, argv = I(list(argv)),
                executable = executable, potential_cmdstan = potential,
                readable = readable, capture_state = recheck$state,
-               disappearance_reason = recheck$reason, stringsAsFactors = FALSE)
+               disappearance_reason = if (recheck$state == "vanished_during_capture")
+                 recheck$reason else NA_character_,
+               zombie_reason = if (recheck$state == "zombie_process") recheck$reason
+                 else NA_character_, stringsAsFactors = FALSE)
   })
   snapshot <- do.call(rbind, rows)
   rownames(snapshot) <- NULL

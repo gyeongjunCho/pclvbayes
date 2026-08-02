@@ -55,10 +55,11 @@ raw_cmdline <- function(argv, terminal_nul = TRUE) {
   out
 }
 
-proc_stat <- function(pid, ppid, start_time) paste(
-  pid, "(fixture)", "S", paste(c(ppid, rep("0", 17L), start_time), collapse = " "))
+proc_stat <- function(pid, ppid, start_time, state = "S") paste(
+  pid, "(fixture)", state, paste(c(ppid, rep("0", 17L), start_time), collapse = " "))
 
-capture_race_fixture <- function(recheck = c("gone", "same", "reused", "ambiguous"),
+capture_race_fixture <- function(recheck = c("gone", "same", "reused", "ambiguous",
+                                               "zombie"),
                                  malformed = FALSE) {
   recheck <- match.arg(recheck)
   root <- tempfile("v021-proc-"); dir.create(root)
@@ -71,7 +72,8 @@ capture_race_fixture <- function(recheck = c("gone", "same", "reused", "ambiguou
     stat_calls$child <- stat_calls$child + 1L
     if (stat_calls$child == 1L) return(proc_stat(200L, 100L, "2000"))
     if (recheck == "ambiguous") stop("fixture stat unreadable")
-    proc_stat(200L, 100L, if (recheck == "reused") "3000" else "2000")
+    proc_stat(200L, 100L, if (recheck == "reused") "3000" else "2000",
+              if (recheck == "zombie") "Z" else "S")
   }
   cmdline_reader <- function(path) {
     pid <- basename(dirname(path))
@@ -236,6 +238,66 @@ test_that("live unreadable and ambiguous procfs identities fail closed", {
       if (basename(dirname(path)) == "100") proc_stat(100L, 1L, "1000")
       else stop("unreadable")
     }), "stat remained unreadable")
+})
+
+test_that("verified zombies are audited and consume no process capacity", {
+  snapshot <- capture_race_fixture("zombie")
+  zombie <- snapshot[snapshot$pid == 200L, , drop = FALSE]
+  expect_identical(zombie$capture_state, "zombie_process")
+  expect_identical(zombie$process_state, "Z")
+  expect_identical(zombie$start_time, "2000")
+  expect_identical(zombie$ppid, 100L)
+  expect_identical(zombie$zombie_reason, "exited_unreaped")
+  expect_true(nzchar(zombie$discovery_time))
+  expect_false(zombie$readable)
+  expect_identical(zombie$argv[[1L]], character())
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L)
+  record <- monitor$records[monitor$records$pid == 200L, , drop = FALSE]
+  expect_identical(record$classification, "zombie_process")
+  expect_false(record$is_active_cmdstan_chain)
+  expect_false(record$classification %in% c("completed", "cmdstan_chain"))
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 0L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 0L)
+
+  non_zombie <- capture_race_fixture("same")
+  expect_identical(non_zombie$process_state[non_zombie$pid == 200L], "S")
+  expect_identical(monitor_v021_process_snapshots(
+    list(non_zombie), build_v021_resource_policy(), 100L)$monitoring_state,
+    "monitoring_error")
+
+  reused <- capture_race_fixture("reused")
+  expect_identical(reused$capture_state[reused$pid == 200L],
+                   "vanished_during_capture")
+  expect_identical(reused$disappearance_reason[reused$pid == 200L], "pid_reused")
+})
+
+test_that("attempt7-shaped zombie snapshot is verified with eight chains", {
+  base <- make_process_snapshot(8L, indirect = TRUE)
+  base$argv <- I(lapply(base$command,
+                        function(x) strsplit(x, "[[:space:]]+")[[1L]]))
+  snapshot <- data.frame(
+    timestamp = base$timestamp, discovery_time = base$timestamp,
+    pid = base$pid, ppid = base$ppid, start_time = as.character(base$pid * 10L),
+    process_state = "S", command = base$command, argv = I(base$argv),
+    executable = base$executable, potential_cmdstan = base$potential_cmdstan,
+    readable = base$readable, capture_state = "captured",
+    disappearance_reason = NA_character_, zombie_reason = NA_character_)
+  zombie <- snapshot[snapshot$pid == 200L, , drop = FALSE]
+  zombie$pid <- 201L; zombie$start_time <- "2010"; zombie$process_state <- "Z"
+  zombie$command <- ""; zombie$argv <- I(list(character())); zombie$executable <- ""
+  zombie$readable <- FALSE; zombie$capture_state <- "zombie_process"
+  zombie$zombie_reason <- "exited_unreaped"
+  snapshot <- rbind(snapshot, zombie)
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
+  expect_identical(monitor$records$classification[monitor$records$pid == 201L],
+                   "zombie_process")
 })
 
 test_that("attempt6-shaped worker exit is verified and compliant", {
