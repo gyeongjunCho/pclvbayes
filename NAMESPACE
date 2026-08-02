@@ -2,5 +2,4 @@
 
 export(cor_meta_resid)
 export(fit_pclv_bayes)
-export(fit_pclv_bayes2)
 export(summarize_bayes_pclv)

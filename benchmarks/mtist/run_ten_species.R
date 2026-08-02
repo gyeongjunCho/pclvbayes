@@ -58,11 +58,9 @@ fit <- fit_pclv_bayes(
   study$physeq, "subject", "time", taxa_vec = study$taxa,
   chains = config$chains, iter_warmup = config$iter_warmup,
   iter_sampling = config$iter_sampling, seed = config$seed,
-  quiet = TRUE, progress = "none", silent_sampler = TRUE,
   n_workers_outer = config$n_workers_outer, n_workers_kfold = config$n_workers_kfold,
   kfold_K = config$kfold_K, kfold_R = config$kfold_R,
-  max_retries = config$max_retries,
-  use_pathfinder_init = config$use_pathfinder_init)
+ )
 elapsed <- as.numeric(difftime(Sys.time(), started, units = "secs"))
 parent_rss_after <- proc_rss(Sys.getpid())
 status_lines <- readLines(sprintf("/proc/%s/status", Sys.getpid()), warn = FALSE)

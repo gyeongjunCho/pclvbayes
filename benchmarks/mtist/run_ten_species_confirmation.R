@@ -64,10 +64,9 @@ for (name in control_names) {
 overrides <- list(
   chains = config$chains, iter_warmup = config$iter_warmup,
   iter_sampling = config$iter_sampling, seed = config$seed,
-  quiet = TRUE, progress = "none", silent_sampler = TRUE,
+  progress = "none",
   n_workers_outer = config$n_workers_outer, n_workers_kfold = 1L,
-  max_retries = config$max_retries,
-  use_pathfinder_init = config$use_pathfinder_init
+  kfold_K = 5L, kfold_R = 1L
 )
 controls[names(overrides)] <- overrides
 validated <- pclvbayes:::.validate_fit_pclv_inputs(
