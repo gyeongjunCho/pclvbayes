@@ -18,6 +18,8 @@ v021_operation_types <- c(
 )
 
 .v021_linux_cmdline_max_bytes <- 1024L * 1024L
+.v021_procfs_recapture_attempts <- 2L
+.v021_procfs_recapture_delay_seconds <- 0.01
 
 .v021_resource_int <- function(x, name, positive = TRUE) {
   if (!is.numeric(x) || length(x) != 1L || is.na(x) || !is.finite(x) ||
@@ -354,12 +356,20 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
                 "process_state", "command", "argv", "executable",
                 "potential_cmdstan", "readable", "capture_state",
                 "disappearance_reason", "zombie_reason")
+  extended_retry <- c("timestamp", "discovery_time", "pid", "ppid", "start_time",
+                      "process_state", "initial_process_state", "final_process_state",
+                      "command", "argv", "executable", "potential_cmdstan", "readable",
+                      "capture_state", "disappearance_reason", "zombie_reason",
+                      "capture_retry_count", "capture_retry_timestamps",
+                      "resolution_reason")
   if (!is.data.frame(snapshot) ||
       !(identical(names(snapshot), required) || identical(names(snapshot), allowed) ||
-        identical(names(snapshot), extended_v1) || identical(names(snapshot), extended)) ||
+        identical(names(snapshot), extended_v1) || identical(names(snapshot), extended) ||
+        identical(names(snapshot), extended_retry)) ||
       anyDuplicated(snapshot$pid) || !root_pid %in% snapshot$pid)
     stop("Invalid process snapshot.")
-  if (identical(names(snapshot), extended_v1) || identical(names(snapshot), extended)) {
+  if (identical(names(snapshot), extended_v1) || identical(names(snapshot), extended) ||
+      identical(names(snapshot), extended_retry)) {
     states <- c("captured", "vanished_during_capture", "unreadable_live",
                 "ambiguous_identity", "zombie_process")
     if (anyNA(snapshot$capture_state) || !all(snapshot$capture_state %in% states) ||
@@ -372,13 +382,24 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
       snapshot$disappearance_reason %in% c("pid_disappeared", "pid_reused")
     if (any(vanished_rows & !valid_vanished))
       stop("Invalid vanished process record.")
-    if (identical(names(snapshot), extended)) {
+    if (identical(names(snapshot), extended) || identical(names(snapshot), extended_retry)) {
       zombie_rows <- snapshot$capture_state == "zombie_process"
       valid_zombie <- !snapshot$readable & snapshot$process_state == "Z" &
         !nzchar(snapshot$command) & !nzchar(snapshot$executable) &
         vapply(snapshot$argv, function(x) is.character(x) && !length(x), logical(1)) &
         snapshot$zombie_reason == "exited_unreaped"
       if (any(zombie_rows & !valid_zombie)) stop("Invalid zombie process record.")
+    }
+    if (identical(names(snapshot), extended_retry)) {
+      retry_valid <- is.integer(snapshot$capture_retry_count) &
+        snapshot$capture_retry_count >= 0L &
+        vapply(seq_len(nrow(snapshot)), function(i) {
+          timestamps <- snapshot$capture_retry_timestamps[[i]]
+          is.character(timestamps) && length(timestamps) == snapshot$capture_retry_count[[i]] &&
+            !anyNA(timestamps) && all(nzchar(timestamps))
+        }, logical(1)) & !is.na(snapshot$initial_process_state) &
+        !is.na(snapshot$final_process_state) & !is.na(snapshot$resolution_reason)
+      if (!all(retry_valid)) stop("Invalid procfs recapture audit metadata.")
     }
   }
   descendants <- .v021_descendant_pids(snapshot, root_pid)
@@ -522,7 +543,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   if (identical(observed$process_state, "Z"))
     return(list(state = "zombie_process", reason = "exited_unreaped",
                 process_state = "Z"))
-  list(state = "unreadable_live", reason = "live_process_capture_failed",
+  list(state = "identity_stable", reason = "identity_stable",
        process_state = observed$process_state)
 }
 
@@ -533,7 +554,9 @@ capture_v021_linux_process_snapshot <- function(
     path_exists = dir.exists,
     stat_reader = function(path) readLines(path, warn = FALSE, n = 1L),
     cmdline_reader = .v021_read_linux_cmdline,
-    executable_reader = Sys.readlink) {
+    executable_reader = Sys.readlink,
+    sleep = Sys.sleep,
+    clock = function() format(Sys.time(), tz = "UTC", usetz = TRUE)) {
   if (!dir.exists(proc_root)) stop("Linux /proc process monitoring is unavailable.")
   discovery_time <- as.character(timestamp)
   entries <- pid_lister(proc_root)
@@ -559,17 +582,34 @@ capture_v021_linux_process_snapshot <- function(
   rows <- lapply(seq_len(nrow(inventory)), function(i) {
     pid <- inventory$pid[[i]]; pid_text <- as.character(pid)
     pid_dir <- file.path(proc_root, pid_text)
-    cmd_result <- tryCatch({
-      raw <- cmdline_reader(file.path(pid_dir, "cmdline"))
-      .v021_decode_linux_cmdline(raw)
-    }, error = identity)
-    executable <- tryCatch(executable_reader(file.path(pid_dir, "exe")), error = identity)
-    capture_ok <- !inherits(cmd_result, "error") && !inherits(executable, "error") &&
-      is.character(executable) && length(executable) == 1L && nzchar(executable)
-    recheck <- if (capture_ok) list(state = "captured", reason = NA_character_,
-                                   process_state = inventory$process_state[[i]]) else
-      .v021_recheck_linux_process(pid_dir, pid, inventory$start_time[[i]],
-                                  path_exists, stat_reader)
+    retry_timestamps <- character()
+    cmd_result <- executable <- NULL
+    recheck <- NULL
+    for (attempt in 0:.v021_procfs_recapture_attempts) {
+      if (attempt > 0L) {
+        sleep(.v021_procfs_recapture_delay_seconds)
+        retry_timestamps <- c(retry_timestamps, as.character(clock()))
+      }
+      cmd_result <- tryCatch({
+        raw <- cmdline_reader(file.path(pid_dir, "cmdline"))
+        .v021_decode_linux_cmdline(raw)
+      }, error = identity)
+      executable <- tryCatch(executable_reader(file.path(pid_dir, "exe")), error = identity)
+      capture_ok <- !inherits(cmd_result, "error") && !inherits(executable, "error") &&
+        is.character(executable) && length(executable) == 1L && nzchar(executable)
+      recheck <- .v021_recheck_linux_process(pid_dir, pid, inventory$start_time[[i]],
+                                             path_exists, stat_reader)
+      if (!identical(recheck$state, "identity_stable")) break
+      if (capture_ok) {
+        recheck$state <- "captured"
+        recheck$reason <- if (attempt) "readable_on_recapture" else "readable_initial_capture"
+        break
+      }
+      if (attempt == .v021_procfs_recapture_attempts) {
+        recheck$state <- "unreadable_live"
+        recheck$reason <- "recapture_limit_exhausted"
+      }
+    }
     readable <- identical(recheck$state, "captured")
     argv <- if (readable) cmd_result$argv else character()
     command <- if (readable) cmd_result$command else ""
@@ -581,13 +621,18 @@ capture_v021_linux_process_snapshot <- function(
                start_time = inventory$start_time[[i]],
                process_state = if (!is.null(recheck$process_state))
                  recheck$process_state else inventory$process_state[[i]],
+               initial_process_state = inventory$process_state[[i]],
+               final_process_state = if (!is.null(recheck$process_state))
+                 recheck$process_state else inventory$process_state[[i]],
                command = command, argv = I(list(argv)),
                executable = executable, potential_cmdstan = potential,
                readable = readable, capture_state = recheck$state,
                disappearance_reason = if (recheck$state == "vanished_during_capture")
                  recheck$reason else NA_character_,
                zombie_reason = if (recheck$state == "zombie_process") recheck$reason
-                 else NA_character_, stringsAsFactors = FALSE)
+                 else NA_character_, capture_retry_count = as.integer(length(retry_timestamps)),
+               capture_retry_timestamps = I(list(retry_timestamps)),
+               resolution_reason = recheck$reason, stringsAsFactors = FALSE)
   })
   snapshot <- do.call(rbind, rows)
   rownames(snapshot) <- NULL

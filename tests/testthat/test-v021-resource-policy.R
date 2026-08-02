@@ -95,6 +95,52 @@ capture_race_fixture <- function(recheck = c("gone", "same", "reused", "ambiguou
     })
 }
 
+capture_recapture_fixture <- function(outcome = c("readable", "zombie", "gone",
+                                                   "reused", "persistent")) {
+  outcome <- match.arg(outcome)
+  root <- tempfile("v021-proc-recapture-"); dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  dir.create(file.path(root, "100")); dir.create(file.path(root, "200"))
+  state <- new.env(parent = emptyenv())
+  state$stat_calls <- 0L; state$capture_calls <- 0L
+  state$rechecks <- 0L; state$delays <- numeric(); state$clock <- 0L
+  stat_reader <- function(path) {
+    pid <- basename(dirname(path))
+    if (pid == "100") return(proc_stat(100L, 1L, "1000"))
+    state$stat_calls <- state$stat_calls + 1L
+    if (state$stat_calls <= 2L) return(proc_stat(200L, 100L, "2000"))
+    if (outcome == "zombie") return(proc_stat(200L, 100L, "2000", "Z"))
+    if (outcome == "reused") return(proc_stat(200L, 100L, "3000"))
+    proc_stat(200L, 100L, "2000")
+  }
+  path_exists <- function(path) {
+    if (basename(path) != "200") return(TRUE)
+    state$rechecks <- state$rechecks + 1L
+    !(outcome == "gone" && state$rechecks >= 2L)
+  }
+  cmdline_reader <- function(path) {
+    if (basename(dirname(path)) == "100") return(raw_cmdline(c("Rscript", "preflight.R")))
+    state$capture_calls <- state$capture_calls + 1L
+    if (outcome == "readable" && state$capture_calls >= 2L)
+      return(raw_cmdline(c("R", "--worker")))
+    stop("transient cmdline")
+  }
+  snapshot <- capture_v021_linux_process_snapshot(
+    100L, proc_root = root, pid_lister = function(root) c("100", "200"),
+    path_exists = path_exists, stat_reader = stat_reader,
+    cmdline_reader = cmdline_reader,
+    executable_reader = function(path) {
+      if (basename(dirname(path)) == "100") return("/usr/bin/R")
+      if (outcome == "readable" && state$capture_calls >= 2L) return("/usr/bin/R")
+      stop("transient executable")
+    }, sleep = function(seconds) state$delays <- c(state$delays, seconds),
+    clock = function() {
+      state$clock <- state$clock + 1L
+      sprintf("2026-08-02T00:00:0%dZ", state$clock)
+    })
+  list(snapshot = snapshot, state = state)
+}
+
 snapshot_with_argv <- function(argv, executable = "/models/pclv", pid = 301L,
                                ppid = 100L, potential_cmdstan = TRUE,
                                readable = TRUE) {
@@ -298,6 +344,82 @@ test_that("attempt7-shaped zombie snapshot is verified with eight chains", {
   expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
   expect_identical(monitor$records$classification[monitor$records$pid == 201L],
                    "zombie_process")
+})
+
+test_that("bounded identity-preserving recapture resolves transient procfs states", {
+  readable <- capture_recapture_fixture("readable")
+  row <- readable$snapshot[readable$snapshot$pid == 200L, , drop = FALSE]
+  expect_identical(row$capture_state, "captured")
+  expect_identical(row$capture_retry_count, 1L)
+  expect_identical(row$resolution_reason, "readable_on_recapture")
+  expect_identical(row$initial_process_state, "S")
+  expect_identical(row$final_process_state, "S")
+  expect_identical(row$capture_retry_timestamps[[1L]], "2026-08-02T00:00:01Z")
+  expect_identical(readable$state$delays, .v021_procfs_recapture_delay_seconds)
+  monitor <- monitor_v021_process_snapshots(
+    list(readable$snapshot), build_v021_resource_policy(), 100L)
+  expect_identical(monitor$monitoring_state, "verified")
+
+  zombie <- capture_recapture_fixture("zombie")$snapshot
+  expect_identical(zombie$capture_state[zombie$pid == 200L], "zombie_process")
+  expect_identical(zombie$capture_retry_count[zombie$pid == 200L], 1L)
+  expect_identical(zombie$final_process_state[zombie$pid == 200L], "Z")
+
+  gone <- capture_recapture_fixture("gone")$snapshot
+  expect_identical(gone$capture_state[gone$pid == 200L], "vanished_during_capture")
+  expect_identical(gone$disappearance_reason[gone$pid == 200L], "pid_disappeared")
+
+  reused <- capture_recapture_fixture("reused")$snapshot
+  expect_identical(reused$capture_state[reused$pid == 200L],
+                   "vanished_during_capture")
+  expect_identical(reused$disappearance_reason[reused$pid == 200L], "pid_reused")
+})
+
+test_that("persistent live recapture failure remains unverified", {
+  persistent <- capture_recapture_fixture("persistent")
+  row <- persistent$snapshot[persistent$snapshot$pid == 200L, , drop = FALSE]
+  expect_identical(row$capture_state, "unreadable_live")
+  expect_identical(row$capture_retry_count, .v021_procfs_recapture_attempts)
+  expect_length(row$capture_retry_timestamps[[1L]], .v021_procfs_recapture_attempts)
+  expect_identical(row$resolution_reason, "recapture_limit_exhausted")
+  expect_identical(persistent$state$delays,
+                   rep(.v021_procfs_recapture_delay_seconds,
+                       .v021_procfs_recapture_attempts))
+  monitor <- monitor_v021_process_snapshots(
+    list(persistent$snapshot), build_v021_resource_policy(), 100L)
+  expect_identical(monitor$monitoring_state, "monitoring_error")
+  expect_true(is.na(monitor$observed_peak_active_cmdstan_chains))
+  expect_true(is.na(monitor$observed_peak_active_cmdstan_processes))
+  expect_identical(monitor$compliance_status, "unverified")
+})
+
+test_that("attempt8-shaped transient worker resolves without undercounting", {
+  base <- make_process_snapshot(8L, indirect = TRUE)
+  base$argv <- I(lapply(base$command,
+                        function(x) strsplit(x, "[[:space:]]+")[[1L]]))
+  resolved <- data.frame(
+    timestamp = base$timestamp, discovery_time = base$timestamp,
+    pid = base$pid, ppid = base$ppid, start_time = as.character(base$pid * 10L),
+    process_state = "S", initial_process_state = "S", final_process_state = "S",
+    command = base$command, argv = I(base$argv), executable = base$executable,
+    potential_cmdstan = base$potential_cmdstan, readable = TRUE,
+    capture_state = "captured", disappearance_reason = NA_character_,
+    zombie_reason = NA_character_, capture_retry_count = 0L,
+    capture_retry_timestamps = I(rep(list(character()), nrow(base))),
+    resolution_reason = "readable_initial_capture")
+  retried <- capture_recapture_fixture("readable")$snapshot
+  retried <- retried[retried$pid == 200L, , drop = FALSE]
+  retried$pid <- 201L; retried$start_time <- "2010"
+  resolved <- rbind(resolved, retried)
+  monitor <- monitor_v021_process_snapshots(
+    list(resolved), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
+  expect_identical(monitor$records$capture_retry_count[monitor$records$pid == 201L], 1L)
+  expect_false(any(monitor$records$classification %in%
+                     c("zombie_process", "vanished_during_capture")))
 })
 
 test_that("attempt6-shaped worker exit is verified and compliant", {
