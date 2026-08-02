@@ -1,6 +1,6 @@
 # Benchmark-only resource and process-monitoring contract for ROADMAP V021-02.
 
-v021_resource_policy_schema <- "v021_resource_policy_v1"
+v021_resource_policy_schema <- "v021_resource_policy_v2"
 v021_preflight_states <- c(
   "passed", "failed_ceiling_exceeded", "failed_unverified_process_tree",
   "failed_thread_environment", "failed_invalid_policy", "failed_monitoring_error"
@@ -20,6 +20,11 @@ v021_operation_types <- c(
 .v021_linux_cmdline_max_bytes <- 1024L * 1024L
 .v021_procfs_recapture_attempts <- 2L
 .v021_procfs_recapture_delay_seconds <- 0.01
+.v021_linux_non_zombie_states <- c("R", "S", "D", "T", "t", "X", "x", "K", "W", "P", "I")
+.v021_worker_registry_fields <- c(
+  "pid", "start_time", "expected_ppid", "worker_role", "batch_id", "task_id",
+  "registration_timestamp"
+)
 
 .v021_resource_int <- function(x, name, positive = TRUE) {
   if (!is.numeric(x) || length(x) != 1L || is.na(x) || !is.finite(x) ||
@@ -27,6 +32,39 @@ v021_operation_types <- c(
     stop(name, " must be ", if (positive) "a positive" else "a non-negative",
          " integer.")
   as.integer(x)
+}
+
+build_v021_worker_registry <- function(pid, start_time, expected_ppid, worker_role,
+                                       batch_id, task_id, registration_timestamp) {
+  registry <- data.frame(
+    pid = as.integer(pid), start_time = as.character(start_time),
+    expected_ppid = as.integer(expected_ppid), worker_role = as.character(worker_role),
+    batch_id = as.character(batch_id), task_id = as.character(task_id),
+    registration_timestamp = as.character(registration_timestamp),
+    stringsAsFactors = FALSE
+  )
+  validate_v021_worker_registry(registry)
+  registry
+}
+
+validate_v021_worker_registry <- function(registry) {
+  if (!is.data.frame(registry) ||
+      !identical(names(registry), .v021_worker_registry_fields) || !nrow(registry))
+    stop("Invalid registered outer-worker registry schema.")
+  integer_fields <- c("pid", "expected_ppid")
+  if (any(vapply(registry[integer_fields], function(x)
+    !is.integer(x) || anyNA(x), logical(1))) || any(registry$pid < 1L) ||
+      any(registry$expected_ppid < 1L))
+    stop("Registered outer-worker PID and PPID identities must be positive integers.")
+  text_fields <- setdiff(.v021_worker_registry_fields, integer_fields)
+  if (any(vapply(registry[text_fields], function(x)
+    !is.character(x) || anyNA(x) || any(!nzchar(x)), logical(1))))
+    stop("Registered outer-worker identity metadata must be non-empty strings.")
+  if (any(!grepl("^[0-9]+$", registry$start_time)))
+    stop("Registered outer-worker start times must be procfs clock-tick identities.")
+  if (anyDuplicated(registry$pid))
+    stop("Registered outer-worker registry contains duplicate PID entries.")
+  invisible(TRUE)
 }
 
 .v021_operation_table <- function(main_chains, retry_chains, pathfinder_processes,
@@ -54,8 +92,9 @@ v021_operation_types <- c(
 }
 
 build_v021_resource_policy <- function(
-    logical_host_threads = 12L, reserved_host_threads = 2L,
-    maximum_active_cmdstan_chains = 10L, cpu_threads_per_active_chain = 1L,
+    logical_host_threads = 16L, reserved_host_threads = 4L,
+    maximum_active_cmdstan_chains = 12L, maximum_cmdstan_process_slots = 12L,
+    cpu_threads_per_active_chain = 1L,
     main_chains = 4L, retry_chains = main_chains,
     pathfinder_processes = 1L, pathfinder_num_paths = 8L,
     kfold_chains = main_chains, kfold_parallel_chains = 1L,
@@ -66,6 +105,8 @@ build_v021_resource_policy <- function(
     reserved_host_threads, "reserved_host_threads", positive = FALSE)
   maximum_active_cmdstan_chains <- .v021_resource_int(
     maximum_active_cmdstan_chains, "maximum_active_cmdstan_chains")
+  maximum_cmdstan_process_slots <- .v021_resource_int(
+    maximum_cmdstan_process_slots, "maximum_cmdstan_process_slots")
   cpu_threads_per_active_chain <- .v021_resource_int(
     cpu_threads_per_active_chain, "cpu_threads_per_active_chain")
   main_chains <- .v021_resource_int(main_chains, "main_chains")
@@ -78,8 +119,9 @@ build_v021_resource_policy <- function(
     kfold_parallel_chains, "kfold_parallel_chains")
   confirmation_chains <- .v021_resource_int(confirmation_chains, "confirmation_chains")
   usable <- logical_host_threads - reserved_host_threads
-  if (usable < 1L || usable != maximum_active_cmdstan_chains)
-    stop("Usable host threads must equal the global CmdStan-chain ceiling.")
+  if (usable < 1L || usable != maximum_active_cmdstan_chains ||
+      usable != maximum_cmdstan_process_slots)
+    stop("Usable host threads must equal both global CmdStan ceilings.")
   if (cpu_threads_per_active_chain != 1L)
     stop("Exactly one CPU thread per active chain is required.")
   if (kfold_parallel_chains > kfold_chains)
@@ -108,6 +150,7 @@ build_v021_resource_policy <- function(
     reserved_host_threads = reserved_host_threads,
     usable_chain_slots = as.integer(usable),
     maximum_active_cmdstan_chains = maximum_active_cmdstan_chains,
+    maximum_cmdstan_process_slots = maximum_cmdstan_process_slots,
     cpu_threads_per_active_chain = cpu_threads_per_active_chain,
     numerical_library_threads = 1L,
     main_chains = main_chains,
@@ -130,6 +173,7 @@ validate_v021_resource_policy <- function(policy) {
   fields <- c(
     "policy_schema", "logical_host_threads", "reserved_host_threads",
     "usable_chain_slots", "maximum_active_cmdstan_chains",
+    "maximum_cmdstan_process_slots",
     "cpu_threads_per_active_chain", "numerical_library_threads", "main_chains",
     "retry_chains", "pathfinder_processes", "pathfinder_chain_slots",
     "pathfinder_num_paths", "kfold_chains", "kfold_parallel_chains",
@@ -143,9 +187,10 @@ validate_v021_resource_policy <- function(policy) {
   for (nm in setdiff(fields, c("policy_schema", "global_slot_scheduler", "operation_slots")))
     .v021_resource_int(policy[[nm]], nm, positive = nm != "pathfinder_chain_slots" &&
                          nm != "pathfinder_processes" && nm != "reserved_host_threads")
-  if (policy$logical_host_threads != 12L || policy$reserved_host_threads != 2L ||
-      policy$usable_chain_slots != 10L || policy$maximum_active_cmdstan_chains != 10L)
-    stop("Policy violates the exact 12/2/10 host contract.")
+  if (policy$logical_host_threads != 16L || policy$reserved_host_threads != 4L ||
+      policy$usable_chain_slots != 12L || policy$maximum_active_cmdstan_chains != 12L ||
+      policy$maximum_cmdstan_process_slots != 12L)
+    stop("Policy violates the exact 16/4/12 host contract.")
   if (policy$logical_host_threads - policy$reserved_host_threads !=
       policy$usable_chain_slots)
     stop("Policy host-thread arithmetic is contradictory.")
@@ -199,14 +244,16 @@ derive_safe_outer_concurrency <- function(policy, operation_spec) {
   chain_capacity <- if (per_fit_chain_slots > 0L)
     floor(policy$maximum_active_cmdstan_chains / per_fit_chain_slots) else Inf
   process_capacity <- if (per_fit_process_slots > 0L)
-    floor(policy$usable_chain_slots / per_fit_process_slots) else Inf
+    floor(policy$maximum_cmdstan_process_slots / per_fit_process_slots) else Inf
   safe <- as.integer(min(chain_capacity, process_capacity))
+  if (any(spec$operations %in% c("main_fit", "retry_fit", "confirmation_fit")))
+    safe <- min(safe, policy$proposed_outer_concurrency)
   if (safe < 1L) stop("Operation cannot fit within the global resource ceiling.")
   requested <- spec$requested_outer_concurrency
   projected_chains <- requested * per_fit_chain_slots
   projected_processes <- requested * per_fit_process_slots
   if (requested > safe || projected_chains > policy$maximum_active_cmdstan_chains ||
-      projected_processes > policy$usable_chain_slots)
+      projected_processes > policy$maximum_cmdstan_process_slots)
     stop("Requested outer concurrency exceeds the binding global ceiling.")
   list(
     policy_schema = policy$policy_schema,
@@ -214,7 +261,7 @@ derive_safe_outer_concurrency <- function(policy, operation_spec) {
     per_fit_simultaneous_chain_slots = as.integer(per_fit_chain_slots),
     per_fit_cmdstan_process_slots = as.integer(per_fit_process_slots),
     maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
-    usable_process_slots = policy$usable_chain_slots,
+    usable_process_slots = policy$maximum_cmdstan_process_slots,
     safe_outer_concurrency = safe,
     requested_outer_concurrency = requested,
     projected_active_cmdstan_chains = as.integer(projected_chains),
@@ -241,7 +288,7 @@ validate_v021_operation_plan <- function(policy, operation_plan) {
   active_chains <- sum(operation_plan$concurrent_instances * slots$simultaneous_chain_slots)
   active_processes <- sum(operation_plan$concurrent_instances * slots$cmdstan_process_slots)
   if (active_chains > policy$maximum_active_cmdstan_chains ||
-      active_processes > policy$usable_chain_slots)
+      active_processes > policy$maximum_cmdstan_process_slots)
     stop("Overlapping operation plan exceeds the global ceiling.")
   list(active_cmdstan_chains = as.integer(active_chains),
        active_cmdstan_processes = as.integer(active_processes), compliant = TRUE)
@@ -328,13 +375,15 @@ with_v021_single_thread_environment <- function(code) {
   command_raw
 }
 
-.v021_snapshot_argv <- function(snapshot) {
+.v021_snapshot_argv <- function(snapshot, allow_empty = rep(FALSE, nrow(snapshot))) {
+  if (!is.logical(allow_empty) || length(allow_empty) != nrow(snapshot) || anyNA(allow_empty))
+    stop("Invalid process argv exception mask.")
   if ("argv" %in% names(snapshot)) {
     terminal <- "capture_state" %in% names(snapshot) &
       snapshot$capture_state %in% c("vanished_during_capture", "zombie_process")
     valid <- vapply(snapshot$argv, function(x)
       is.character(x) && length(x) > 0L && !anyNA(x) && nzchar(x[[1L]]), logical(1))
-    if (!all(valid | terminal)) stop("Malformed decoded process argv.")
+    if (!all(valid | terminal | allow_empty)) stop("Malformed decoded process argv.")
     return(snapshot$argv)
   }
   lapply(snapshot$command, function(x) {
@@ -345,7 +394,8 @@ with_v021_single_thread_environment <- function(code) {
 
 classify_v021_process_snapshot <- function(snapshot, root_pid,
                                             known_model_executables = character(),
-                                            operation_map = NULL) {
+                                            operation_map = NULL,
+                                            worker_registry = NULL) {
   required <- c("timestamp", "pid", "ppid", "command", "executable",
                 "potential_cmdstan", "readable")
   allowed <- append(required, "argv", after = 4L)
@@ -409,7 +459,33 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     snapshot$capture_state == "zombie_process" else rep(FALSE, nrow(snapshot))
   out <- snapshot[snapshot$pid %in% descendants | vanished | zombie, , drop = FALSE]
   out$is_descendant <- out$pid != root_pid
-  argv <- .v021_snapshot_argv(out)
+  registered <- rep(FALSE, nrow(out))
+  registry_match <- rep(NA_integer_, nrow(out))
+  if (!is.null(worker_registry)) {
+    validate_v021_worker_registry(worker_registry)
+    if (!all(c("start_time", "process_state", "capture_state") %in% names(out)))
+      stop("Registered outer-worker classification requires procfs identity data.")
+    registry_match <- match(out$pid, worker_registry$pid)
+    candidate <- !is.na(registry_match)
+    if (any(candidate)) {
+      registry_rows <- worker_registry[registry_match[candidate], , drop = FALSE]
+      observed <- out[candidate, , drop = FALSE]
+      valid_state <- !is.na(observed$process_state) &
+        observed$process_state %in% .v021_linux_non_zombie_states
+      valid_identity <- observed$start_time == registry_rows$start_time &
+        observed$ppid == registry_rows$expected_ppid & valid_state &
+        observed$ppid %in% descendants & observed$is_descendant &
+        observed$capture_state %in% c("captured", "unreadable_live") &
+        !observed$potential_cmdstan
+      if (anyNA(valid_identity) || !all(valid_identity))
+        stop("Registered outer-worker PID, start-time, PPID, or ancestry mismatch.")
+      registered[candidate] <- TRUE
+    }
+  }
+  registered_unreadable <- registered
+  if ("capture_state" %in% names(out))
+    registered_unreadable <- registered & out$capture_state == "unreadable_live"
+  argv <- .v021_snapshot_argv(out, allow_empty = registered_unreadable)
   sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
   pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
   known_executable <- out$executable %in% known_model_executables
@@ -435,6 +511,7 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     out$classification[out$capture_state == "zombie_process"] <- "zombie_process"
   out$classification[out$pid == root_pid] <- "parent_r"
   out$classification[out$is_descendant & r_process] <- "outer_worker"
+  out$classification[registered] <- "registered_outer_worker"
   out$classification[out$is_descendant & pathfinder_process] <- "pathfinder_process"
   out$classification[out$is_descendant & sample_process] <- "cmdstan_chain"
   out$classification[diagnostic_process] <- "cmdstan_diagnostic"
@@ -445,6 +522,16 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   out$operation <- NA_character_
   out$task_id <- NA_character_
   out$direction_id <- NA_character_
+  out$worker_role <- NA_character_
+  out$worker_batch_id <- NA_character_
+  out$worker_registration_timestamp <- NA_character_
+  if (any(registered)) {
+    rows <- worker_registry[registry_match[registered], , drop = FALSE]
+    out$worker_role[registered] <- rows$worker_role
+    out$worker_batch_id[registered] <- rows$batch_id
+    out$task_id[registered] <- rows$task_id
+    out$worker_registration_timestamp[registered] <- rows$registration_timestamp
+  }
   if (!is.null(operation_map)) {
     map_fields <- c("pid", "operation", "task_id", "direction_id")
     if (!is.data.frame(operation_map) || !identical(names(operation_map), map_fields) ||
@@ -460,7 +547,8 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
 
 monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
                                             known_model_executables = character(),
-                                            operation_map = NULL) {
+                                            operation_map = NULL,
+                                            worker_registry = NULL) {
   validate_v021_resource_policy(policy)
   if (!is.list(snapshots) || !length(snapshots))
     return(list(monitoring_state = "monitoring_error", reason = "no_process_snapshots",
@@ -470,7 +558,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
                 compliance_status = "unverified"))
   classified <- tryCatch(lapply(snapshots, classify_v021_process_snapshot,
     root_pid = root_pid, known_model_executables = known_model_executables,
-    operation_map = operation_map), error = identity)
+    operation_map = operation_map, worker_registry = worker_registry), error = identity)
   if (inherits(classified, "error"))
     return(list(monitoring_state = "monitoring_error",
                 reason = conditionMessage(classified), records = data.frame(),
@@ -485,11 +573,14 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
           c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")), integer(1))
   peak <- max(counts)
   process_peak <- max(process_counts)
-  complete <- all(vapply(snapshots, function(x) {
+  configured_launch_chain_ceiling <- min(
+    policy$maximum_active_cmdstan_chains,
+    policy$proposed_outer_concurrency * policy$main_chains)
+  complete <- all(vapply(classified, function(x) {
     terminal <- if ("capture_state" %in% names(x))
       x$capture_state %in% c("vanished_during_capture", "zombie_process")
     else rep(FALSE, nrow(x))
-    all(x$readable | terminal)
+    all(x$readable | terminal | x$classification == "registered_outer_worker")
   }, logical(1)))
   unknown <- any(records$classification == "unknown_potential_cmdstan")
   state <- if (!complete || unknown) "unverified_process_tree" else "verified"
@@ -501,14 +592,17 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   records$observed_peak_active_cmdstan_chain_count <- peak
   records$observed_peak_active_cmdstan_process_count <- process_peak
   records$configured_ceiling <- policy$maximum_active_cmdstan_chains
+  records$configured_launch_chain_ceiling <- configured_launch_chain_ceiling
   records$compliance_status <- if (state != "verified") "unverified" else if (
     peak <= policy$maximum_active_cmdstan_chains &&
-      process_peak <= policy$usable_chain_slots) "compliant" else "exceeded"
+      peak <= configured_launch_chain_ceiling &&
+      process_peak <= policy$maximum_cmdstan_process_slots) "compliant" else "exceeded"
   list(
     monitoring_state = state, reason = reason, records = records,
     observed_peak_active_cmdstan_chains = as.integer(peak),
     observed_peak_active_cmdstan_processes = as.integer(process_peak),
     configured_ceiling = policy$maximum_active_cmdstan_chains,
+    configured_launch_chain_ceiling = as.integer(configured_launch_chain_ceiling),
     compliance_status = unique(records$compliance_status)[[1L]]
   )
 }
@@ -643,6 +737,7 @@ monitor_v021_process_tree <- function(policy, root_pid = Sys.getpid(), samples =
                                        interval_seconds = 0.1,
                                        known_model_executables = character(),
                                        operation_map = NULL,
+                                       worker_registry = NULL,
                                        snapshot_reader = capture_v021_linux_process_snapshot) {
   samples <- .v021_resource_int(samples, "samples")
   if (!is.numeric(interval_seconds) || length(interval_seconds) != 1L ||
@@ -655,7 +750,8 @@ monitor_v021_process_tree <- function(policy, root_pid = Sys.getpid(), samples =
     if (i < samples && interval_seconds > 0) Sys.sleep(interval_seconds)
   }
   monitor_v021_process_snapshots(
-    snapshots, policy, root_pid, known_model_executables, operation_map)
+    snapshots, policy, root_pid, known_model_executables, operation_map,
+    worker_registry)
 }
 
 .v021_preflight_result <- function(state, reasons, policy = NULL, derivation = NULL,
@@ -719,7 +815,9 @@ evaluate_v021_resource_preflight <- function(policy, operation_spec,
       policy, derivation, monitor, thread_environment))
   if (monitor$observed_peak_active_cmdstan_chains >
       policy$maximum_active_cmdstan_chains ||
-      monitor$observed_peak_active_cmdstan_processes > policy$usable_chain_slots)
+      monitor$observed_peak_active_cmdstan_processes >
+        policy$maximum_cmdstan_process_slots ||
+      identical(monitor$compliance_status, "exceeded"))
     return(.v021_preflight_result(
       "failed_ceiling_exceeded",
       "Observed active CmdStan chain or process slots exceeded the ceiling.",
