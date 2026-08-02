@@ -110,7 +110,9 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
   exports and pair-level load balancing reduced the representative two-worker
   MTIST profile without changing scientific signatures or one-worker runtime.
 - [ ] Optimize other measured bottlenecks only
-- [ ] Run representative 10-species MTIST benchmarks
+- [x] Run representative 10-species MTIST benchmarks — dataset 37 completed
+  all 45 pair tasks and 90 directed fits in smoke and multi-chain reference
+  configurations with coverage-aware scoring and explicit indeterminacy.
 - [ ] Documentation
 - [ ] Reduce and freeze the public `fit_pclv_bayes()` API
 - [ ] Release preparation

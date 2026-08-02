@@ -38,10 +38,10 @@ mtist_git_sha <- function(root = mtist_root()) {
   .drop_confirmed_csv_index(utils::read.csv(path, check.names = FALSE), path)
 }
 
-enumerate_mtist_3species <- function(root = mtist_root()) {
+enumerate_mtist_studies <- function(n_species, root = mtist_root()) {
   paths <- .mtist_paths(root)
   meta <- .read_indexed_csv(paths$metadata)
-  meta <- meta[meta$n_species == 3L, , drop = FALSE]
+  meta <- meta[meta$n_species == as.integer(n_species), , drop = FALSE]
   meta$dataset_path <- file.path(paths$datasets, paste0("dataset_", meta$did, ".csv"))
   meta$truth_path <- file.path(
     paths$truths,
@@ -52,11 +52,32 @@ enumerate_mtist_3species <- function(root = mtist_root()) {
   meta
 }
 
+
+enumerate_mtist_3species <- function(root = mtist_root())
+  enumerate_mtist_studies(3L, root)
+
+enumerate_mtist_10species <- function(root = mtist_root())
+  enumerate_mtist_studies(10L, root)
+
+.select_mtist_10species_catalog <- function(candidates) {
+  eligible <- candidates[candidates$compatible & candidates$noise == 0.01 &
+    candidates$sampling_scheme == "even" & candidates$n_timeseries >= 10L &
+    candidates$n_timepoints >= 15L, , drop = FALSE]
+  if (!nrow(eligible)) stop("No compatible representative 10-species study found.")
+  eligible[order(eligible$did), , drop = FALSE][1L, , drop = FALSE]
+}
+
+select_mtist_10species <- function(root = mtist_root())
+  .select_mtist_10species_catalog(enumerate_mtist_10species(root))
+
 load_mtist_study <- function(dataset_id, root = mtist_root()) {
   paths <- .mtist_paths(root)
-  catalog <- enumerate_mtist_3species(root)
+  metadata <- .read_indexed_csv(paths$metadata)
+  metadata_record <- metadata[metadata$did == dataset_id, , drop = FALSE]
+  if (nrow(metadata_record) != 1L) stop("Dataset ID must identify one MTIST study: ", dataset_id)
+  catalog <- enumerate_mtist_studies(metadata_record$n_species[[1L]], root)
   record <- catalog[catalog$did == dataset_id, , drop = FALSE]
-  if (nrow(record) != 1L) stop("Dataset ID must identify one 3-species study: ", dataset_id)
+  if (nrow(record) != 1L) stop("Dataset ID must identify one MTIST study: ", dataset_id)
   if (!isTRUE(record$compatible[[1L]])) stop("Dataset is not compatible: ", dataset_id)
 
   data <- .read_indexed_csv(record$dataset_path[[1L]])
