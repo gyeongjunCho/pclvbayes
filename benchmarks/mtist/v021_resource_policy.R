@@ -493,16 +493,25 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   pathfinder_process <- known_executable & pathfinder_argument
   r_process <- grepl("(^|/)(R|Rscript)([[:space:]]|$)", out$command)
   parent_index <- match(out$ppid, out$pid)
-  parent_is_r_worker <- !is.na(parent_index) & r_process[parent_index] &
-    out$pid[parent_index] != root_pid
+  valid_parent <- !is.na(parent_index)
+  parent_is_r_worker <- parent_is_registered_worker <- rep(FALSE, nrow(out))
+  parent_is_r_worker[valid_parent] <- r_process[parent_index[valid_parent]] &
+    out$pid[parent_index[valid_parent]] != root_pid
+  parent_is_registered_worker[valid_parent] <- registered[parent_index[valid_parent]]
   canonical_diagnose_executable <- grepl(
     "/cmdstan-[^/]+/bin/diagnose$", out$executable)
   canonical_diagnose_argv <- vapply(argv, function(x) {
     length(x) >= 2L && identical(x[[1L]], "bin/diagnose") &&
       all(grepl("\\.csv$", x[-1L]))
   }, logical(1))
+  registered_diagnostic_identity <- rep(FALSE, nrow(out))
+  if (all(c("start_time", "process_state", "capture_state") %in% names(out)))
+    registered_diagnostic_identity <- out$readable & out$capture_state == "captured" &
+      !is.na(out$start_time) & grepl("^[0-9]+$", out$start_time) &
+      out$process_state %in% .v021_linux_non_zombie_states
   diagnostic_process <- out$is_descendant & canonical_diagnose_executable &
-    canonical_diagnose_argv & parent_is_r_worker
+    canonical_diagnose_argv & (parent_is_r_worker |
+      (parent_is_registered_worker & registered_diagnostic_identity))
   out_vanished <- if ("capture_state" %in% names(out))
     out$capture_state == "vanished_during_capture" else rep(FALSE, nrow(out))
   out$classification <- "other_descendant"

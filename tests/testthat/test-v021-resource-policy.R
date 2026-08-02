@@ -200,6 +200,24 @@ add_extended_sampling_chains <- function(snapshot, count, ppid = 200L) {
   rbind(snapshot, chains)
 }
 
+add_extended_diagnostic <- function(
+    snapshot, pid = 900L, ppid = 200L,
+    executable = "/opt/cmdstan-2.36.0/bin/diagnose",
+    argv = c("bin/diagnose", "/output/chain-1.csv"),
+    potential_cmdstan = TRUE) {
+  row <- snapshot[snapshot$pid == 100L, , drop = FALSE]
+  row$pid <- pid; row$ppid <- ppid; row$start_time <- as.character(pid * 10L)
+  row$process_state <- "S"; row$initial_process_state <- "S"
+  row$final_process_state <- "S"; row$command <- paste(argv, collapse = " ")
+  row$argv <- I(list(argv)); row$executable <- executable
+  row$potential_cmdstan <- potential_cmdstan; row$readable <- TRUE
+  row$capture_state <- "captured"; row$disappearance_reason <- NA_character_
+  row$zombie_reason <- NA_character_; row$capture_retry_count <- 0L
+  row$capture_retry_timestamps <- I(list(character()))
+  row$resolution_reason <- "readable_initial_capture"
+  rbind(snapshot, row)
+}
+
 test_that("Linux NUL-delimited cmdlines preserve exact argv boundaries", {
   argv <- c("/models/pclv", "method=sample", "num_samples=2000",
             "argument containing spaces", "", "id=1")
@@ -533,6 +551,94 @@ test_that("attempt9-shaped registered worker snapshot is verified and compliant"
   expect_identical(monitor$compliance_status, "compliant")
   expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
   expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
+})
+
+test_that("canonical diagnose accepts verified readable or unreadable registered ancestry", {
+  for (mode in c("readable", "persistent")) {
+    snapshot <- capture_recapture_fixture(mode)$snapshot
+    if (mode == "persistent") {
+      snapshot$process_state[snapshot$pid == 200L] <- "R"
+      snapshot$initial_process_state[snapshot$pid == 200L] <- "R"
+      snapshot$final_process_state[snapshot$pid == 200L] <- "R"
+    }
+    registry <- attempt9_worker_registry(snapshot)
+    snapshot <- add_extended_diagnostic(snapshot)
+    monitor <- monitor_v021_process_snapshots(
+      list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv",
+      worker_registry = registry)
+    parent <- monitor$records[monitor$records$pid == 200L, , drop = FALSE]
+    diagnose <- monitor$records[monitor$records$pid == 900L, , drop = FALSE]
+    expect_identical(monitor$monitoring_state, "verified")
+    expect_identical(diagnose$classification, "cmdstan_diagnostic")
+    expect_false(diagnose$is_active_cmdstan_chain)
+    expect_identical(parent$classification, "registered_outer_worker")
+    expect_false(parent$is_active_cmdstan_chain)
+    expect_identical(monitor$observed_peak_active_cmdstan_chains, 0L)
+    expect_identical(monitor$observed_peak_active_cmdstan_processes, 1L)
+  }
+})
+
+test_that("registered diagnose ancestry mismatches remain fail closed", {
+  snapshot <- capture_recapture_fixture("persistent")$snapshot
+  snapshot$process_state[snapshot$pid == 200L] <- "R"
+  snapshot$initial_process_state[snapshot$pid == 200L] <- "R"
+  snapshot$final_process_state[snapshot$pid == 200L] <- "R"
+  registry <- attempt9_worker_registry(snapshot)
+  diagnostic <- add_extended_diagnostic(snapshot)
+
+  unregistered <- monitor_v021_process_snapshots(
+    list(diagnostic), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(unregistered$monitoring_state, "monitoring_error")
+
+  reused <- registry; reused$start_time <- "999999"
+  mismatch <- monitor_v021_process_snapshots(
+    list(diagnostic), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = reused)
+  expect_identical(mismatch$monitoring_state, "monitoring_error")
+
+  wrong_ppid <- add_extended_diagnostic(snapshot, ppid = 100L)
+  wrong_parent <- monitor_v021_process_snapshots(
+    list(wrong_ppid), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  expect_identical(wrong_parent$monitoring_state, "unverified_process_tree")
+  expect_identical(wrong_parent$reason, "unknown_potential_cmdstan_descendant")
+
+  duplicate <- monitor_v021_process_snapshots(
+    list(diagnostic), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = rbind(registry, registry))
+  expect_identical(duplicate$monitoring_state, "monitoring_error")
+  expect_match(duplicate$reason, "duplicate PID")
+
+  arbitrary <- add_extended_diagnostic(snapshot, executable = "/tmp/diagnose")
+  arbitrary_result <- monitor_v021_process_snapshots(
+    list(arbitrary), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  expect_identical(arbitrary_result$monitoring_state, "unverified_process_tree")
+})
+
+test_that("attempt10-shaped registered monitoring is verified with strict utility slots", {
+  base <- capture_recapture_fixture("persistent")$snapshot
+  base$process_state[base$pid == 200L] <- "R"
+  base$initial_process_state[base$pid == 200L] <- "R"
+  base$final_process_state[base$pid == 200L] <- "R"
+  registry <- attempt9_worker_registry(base)
+  full_sampling <- add_extended_sampling_chains(base, 12L)
+  utility_overlap <- add_extended_diagnostic(add_extended_sampling_chains(base, 8L))
+  monitor <- monitor_v021_process_snapshots(
+    list(full_sampling, utility_overlap), build_v021_resource_policy(), 100L,
+    "/models/pclv", worker_registry = registry)
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 12L)
+
+  exceeded <- monitor_v021_process_snapshots(
+    list(add_extended_diagnostic(full_sampling)), build_v021_resource_policy(),
+    100L, "/models/pclv", worker_registry = registry)
+  expect_identical(exceeded$monitoring_state, "verified")
+  expect_identical(exceeded$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(exceeded$observed_peak_active_cmdstan_processes, 13L)
+  expect_identical(exceeded$compliance_status, "exceeded")
 })
 
 test_that("attempt8-shaped transient worker resolves without undercounting", {
