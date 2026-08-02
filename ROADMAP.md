@@ -37,6 +37,8 @@ identified.
 
 ## v0.2 — Core reduction and release preparation
 
+This section is the historical record of v0.2 development work, investigations, and decisions. The normative frozen functional and scientific contract is the v0.2.0 section below; future Codex work must use that contract and the post-v0.2 executable plans as the current source of truth.
+
 ### Completed
 
 - [x] Characterization tests
@@ -142,7 +144,7 @@ and is state dependent; it is not identical to the fitted constant posterior coe
 
 - [x] Audit user-facing documentation, examples, reports, plots, tables, and summaries for unqualified direct-interaction, facilitation, inhibition, or absolute-strength claims.
 - [x] Prefer qualified pair-to-rest terminology; preserve historical names only with definitions.
-- [ ] Do not change the public API solely for terminology cleanup.
+The public API is not changed solely for terminology cleanup.
 - [x] Make transformed-estimand validation primary: posterior versus canonical transformed oracle = 6/6.
 - [x] Report absolute-A comparison separately: posterior versus absolute-A cross-estimand agreement = 3/6; do not call it primary pcLV recovery.
 - [x] Prefer explicit metrics `transformed_oracle_sign_agreement`, `absolute_A_sign_agreement`, `absolute_A_zero_to_nonzero`, and `state_dependent_contrast`.
@@ -151,11 +153,11 @@ and is state dependent; it is not identical to the fitted constant posterior coe
 #### Interpretation and preprocessing robustness
 
 - [ ] Define candidate interpretation states separate from `diagnostic_class`: `pair_to_rest_direction_supported`, `preprocessing_sensitive`, `empirically_context_sensitive`, `interpretation_indeterminate`, and `insufficient_information`; implement them only after v0.2.1 validation.
-- [ ] Allow statistical convergence with scientific interpretation sensitivity; convergence alone must not create an unqualified ecological sign.
-- [ ] Preserve missing and indeterminate values rather than converting them to zero.
+Statistical convergence may coexist with interpretation sensitivity; convergence alone must not create an unqualified ecological sign.
+Missing and indeterminate values are preserved and never converted to scientific zero.
 - [ ] Compare canonical smoothed projections with unsmoothed finite-interval projections using QR/SVD rank and conditioning diagnostics.
-- [ ] Mark identifiable disagreements as preprocessing-sensitive without selecting the variant that best matches absolute truth.
-- [ ] Preserve the canonical posterior and document `species_7 -> species_4` as the first verified smoothing-sensitive case.
+Identifiable disagreements are marked preprocessing-sensitive; preprocessing variants are never selected by agreement with absolute truth.
+The canonical posterior is preserved; `species_7 -> species_4` is documented as the first verified smoothing-sensitive case.
 - [ ] Measure smoothing-sign sensitivity on additional datasets before any calibrated hard exclusion threshold.
 
 #### Empirical sign-heterogeneity diagnostics
@@ -377,7 +379,13 @@ baseline. Maintainer-managed packaging operations are separate.
 ## v0.2.1 — Sign-reversal risk diagnosis and calibration
 
 v0.2.1 develops and validates a conservative sign-reversal diagnostic for the
-frozen v0.2.0 Core. The primary real-data-capable measure is
+frozen v0.2.0 Core. The primary deliverable is the empirical pair-to-rest
+robustness framework and a transparent conservative sign-reporting/withholding
+policy. Benchmark-calibrated absolute-sign probabilities are an optional third
+layer, released only if held-out validation, discrimination, calibration, and
+calibration-domain requirements pass. Failure to establish transportable
+absolute-sign probabilities does not invalidate v0.2.1: calibrated
+probabilities remain unavailable and no probability is fabricated. The primary real-data-capable measure is
 `empirical_sign_reversal_susceptibility`, an uncalibrated within-estimand
 robustness score. The optional benchmark-calibrated layer reports
 `absolute_same_sign_probability`, `absolute_sign_reversal_risk`,
@@ -398,8 +406,7 @@ v0.2.1 feature work.
   calibration.
 - [ ] Consider production `interpretation_class`, calibrated hard interpretation
   gates, and public significant-edge schema extensions only after that validation.
-- [ ] Preserve indeterminate-not-zero semantics and require a separately
-  reviewed promotion decision for any production schema change.
+Indeterminate-not-zero semantics remain mandatory; any production schema change requires a separately reviewed promotion decision.
 
 
 ### Benchmark-calibrated absolute-sign interpretation risk
@@ -521,6 +528,18 @@ validated probabilistic model; and no threshold is selected retrospectively to
 maximize MTIST truth agreement.
 
 ---
+
+## v0.2.2 — Behavior-preserving internal simplification
+
+v0.2.2 begins only after v0.2.1 diagnostic policy is complete and frozen. Its purpose is behavior-preserving internal cleanup: dead private code, obsolete compatibility paths, duplicate helpers, private control flow, naming, constants, worker scheduling, checkpointing, and resource-cleanup organization may be simplified.
+
+The public formals and exports, public result schema and masks, diagnostic and withholding vocabulary, scientific estimand, preprocessing, priors, thresholds, Stan computation, eligibility, significance, K-fold/ELPD/stacking semantics, deterministic ordering and seeds, and unavailable/placeholder semantics remain frozen. Characterization tests must capture public objects, preprocessing outputs, generated Stan data, task/seed maps, statuses, and fixed-fixture outputs before risky refactors.
+
+v0.2.2 is complete only when intended refactors are characterized, all frozen contracts and classifications are unchanged, all tests pass, and concrete complexity or duplication reductions are documented.
+
+### Lightweight v0.2.x CI
+
+Lightweight checks may be introduced before v0.3.0 and do not require publication-scale sampling: package unit tests; frozen API/schema regressions; non-sampling adapter smoke tests; truth-isolation tests; checkpoint/restart fixtures; and deterministic task/seed-map tests.
 
 ## v0.3.0 — Scientific and statistical development
 
@@ -721,7 +740,16 @@ Requirements:
 
 v0.2.1 aims to reduce confidently reported incorrect signs while preserving as
 much useful coverage as possible. The diagnostic uses observed-data, posterior,
-sampler, residual, K-fold, ELPD, and stacking information only. It never uses
+sampler, residual, K-fold, ELPD, and stacking information only. The full
+100-species run is the primary high-resolution pairwise inference corpus:
+4,950 unordered pairs and 9,900 directed fits, not a joint 100-species
+Bayesian model. Absolute-sign calibration additionally requires independent
+datasets, interaction matrices, or simulation regimes for transport and held-
+out evaluation. Both directions of an unordered pair stay in one split;
+interaction-matrix or dataset-level separation is preferred to random
+direction-level splitting. Auxiliary datasets need not use the primary
+publication-scale 4-chain 2000/2000 budget; any auxiliary budget is
+prospectively justified and documented. It never uses
 MTIST truth for inference or feature generation, never flips coefficients, and
 never overwrites original posterior, significance, or diagnostic outputs.
 
@@ -731,10 +759,7 @@ never overwrites original posterior, significance, or diagnostic outputs.
    sampling. Acceptance: truth is unavailable to inference and both directions
    of an unordered pair remain in one split. Commit boundary: contract only.
 2. **V021-02 — Resource and scheduling policy.** Encode 12 logical threads with
-   2 reserved, at most 10 active CmdStan chains, one thread per chain, fixed
-   numerical-library/OpenMP threading. Safe outer concurrency is derived by
-   preflight from observed chain behavior; ten outer workers are not assumed
-   safe when each fit can launch four chains. Add preflight capacity tests. Sampling permitted only in
+   2 reserved threads, a maximum of 10 active CmdStan chains, one CPU thread per active chain, and fixed numerical-library/OpenMP threading. Safe outer concurrency is derived by preflight from observed per-fit chain concurrency; ten outer workers are not automatically safe. If each fit launches four chains concurrently, no more than two fits may run concurrently unless a verified global chain scheduler exists. The full benchmark waits for process-tree monitoring to demonstrate the ceiling. Retries, Pathfinder, main fits, and K-fold all count toward the same ceiling. Add preflight capacity tests. Sampling permitted only in
    preflight. Acceptance: observed peak never exceeds 10 chains. Commit
    boundary: scheduler/resource policy.
 3. **V021-03 — Checkpoint and manifest architecture.** Add deterministic pair,
@@ -753,7 +778,7 @@ never overwrites original posterior, significance, or diagnostic outputs.
    states and resource measurements are retained; no K-fold truth leakage.
 6. **V021-06 — Full 100-species pairwise coverage.** Run 4,950 unordered
    pairs and 9,900 directions (not a joint 100-species NUTS model),
-   with 8,000 retained draws per direction under the global ceiling. Record all
+   with 2,000 retained draws per chain and 8,000 nominal retained draws across four chains per direction under the global ceiling. Effective sample size is diagnostic-dependent and is not the nominal retained-draw count. Record all
    explicit states and denominators. Benchmark/sampling permitted. Acceptance:
    complete task manifest and reproducible restart.
 7. **V021-07 — Post-inference truth labeling.** Join truth only after inference
@@ -767,9 +792,14 @@ never overwrites original posterior, significance, or diagnostic outputs.
    no threshold selected on locked data and no near-zero-coverage solution is
    approved.
 9. **V021-09 — Conservative output integration.** Add independent concepts
-   `conservative_sign_withholding_risk`, `sign_risk_class`, `sign_reportable`,
-   `sign_withheld`, and `sign_withhold_reason` while retaining original output.
-   Add schema/regression tests. Acceptance: original posterior and significance
+   `sign_reportable`, `sign_withheld`, and `sign_withhold_reason` while retaining original output.
+   Add schema/regression tests. Withholding is a transparent policy decision
+   based on named evidence, not a silently combined score. Candidate reason
+   values (subject to v0.2.1 validation, not a frozen public schema) include
+   `diagnostic_ineligible`, `empirical_preprocessing_sensitivity`,
+   `empirical_context_sensitivity`, `high_absolute_sign_reversal_risk`,
+   `high_absolute_zero_probability`, `outside_calibration_domain`, and
+   `insufficient_information`. Acceptance: original posterior and significance
    are byte/schema-equivalent and withholding is reversible and explicit.
 10. **V021-10 — Documentation and regression release gate.** Document exact
     denominators, coverage/error trade-offs, resource ceilings, calibration
@@ -827,11 +857,9 @@ tests passing. Unfinished cleanup does not leak into v0.3.0.
   reproducible, and scientific hypotheses/success criteria approved before
   implementation.
 
-## Post-v0.3 — CI and reproducible benchmark automation
+## Heavy and durable benchmark automation
 
-Add automation only after the time-input contract, continuous-time OU
-implementation, OU-identifiability policy, and Laplace-screening workflow are
-stable.
+This section covers heavy or durable automation only, after the relevant scientific workflows are stable. It is not routine CI and does not require publication-scale sampling on every change.
 
 Planned work:
 
