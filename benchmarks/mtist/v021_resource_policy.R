@@ -466,7 +466,9 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     if (!all(c("start_time", "process_state", "capture_state") %in% names(out)))
       stop("Registered outer-worker classification requires procfs identity data.")
     registry_match <- match(out$pid, worker_registry$pid)
-    candidate <- !is.na(registry_match)
+    terminal_capture <- out$capture_state %in%
+      c("vanished_during_capture", "zombie_process")
+    candidate <- !is.na(registry_match) & !terminal_capture
     if (any(candidate)) {
       registry_rows <- worker_registry[registry_match[candidate], , drop = FALSE]
       observed <- out[candidate, , drop = FALSE]

@@ -641,6 +641,81 @@ test_that("attempt10-shaped registered monitoring is verified with strict utilit
   expect_identical(exceeded$compliance_status, "exceeded")
 })
 
+test_that("verified terminal states precede live registered-worker validation", {
+  live <- capture_recapture_fixture("persistent")$snapshot
+  live$process_state[live$pid == 200L] <- "R"
+  live$initial_process_state[live$pid == 200L] <- "R"
+  live$final_process_state[live$pid == 200L] <- "R"
+  registry <- attempt9_worker_registry(live)
+
+  vanished <- live
+  row <- vanished$pid == 200L
+  vanished$capture_state[row] <- "vanished_during_capture"
+  vanished$disappearance_reason[row] <- "pid_disappeared"
+  vanished$resolution_reason[row] <- "pid_disappeared"
+  monitor <- monitor_v021_process_snapshots(
+    list(vanished), build_v021_resource_policy(), 100L,
+    worker_registry = registry)
+  record <- monitor$records[monitor$records$pid == 200L, , drop = FALSE]
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(record$classification, "vanished_during_capture")
+  expect_identical(record$disappearance_reason, "pid_disappeared")
+  expect_false(record$classification %in% c("completed", "registered_outer_worker"))
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 0L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 0L)
+
+  zombie <- capture_race_fixture("zombie")
+  zombie_registry <- attempt9_worker_registry(zombie)
+  zombie_monitor <- monitor_v021_process_snapshots(
+    list(zombie), build_v021_resource_policy(), 100L,
+    worker_registry = zombie_registry)
+  expect_identical(zombie_monitor$monitoring_state, "verified")
+  expect_identical(zombie_monitor$records$classification[
+    zombie_monitor$records$pid == 200L], "zombie_process")
+
+  live_monitor <- monitor_v021_process_snapshots(
+    list(live), build_v021_resource_policy(), 100L,
+    worker_registry = registry)
+  expect_identical(live_monitor$monitoring_state, "verified")
+  expect_identical(live_monitor$records$classification[
+    live_monitor$records$pid == 200L], "registered_outer_worker")
+})
+
+test_that("ambiguous registered state remains fail closed after terminal precedence", {
+  ambiguous <- capture_race_fixture("ambiguous")
+  registry <- build_v021_worker_registry(
+    200L, "2000", 100L, "direction_fit_worker", "batch-01", "task-1",
+    "2026-08-02T00:00:00Z")
+  monitor <- monitor_v021_process_snapshots(
+    list(ambiguous), build_v021_resource_policy(), 100L,
+    worker_registry = registry)
+  expect_identical(monitor$monitoring_state, "monitoring_error")
+  expect_match(monitor$reason, "mismatch")
+})
+
+test_that("attempt10-shaped registered exit preserves verified twelve-slot history", {
+  live <- capture_recapture_fixture("persistent")$snapshot
+  live$process_state[live$pid == 200L] <- "R"
+  live$initial_process_state[live$pid == 200L] <- "R"
+  live$final_process_state[live$pid == 200L] <- "R"
+  registry <- attempt9_worker_registry(live)
+  full <- add_extended_sampling_chains(live, 12L)
+  vanished <- live
+  row <- vanished$pid == 200L
+  vanished$capture_state[row] <- "vanished_during_capture"
+  vanished$disappearance_reason[row] <- "pid_disappeared"
+  vanished$resolution_reason[row] <- "pid_disappeared"
+  monitor <- monitor_v021_process_snapshots(
+    list(full, vanished), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 12L)
+  expect_identical(tail(monitor$records$classification[
+    monitor$records$pid == 200L], 1L), "vanished_during_capture")
+})
+
 test_that("attempt8-shaped transient worker resolves without undercounting", {
   base <- make_process_snapshot(8L, indirect = TRUE)
   base$argv <- I(lapply(base$command,
