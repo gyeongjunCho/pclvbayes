@@ -2,15 +2,19 @@
 
 ## Vision
 
-pcLVbayes focuses on reliable Bayesian inference of directed pair-to-rest log-ratio dynamics from longitudinal compositional data. These coefficients support interaction screening but are not generally absolute direct-gLV coefficients.
+pcLVbayes focuses on reliable Bayesian inference of directed pair-to-rest log-ratio dynamics from
+longitudinal compositional data. These coefficients support interaction screening but are not generally
+absolute direct-gLV coefficients.
 
 ## Scientific principle
 
 The objective of pcLVbayes is not to force every pair to yield an interaction estimate.
 
-The objective is to identify directed pair-to-rest dynamics only when they are supported by the posterior, without presenting them as absolute direct-gLV interactions.
+The objective is to identify directed pair-to-rest dynamics only when they are supported by the
+posterior, without presenting them as absolute direct-gLV interactions.
 
-Directions that remain non-identifiable after convergence diagnostics are reported as **indeterminate** rather than being interpreted as zero interaction or forced toward an arbitrary estimate.
+Directions that remain non-identifiable after convergence diagnostics are reported as **indeterminate**
+rather than being interpreted as zero interaction or forced toward an arbitrary estimate.
 
 Scientific conclusions should become progressively more complete as the amount,
 quality, and diversity of longitudinal information increase.
@@ -37,7 +41,9 @@ identified.
 
 ## v0.2 — Core reduction and release preparation
 
-This section is the historical record of v0.2 development work, investigations, and decisions. The normative frozen functional and scientific contract is the v0.2.0 section below; future Codex work must use that contract and the post-v0.2 executable plans as the current source of truth.
+This section is the historical record of v0.2 development work, investigations, and decisions. The
+normative frozen functional and scientific contract is the v0.2.0 section below; future Codex work must
+use that contract and the post-v0.2 executable plans as the current source of truth.
 
 ### Completed
 
@@ -100,9 +106,11 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
   and residual identifiability classes now gate interpretation separately.
 - [x] Record chain-specific sign agreement and residual-allocation disagreement
   — indeterminate directions remain explicit and are never treated as zero.
-- [x] Audit temporary-file and CmdStan output lifecycle — temporary roots, workers, CmdStan processes, and executable reuse were verified.
+- [x] Audit temporary-file and CmdStan output lifecycle — temporary roots, workers, CmdStan processes,
+  and executable reuse were verified.
 
-**Maintainer note:** Commit of the completed MTIST benchmark infrastructure is an external release action, not a v0.2.0 functional task.
+**Maintainer note:** Commit of the completed MTIST benchmark infrastructure is an external release
+action, not a v0.2.0 functional task.
 
 - [x] Profile R preprocessing, K-fold, memory, serialization, and sampling —
   MTIST 361 baseline separates directly measurable R components from combined
@@ -114,7 +122,8 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
   exports and pair-level load balancing reduced the representative two-worker
   MTIST profile without changing scientific signatures or one-worker runtime.
 
-**Optimization note:** Further optimization is an optional post-baseline backlog item and is undertaken only when profiling demonstrates a material release-relevant benefit.
+**Optimization note:** Further optimization is an optional post-baseline backlog item and is undertaken
+only when profiling demonstrates a material release-relevant benefit.
 
 - [x] Run representative 10-species MTIST benchmarks — dataset 37 completed
   all 45 pair tasks and 90 directed fits in smoke and multi-chain reference
@@ -122,20 +131,37 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Documentation
 - [x] Reduce and freeze the public `fit_pclv_bayes()` API
 
-**Release note:** Maintainer-managed packaging, tagging, and source-release operations are outside the v0.2.0 functional completion list.
+**Release note:** Maintainer-managed packaging, tagging, and source-release operations are outside the
+v0.2.0 functional completion list.
 
 ### Scientific estimand hardening and conservative sign interpretation
 
-The targeted four-chain confirmation remained converged for 6/6 prespecified directions, and posterior signs matched the observed canonical deterministic transformed-data projection for 6/6. Posterior signs matched absolute MTIST `A[target, source]` for 3/6. This is an estimand distinction, not a software defect or recovery of the absolute direct-gLV coefficient: 44/90 instantaneous mechanistic pair-to-rest contrasts changed sign across states, and 16/90 exact-zero absolute coefficients induced nonzero transformed effects. No focused discrepancy was caused by MCMC instability, finite-chain error, observation noise, finite-interval approximation, or a posterior-versus-observed-oracle discrepancy. `species_7 -> species_4` is the verified special case where absolute `A` was zero, the finite-interval transformed projection was positive, and canonical smoothing changed the projection and posterior sign to negative.
+The targeted four-chain confirmation remained converged for 6/6 prespecified directions, and posterior
+signs matched the observed canonical deterministic transformed-data projection for 6/6. Posterior signs
+matched absolute MTIST `A[target, source]` for 3/6. This is an estimand distinction, not a software
+defect or recovery of the absolute direct-gLV coefficient: 44/90 instantaneous mechanistic pair-to-rest
+contrasts changed sign across states, and 16/90 exact-zero absolute coefficients induced nonzero
+transformed effects. No focused discrepancy was caused by MCMC instability, finite-chain error,
+observation noise, finite-interval approximation, or a posterior-versus-observed-oracle discrepancy.
+`species_7 -> species_4` is the verified special case where absolute `A` was zero, the finite-interval
+transformed projection was positive, and canonical smoothing changed the projection and posterior sign to
+negative.
 
-The v0.2 objective is to retain the canonical posterior model while preventing stable pair-to-rest coefficients from being misrepresented as context-independent absolute biological interactions, separating statistical convergence from scientific sign robustness, and completing this bounded remediation before release.
+The v0.2 objective is to retain the canonical posterior model while preventing stable pair-to-rest
+coefficients from being misrepresented as context-independent absolute biological interactions,
+separating statistical convergence from scientific sign robustness, and completing this bounded
+remediation before release.
 
 #### Estimand contract
 
-- [x] Define `a_ij` consistently as the posterior coefficient of the lagged source pair-to-rest log-ratio predictor in the target pair-to-rest log-ratio rate model, conditional on the self predictor and canonical preprocessing.
+- [x] Define `a_ij` consistently as the posterior coefficient of the lagged source pair-to-rest log-ratio
+  predictor in the target pair-to-rest log-ratio rate model, conditional on the self predictor and
+  canonical preprocessing.
 - [x] State prominently that `a_ij` is not generally identical to absolute joint-gLV coefficient `A[i,j]`.
-- [x] Distinguish absolute direct-gLV `A[i,j]`, state-dependent mechanistic contrast `C_ij(x)`, deterministic canonical transformed-data projection, and Bayesian posterior coefficient `a_ij`.
-- [x] Explain that the sign of `a_ij` describes a fitted pair-to-rest dynamic direction, not alone biological facilitation, inhibition, or absolute interaction strength.
+- [x] Distinguish absolute direct-gLV `A[i,j]`, state-dependent mechanistic contrast `C_ij(x)`,
+  deterministic canonical transformed-data projection, and Bayesian posterior coefficient `a_ij`.
+- [x] Explain that the sign of `a_ij` describes a fitted pair-to-rest dynamic direction, not alone
+  biological facilitation, inhibition, or absolute interaction strength.
 - [x] Preserve indeterminate-not-zero semantics.
 - [x] Explain that a nonzero transformed coefficient may occur when `A[i,j]` is zero.
 
@@ -147,38 +173,47 @@ and is state dependent; it is not identical to the fitted constant posterior coe
 
 #### Terminology, metrics, and interpretation
 
-- [x] Audit user-facing documentation, examples, reports, plots, tables, and summaries for unqualified direct-interaction, facilitation, inhibition, or absolute-strength claims.
+- [x] Audit user-facing documentation, examples, reports, plots, tables, and summaries for unqualified
+  direct-interaction, facilitation, inhibition, or absolute-strength claims.
 - [x] Prefer qualified pair-to-rest terminology; preserve historical names only with definitions.
 
 The public API is not changed solely for terminology cleanup.
 
 - [x] Make transformed-estimand validation primary: posterior versus canonical transformed oracle = 6/6.
-- [x] Report absolute-A comparison separately: posterior versus absolute-A cross-estimand agreement = 3/6; do not call it primary pcLV recovery.
-- [x] Prefer explicit metrics `transformed_oracle_sign_agreement`, `absolute_A_sign_agreement`, `absolute_A_zero_to_nonzero`, and `state_dependent_contrast`.
+- [x] Report absolute-A comparison separately: posterior versus absolute-A cross-estimand agreement =
+  3/6; do not call it primary pcLV recovery.
+- [x] Prefer explicit metrics `transformed_oracle_sign_agreement`, `absolute_A_sign_agreement`,
+  `absolute_A_zero_to_nonzero`, and `state_dependent_contrast`.
 - [x] Preserve explicit denominators and the prespecified six-direction rule.
 
 #### Interpretation and preprocessing robustness
 
-- [ ] Define candidate interpretation states separate from `diagnostic_class`: `pair_to_rest_direction_supported`, `preprocessing_sensitive`, `empirically_context_sensitive`, `interpretation_indeterminate`, and `insufficient_information`; implement them only after v0.2.1 validation.
+- [ ] Define candidate interpretation states separate from `diagnostic_class`:
+  `pair_to_rest_direction_supported`, `preprocessing_sensitive`, `empirically_context_sensitive`,
+  `interpretation_indeterminate`, and `insufficient_information`; implement them only after v0.2.1
+  validation.
 
-Statistical convergence may coexist with interpretation sensitivity; convergence alone must not create an unqualified ecological sign.
-
+Statistical convergence may coexist with interpretation sensitivity; convergence alone must not create an
+unqualified ecological sign.
 
 Missing and indeterminate values are preserved and never converted to scientific zero.
 
-- [ ] Compare canonical smoothed projections with unsmoothed finite-interval projections using QR/SVD rank and conditioning diagnostics.
+- [ ] Compare canonical smoothed projections with unsmoothed finite-interval projections using QR/SVD
+  rank and conditioning diagnostics.
 
-Identifiable disagreements are marked preprocessing-sensitive; preprocessing variants are never selected by agreement with absolute truth.
+Identifiable disagreements are marked preprocessing-sensitive; preprocessing variants are never selected
+by agreement with absolute truth.
 
+The canonical posterior is preserved; `species_7 -> species_4` is documented as the first verified
+smoothing-sensitive case.
 
-The canonical posterior is preserved; `species_7 -> species_4` is documented as the first verified smoothing-sensitive case.
-
-- [ ] Measure smoothing-sign sensitivity on additional datasets before any calibrated hard exclusion threshold.
+- [ ] Measure smoothing-sign sensitivity on additional datasets before any calibrated hard exclusion
+  threshold.
 
 #### Empirical sign-heterogeneity diagnostics
 
-- [x] Document benchmark-side deterministic robustness checks and their limits; production interpretation classification and calibrated gates are deferred to v0.2.1.
-
+- [x] Document benchmark-side deterministic robustness checks and their limits; production interpretation
+  classification and calibrated gates are deferred to v0.2.1.
 
 #### Empirical pair-to-rest sign-reversal susceptibility
 
@@ -240,14 +275,18 @@ already implemented and validated.
 
 #### Conservative output and release gate
 
-- [x] Document posterior sign support, empirical sign-reversal susceptibility, and absolute-gLV sign interpretation as separate concepts in the normative roadmap and scientific contract.
+- [x] Document posterior sign support, empirical sign-reversal susceptibility, and absolute-gLV sign
+  interpretation as separate concepts in the normative roadmap and scientific contract.
 - [x] State that low empirical susceptibility does not guarantee agreement with absolute `A[i,j]`.
-- [x] Document the 44/90 state-dependent contrast, 16/90 absolute-zero induced-effect, and smoothing-sensitive focused findings.
-- [ ] Apply the same distinction consistently to remaining benchmark reports and user-facing interpretation documents during v0.2.1 documentation work.
+- [x] Document the 44/90 state-dependent contrast, 16/90 absolute-zero induced-effect, and
+  smoothing-sensitive focused findings.
+- [ ] Apply the same distinction consistently to remaining benchmark reports and user-facing
+  interpretation documents during v0.2.1 documentation work.
 
 No new public result field or calibrated hard gate is added in v0.2.
 
-- [x] Keep the existing model, Stan code, priors, posterior thresholds, public API, and result schema unchanged unless a separately reviewed defect is found.
+- [x] Keep the existing model, Stan code, priors, posterior thresholds, public API, and result schema
+  unchanged unless a separately reviewed defect is found.
 
 Explicit v0.2 exclusions:
 
@@ -264,8 +303,9 @@ controls from the public signature, including retry and Pathfinder tuning
 internals and incompatible or obsolete preprocessing options. One canonical
 zero-handling policy and one canonical smoothing policy were retained. The
 public interface retains only justified reproducibility, sampling-effort,
-K-fold, progress, and resource controls. Repository evidence includes updated
-callers, roxygen/generated help, migration notes, and focused regression tests.
+K-fold, progress, and resource controls. Repository evidence includes updated callers, roxygen/generated
+help, and
+focused regression tests.
 
 ---
 
@@ -437,7 +477,8 @@ Also define
 `absolute_zero_probability` is not an opposite-sign event, while
 `direct_effect_misinterpretation_risk` includes both opposite-sign and
 absolute-zero possibilities. These are benchmark-calibrated probabilities,
-distinct from the uncalibrated v0.2 empirical susceptibility score. Multi-dataset MTIST calibration belongs to v0.2.1, not v0.3.0.
+distinct from the uncalibrated v0.2 empirical susceptibility score. Multi-dataset MTIST calibration
+belongs to v0.2.1, not v0.3.0.
 
 Candidate calibration inputs include empirical susceptibility components and
 worst-axis values, posterior sign probability and LFSR, diagnostic and
@@ -488,8 +529,6 @@ Diagnostic classification must also consider:
 - Chain-specific sign agreement
 - Chain-specific residual-allocation regimes
 
-
-
 ### Sign interpretation reporting hierarchy
 
     statistical evidence
@@ -512,7 +551,8 @@ Diagnostic classification must also consider:
       - uncertainty interval
       - calibration-domain status
 
-The benchmark-calibrated third level is optional and may remain unavailable when held-out MTIST validation does not demonstrate sufficient predictive information.
+The benchmark-calibrated third level is optional and may remain unavailable when held-out MTIST
+validation does not demonstrate sufficient predictive information.
 
 High posterior sign probability means the fitted pair-to-rest coefficient has a
 stable posterior sign. High empirical susceptibility means that sign is
@@ -522,7 +562,8 @@ direct-gLV coefficient is estimated to have the opposite nonzero sign. High
 direct-effect misinterpretation risk means the pcLV sign is unlikely to
 represent the same nonzero absolute direct-gLV sign.
 
-Version boundary: v0.2 defines and documents the empirical 0–1 susceptibility contract; production calculation and integration are validated in v0.2.1
+Version boundary: v0.2 defines and documents the empirical 0–1 susceptibility contract; production
+calculation and integration are validated in v0.2.1
 without claiming an absolute-A probability; v0.2.1 calibrates the three
 truth-known outcome probabilities with multiple MTIST datasets and held-out
 validation; v0.3.0 investigates model changes that may reduce smoothing,
@@ -541,15 +582,27 @@ maximize MTIST truth agreement.
 
 ## v0.2.2 — Behavior-preserving internal simplification
 
-v0.2.2 begins only after v0.2.1 diagnostic policy is complete and frozen. Its purpose is behavior-preserving internal cleanup: dead private code, obsolete compatibility paths, duplicate helpers, private control flow, naming, constants, worker scheduling, checkpointing, and resource-cleanup organization may be simplified.
+v0.2.2 begins only after v0.2.1 diagnostic policy is complete and frozen. Its purpose is
+behavior-preserving internal cleanup: dead private code, obsolete compatibility paths, duplicate helpers,
+private control flow, naming, constants, worker scheduling, checkpointing, and resource-cleanup
+organization may be simplified.
 
-The public formals and exports, public result schema and masks, diagnostic and withholding vocabulary, scientific estimand, preprocessing, priors, thresholds, Stan computation, eligibility, significance, K-fold/ELPD/stacking semantics, deterministic ordering and seeds, and unavailable/placeholder semantics remain frozen. Characterization tests must capture public objects, preprocessing outputs, generated Stan data, task/seed maps, statuses, and fixed-fixture outputs before risky refactors.
+The public formals and exports, public result schema and masks, diagnostic and withholding vocabulary,
+scientific estimand, preprocessing, priors, thresholds, Stan computation, eligibility, significance,
+K-fold/ELPD/stacking semantics, deterministic ordering and seeds, and unavailable/placeholder semantics
+remain frozen. Characterization tests must capture public objects, preprocessing outputs, generated Stan
+data, task/seed maps, statuses, and fixed-fixture outputs before risky refactors.
 
-v0.2.2 is complete only when intended refactors are characterized, all frozen contracts and classifications are unchanged, all tests pass, and concrete complexity or duplication reductions are documented.
+v0.2.2 is complete only when intended refactors are characterized, all frozen contracts and
+classifications are unchanged, all tests pass, and concrete complexity or duplication reductions are
+documented.
 
 ### Lightweight v0.2.x CI
 
-Lightweight checks may be introduced before v0.3.0 and do not require publication-scale sampling: package unit tests; frozen API/schema regressions; non-sampling adapter smoke tests; truth-isolation tests; checkpoint/restart fixtures; deterministic task-order and seed-map tests; and GitHub Actions package/adapter smoke tests.
+Lightweight checks may be introduced before v0.3.0 and do not require publication-scale sampling: package
+unit tests; frozen API/schema regressions; non-sampling adapter smoke tests; truth-isolation tests;
+checkpoint/restart fixtures; deterministic task-order and seed-map tests; and GitHub Actions
+package/adapter smoke tests.
 
 ## Post-v0.2 executable development plans
 
@@ -624,7 +677,9 @@ never overwrites original posterior, significance, or diagnostic outputs.
    pairs and 9,900 directions (not a joint 100-species NUTS model),
    with 4 chains, 2,000 warmup iterations per chain, 2,000 retained draws per chain,
    and 8,000 nominal retained draws across four chains per direction under the
-   global ceiling. Nominal draws are not 8,000 effective independent samples; effective sample size is parameter- and diagnostic-dependent, and interpretation uses R-hat, bulk ESS, tail ESS, and applicable diagnostics rather than nominal count alone. Record all
+   global ceiling. Nominal draws are not 8,000 effective independent samples; effective sample size is
+   parameter- and diagnostic-dependent, and interpretation uses R-hat, bulk ESS, tail ESS, and applicable
+   diagnostics rather than nominal count alone. Record all
    explicit states and denominators. Benchmark/sampling permitted. Acceptance:
    complete task manifest and reproducible restart.
 7. **V021-07 — Post-inference truth labeling.** Join truth only after inference
@@ -726,10 +781,11 @@ tests passing. Unfinished cleanup does not leak into v0.3.0.
   reproducible, and scientific hypotheses/success criteria approved before
   implementation.
 
-
 ## v0.3.0 — Scientific and statistical development
 
-Core v0.3.0 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all mandatory for v0.3.0 release and require separate promotion decisions. External absolute-scale confirmation is not mandatory for v0.3.0 release.
+Core v0.3.0 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all
+mandatory for v0.3.0 release and require separate promotion decisions. External absolute-scale
+confirmation is not mandatory for v0.3.0 release.
 
 ### Core v0.3.0 work
 
@@ -794,7 +850,8 @@ It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 
 - [ ] Replace fixed external spline smoothing with a latent continuous-time trajectory and observation model.
 - [ ] Propagate smoothing uncertainty into posterior inference.
-- [ ] Reduce boundary-derivative artifacts and directly support irregular intervals while preserving subject resets, structured failures, and conservative identifiability semantics.
+- [ ] Reduce boundary-derivative artifacts and directly support irregular intervals while preserving
+  subject resets, structured failures, and conservative identifiability semantics.
 - [ ] Benchmark against exact noiseless transformed trajectories and the v0.2 smoothing-sensitive cases.
 - [ ] Do not promise that this alone recovers absolute `A`.
 
@@ -802,20 +859,28 @@ It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 
 - [ ] Distinguish instantaneous and finite-interval estimands.
 - [ ] Evaluate interval-averaged or integrated source predictors.
-- [ ] Model irregular `dt` directly; retain one decay posterior per directed fit and preserve `rho(dt) = exp(-lambda * dt)`.
+- [ ] Model irregular `dt` directly; retain one decay posterior per directed fit and preserve `rho(dt) =
+  exp(-lambda * dt)`.
 - [ ] Quantify sign sensitivity to observation interval length.
 
 ### Exploratory v0.3.0 research tracks
 
 #### Context-dependent pair-to-rest coefficients
 
-- [ ] Investigate low-dimensional state-dependent or regime-dependent `a_ij` coefficients, including early/late coefficients, predefined regimes, varying-coefficient splines, Gaussian-process varying coefficients, and low-dimensional neural varying coefficients.
-- [ ] Report state-dependent sign changes, require sufficient information, preserve indeterminate results when context dependence is not identifiable, and protect pairwise scalability.
+- [ ] Investigate low-dimensional state-dependent or regime-dependent `a_ij` coefficients, including
+  early/late coefficients, predefined regimes, varying-coefficient splines, Gaussian-process varying
+  coefficients, and low-dimensional neural varying coefficients.
+- [ ] Report state-dependent sign changes, require sufficient information, preserve indeterminate results
+  when context dependence is not identifiable, and protect pairwise scalability.
 
 #### Rest-composition conditioning and denominator robustness
 
-- [ ] Evaluate low-dimensional rest-composition covariates (ILR/principal balances, latent community factors or observed total-load covariates) with shrinkage and collinearity monitoring; do not call the result an unconditional direct effect.
-- [ ] Predefine defensible denominator/balance variants, measure denominator-sensitive directions, and never select a denominator by truth agreement. Preserve the canonical denominator until a new contract is formally adopted.
+- [ ] Evaluate low-dimensional rest-composition covariates (ILR/principal balances, latent community
+  factors or observed total-load covariates) with shrinkage and collinearity monitoring; do not call the
+  result an unconditional direct effect.
+- [ ] Predefine defensible denominator/balance variants, measure denominator-sensitive directions, and
+  never select a denominator by truth agreement. Preserve the canonical denominator until a new contract
+  is formally adopted.
 
 #### External scale-aware confirmation workflow
 
@@ -870,22 +935,25 @@ starts before v0.2.2 is complete.
 5. **V030-05 — Decision and migration.** Promote only changes meeting declared
    metrics; document rejected hypotheses, schema/API impact, and migration.
 
-
-
 ### Core validation and calibrated screening
 
 #### Multi-dataset oracle validation
 
-This work may use the v0.2.1 calibrated risk framework to evaluate model improvements; it does not own the initial MTIST calibration task.
+This work may use the v0.2.1 calibrated risk framework to evaluate model improvements; it does not own
+the initial MTIST calibration task.
 
-- [ ] Extend oracle audits across matrices, initial states, noise levels, sampling intervals, series lengths, dominance, extinction/entry scenarios, and denominators.
-- [ ] Report transformed-oracle agreement, absolute-A agreement, state-dependent contrasts, smoothing/interval/noise sign changes, denominator sensitivity, posterior-oracle disagreement, and indeterminate rates with explicit denominators.
+- [ ] Extend oracle audits across matrices, initial states, noise levels, sampling intervals, series
+  lengths, dominance, extinction/entry scenarios, and denominators.
+- [ ] Report transformed-oracle agreement, absolute-A agreement, state-dependent contrasts,
+  smoothing/interval/noise sign changes, denominator sensitivity, posterior-oracle disagreement, and
+  indeterminate rates with explicit denominators.
 - [ ] Acceptance criteria must follow the declared estimand rather than force agreement with absolute `A`.
 
 #### Backward compatibility
 
 - [ ] Retain the v0.2 pair-to-rest model as an explicitly supported model.
-- [ ] Do not silently change the meaning of `a_ij`; version schemas when a distinct estimand is introduced and label relative- and absolute-scale coefficients separately.
+- [ ] Do not silently change the meaning of `a_ij`; version schemas when a distinct estimand is
+  introduced and label relative- and absolute-scale coefficients separately.
 - [ ] Preserve conservative failure and indeterminate semantics.
 
 #### Calibrated Laplace screening
@@ -922,7 +990,8 @@ Requirements:
 
 ## Heavy and durable benchmark automation
 
-This section covers heavy or durable automation only, after the relevant scientific workflows are stable. It is not routine CI and does not require publication-scale sampling on every change.
+This section covers heavy or durable automation only, after the relevant scientific workflows are stable.
+It is not routine CI and does not require publication-scale sampling on every change.
 
 Planned work:
 
