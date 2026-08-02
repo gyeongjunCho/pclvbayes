@@ -72,14 +72,83 @@ make_v021_tasks <- function() {
   )
 }
 
-make_v021_runtime <- function() {
+make_v021_runtime_source <- function(n_taxa = 2L, n_samples = 2L) {
   ctx <- setNames(rep(list(1), length(v021_runtime_context_fields)),
                   v021_runtime_context_fields)
-  ctx$meta_df <- data.frame(subject = c("x", "x"), time = c(0, 1))
-  ctx$sm_mat <- matrix(1:4, 2, 2, dimnames = list(c("s1", "s2"), c("a", "b")))
+  taxa <- if (n_taxa == 2L) c("a", "b") else paste0("taxon-", seq_len(n_taxa))
+  samples <- paste0("sample-", seq_len(n_samples))
+  ctx$meta_df <- data.frame(
+    Sample = samples, subject = rep("x", n_samples), time = seq_len(n_samples) - 1L,
+    stringsAsFactors = FALSE
+  )
+  ctx$sm_mat <- matrix(seq_len(n_taxa * n_samples), n_taxa, n_samples,
+                       dimnames = list(taxa, samples))
   ctx$mod_exe_file <- "/approved/canonical-model"
+  ctx
+}
+
+make_v021_runtime <- function() {
+  ctx <- make_v021_runtime_source()
   build_v021_runtime_context(ctx)
 }
+
+test_that("runtime validation enforces canonical taxa-by-samples orientation", {
+  canonical <- make_v021_runtime_source(10L, 150L)
+  expect_identical(dim(canonical$sm_mat), c(10L, 150L))
+  expect_identical(nrow(canonical$meta_df), 150L)
+  expect_silent(validate_v021_runtime_context(canonical))
+  expect_silent(build_v021_runtime_context(canonical))
+
+  transposed <- canonical
+  transposed$sm_mat <- t(transposed$sm_mat)
+  expect_error(validate_v021_runtime_context(transposed), "structurally invalid")
+
+  wrong_dimension <- canonical
+  wrong_dimension$meta_df <- wrong_dimension$meta_df[-1L, , drop = FALSE]
+  expect_error(validate_v021_runtime_context(wrong_dimension), "structurally invalid")
+
+  wrong_samples <- canonical
+  wrong_samples$meta_df$Sample[[1L]] <- "different-sample"
+  expect_error(validate_v021_runtime_context(wrong_samples), "disagree")
+
+  reordered_samples <- canonical
+  reordered_samples$meta_df <- reordered_samples$meta_df[rev(seq_len(nrow(reordered_samples$meta_df))), ]
+  expect_error(validate_v021_runtime_context(reordered_samples), "ordering")
+
+  duplicate_metadata_sample <- canonical
+  duplicate_metadata_sample$meta_df$Sample[[2L]] <- duplicate_metadata_sample$meta_df$Sample[[1L]]
+  expect_error(validate_v021_runtime_context(duplicate_metadata_sample), "unique sample")
+
+  duplicate_matrix_sample <- canonical
+  colnames(duplicate_matrix_sample$sm_mat)[[2L]] <- colnames(duplicate_matrix_sample$sm_mat)[[1L]]
+  expect_error(validate_v021_runtime_context(duplicate_matrix_sample), "unique sample")
+
+  missing_matrix_sample <- canonical
+  colnames(missing_matrix_sample$sm_mat)[[1L]] <- NA_character_
+  expect_error(validate_v021_runtime_context(missing_matrix_sample), "unique sample")
+
+  duplicate_taxon <- canonical
+  rownames(duplicate_taxon$sm_mat)[[2L]] <- rownames(duplicate_taxon$sm_mat)[[1L]]
+  expect_error(validate_v021_runtime_context(duplicate_taxon), "unique taxon")
+
+  missing_taxon <- canonical
+  rownames(missing_taxon$sm_mat)[[1L]] <- NA_character_
+  expect_error(validate_v021_runtime_context(missing_taxon), "unique taxon")
+})
+
+test_that("inference taxa declarations agree with runtime taxon rows", {
+  skip_if_not_installed("phyloseq")
+  fixture <- make_v021_spec()
+  runtime <- make_v021_runtime()
+  fit_stub <- function(...) list()
+  environment(fit_stub) <- baseenv()
+  expect_silent(make_v021_confirmation_fit_closure(fixture$spec, runtime, fit_stub))
+  wrong <- runtime
+  rownames(wrong$sm_mat) <- c("a", "different-taxon")
+  expect_silent(validate_v021_runtime_context(wrong))
+  expect_error(make_v021_confirmation_fit_closure(fixture$spec, wrong, fit_stub),
+               "taxon declarations disagree")
+})
 
 make_split_spec <- function(level, ids, partitions) {
   list(

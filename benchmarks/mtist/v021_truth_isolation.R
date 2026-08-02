@@ -201,11 +201,23 @@ validate_v021_runtime_context <- function(ctx) {
   for (nm in names(ctx))
     .v021_assert_plain_value(ctx[[nm]], paste0("runtime_context$", nm))
   if (!is.data.frame(ctx$meta_df) || !is.matrix(ctx$sm_mat) ||
-      !is.numeric(ctx$sm_mat) || nrow(ctx$meta_df) != nrow(ctx$sm_mat))
+      !is.numeric(ctx$sm_mat) || nrow(ctx$meta_df) != ncol(ctx$sm_mat))
     stop("Runtime inference data are structurally invalid.")
-  if (is.null(colnames(ctx$sm_mat)) || anyNA(colnames(ctx$sm_mat)) ||
-      anyDuplicated(colnames(ctx$sm_mat)))
-    stop("Runtime inference matrix lacks unique taxon columns.")
+  taxa <- rownames(ctx$sm_mat)
+  samples <- colnames(ctx$sm_mat)
+  if (is.null(taxa) || anyNA(taxa) || any(!nzchar(taxa)) || anyDuplicated(taxa))
+    stop("Runtime inference matrix lacks unique taxon rows.")
+  if (is.null(samples) || anyNA(samples) || any(!nzchar(samples)) ||
+      anyDuplicated(samples))
+    stop("Runtime inference matrix lacks unique sample columns.")
+  if (!"Sample" %in% names(ctx$meta_df))
+    stop("Runtime metadata lacks canonical sample identifiers.")
+  metadata_samples <- as.character(ctx$meta_df$Sample)
+  if (anyNA(metadata_samples) || any(!nzchar(metadata_samples)) ||
+      anyDuplicated(metadata_samples))
+    stop("Runtime metadata lacks unique sample identifiers.")
+  if (!identical(metadata_samples, samples))
+    stop("Runtime metadata sample identifiers or ordering disagree with matrix columns.")
   if (!is.character(ctx$mod_exe_file) || length(ctx$mod_exe_file) != 1L ||
       is.na(ctx$mod_exe_file) || !nzchar(ctx$mod_exe_file))
     stop("Runtime executable identity is invalid.")
@@ -215,6 +227,8 @@ validate_v021_runtime_context <- function(ctx) {
 make_v021_confirmation_fit_closure <- function(spec, runtime_context, fit_direction) {
   validate_v021_inference_spec(spec)
   validate_v021_runtime_context(runtime_context)
+  if (!identical(as.character(spec$taxa_vec), rownames(runtime_context$sm_mat)))
+    stop("Inference taxon declarations disagree with runtime matrix rows.")
   if (!is.function(fit_direction)) stop("fit_direction must be a function.")
   closure_env <- new.env(parent = baseenv())
   closure_env$spec <- .v021_copy(spec)
