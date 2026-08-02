@@ -13,6 +13,18 @@ The repeatable synthetic posterior-summary comparison is:
 Rscript benchmarks/profiling/run_summary_component.R
 ```
 
+The outer-dispatch orchestration comparison is:
+
+```sh
+Rscript benchmarks/profiling/run_outer_orchestration.R
+```
+
+It compares the former automatically discovered closure/static-chunk policy
+with explicit worker inputs and one schedulable future per canonical pair. It
+records globals discovered for the legacy benchmark expression and uses
+deterministic CPU work plus controlled process-wait imbalance. Production
+benefit is assessed separately with the real MTIST profile.
+
 The default configuration uses one chain, 50 warmup and 50 retained draws,
 two subject-level folds, no retries, no Pathfinder, and compares one versus two
 outer workers. Model compilation is measured separately and excluded from fit

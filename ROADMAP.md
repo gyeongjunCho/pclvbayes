@@ -106,6 +106,9 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Optimize measured posterior-summary bottleneck — sampler-only retry
   diagnostics now precede one retained scientific summary bundle; measured
   parent-R time fell without changing Bayesian evidence or downstream ELPD.
+- [x] Optimize measured outer-worker orchestration — explicit immutable
+  exports and pair-level load balancing reduced the representative two-worker
+  MTIST profile without changing scientific signatures or one-worker runtime.
 - [ ] Optimize other measured bottlenecks only
 - [ ] Run representative 10-species MTIST benchmarks
 - [ ] Documentation

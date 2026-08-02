@@ -1398,6 +1398,50 @@
        direction_seeds = task$direction_seeds)
 }
 
+.execute_pair_task_progress <- function(task, taxa_vec, run_one, core_ctx,
+                                        scheduling, progress, progressor) {
+  result <- .execute_pair_task(
+    task, taxa_vec, run_one, core_ctx, scheduling,
+    progress = progress, mute_logs = TRUE
+  )
+  progressor(message = sprintf("pair %s-%s", task$taxon_i, task$taxon_j))
+  result
+}
+
+.outer_pair_map <- function(tasks, taxa_vec, core_ctx, scheduling, progress,
+                            workers, has_progressr,
+                            .plan = future::plan,
+                            .map = furrr::future_map,
+                            .with_progress = progressr::with_progress) {
+  previous_plan <- .plan()
+  on.exit(.plan(previous_plan), add = TRUE)
+  .plan(future::multisession, workers = workers)
+  options <- furrr::furrr_options(
+    seed = TRUE,
+    globals = FALSE,
+    packages = "pclvbayes",
+    scheduling = Inf
+  )
+  common <- list(
+    .x = tasks, taxa_vec = taxa_vec, run_one = .run_one,
+    core_ctx = core_ctx, scheduling = scheduling, progress = progress,
+    .options = options
+  )
+  if (isTRUE(has_progressr) && identical(progress, "bar")) {
+    return(.with_progress({
+      progressor <- progressr::progressor(steps = length(tasks))
+      do.call(.map, c(common, list(
+        .f = .execute_pair_task_progress,
+        progressor = progressor
+      )))
+    }))
+  }
+  do.call(.map, c(common, list(
+    .f = .execute_pair_task,
+    mute_logs = TRUE
+  )))
+}
+
 .assemble_pair_outcomes <- function(outcomes, tasks) {
   if (length(outcomes) != length(tasks)) stop("Pair outcome count invariant violated.")
   ord <- order(vapply(outcomes, `[[`, integer(1), "task_index"))
