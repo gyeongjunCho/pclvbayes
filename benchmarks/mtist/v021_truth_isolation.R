@@ -1,0 +1,402 @@
+# Benchmark-only truth-isolation helpers for ROADMAP V021-01.
+
+v021_inference_spec_fields <- c(
+  "physeq", "taxa_vec", "subject_col", "time_col", "config",
+  "dataset_id", "task_id", "direction_index", "target", "source", "seed"
+)
+
+v021_required_inference_spec_fields <- c(
+  "physeq", "taxa_vec", "subject_col", "time_col", "config",
+  "task_id", "direction_index", "target", "source", "seed"
+)
+
+v021_inference_config_fields <- c(
+  "nz_partner_min_frac", "min_unique_times", "min_pairs", "chains",
+  "iter_warmup", "iter_sampling", "seed", "init", "adapt_delta",
+  "max_treedepth", "progress", "n_workers_outer", "n_workers_kfold",
+  "kfold_K", "kfold_R", "kfold_seed"
+)
+
+v021_runtime_context_fields <- c(
+  "meta_df", "sm_mat", "eps", "min_pairs", "zero_mode_alr", "minpos_alpha",
+  "minpos_base", "eps_fixed", "lib_eps_c", "rest_floor_frac", "smooth_scale",
+  "alr_spline_df", "alr_spline_spar", "alr_spline_cv", "nz_partner_min_frac",
+  "max_retries", "chains", "iter_warmup", "iter_sampling", "adapt_delta",
+  "max_treedepth", "metric", "init", "seed", "quiet", "silent_sampler",
+  "n_workers_kfold_eff", "kfold_K", "kfold_R", "use_pathfinder_init",
+  "pf_num_paths", "pf_draws", "pf_history_size", "pf_max_lbfgs_iters",
+  "pf_psis_resample", "mod_exe_file"
+)
+
+v021_inference_result_fields <- c(
+  "posterior_coefficients", "posterior_summaries", "posterior_intervals",
+  "posterior_sign_probabilities", "significance_decisions",
+  "diagnostic_classes", "bayesian_eligibility", "kfold_results",
+  "elpd_results", "stacking_results", "matrices", "masks",
+  "feature_inputs", "stan_data", "execution", "status",
+  "unavailable_values", "zero_placeholders"
+)
+
+v021_retained_fixture_schema <- "v021_retained_inference_fixture_v1"
+
+.v021_copy <- function(x) unserialize(serialize(x, NULL, version = 3))
+
+.v021_truth_name <- function(x) {
+  grepl(
+    "(^|[._])(truth|ground[._]?truth|absolute[._]?a|truth[._]?(matrix|path|loader|coefficient|sign|label)|benchmark[._]?(outcome|label))($|[._])",
+    tolower(x), perl = TRUE
+  )
+}
+
+.v021_assert_names <- function(x, allowed, required = character(), path) {
+  nms <- names(x)
+  if (is.null(nms) || anyNA(nms) || any(!nzchar(nms)) || anyDuplicated(nms))
+    stop(path, " must have unique, non-empty names.")
+  unexpected <- setdiff(nms, allowed)
+  if (length(unexpected))
+    stop(path, " has unexpected field(s): ", paste(unexpected, collapse = ", "))
+  missing <- setdiff(required, nms)
+  if (length(missing))
+    stop(path, " lacks required field(s): ", paste(missing, collapse = ", "))
+  invisible(TRUE)
+}
+
+.v021_assert_plain_value <- function(x, path, scan_truth_names = TRUE) {
+  if (is.function(x) || is.environment(x) || typeof(x) == "externalptr" ||
+      typeof(x) == "weakref" || typeof(x) == "symbol" || typeof(x) == "language")
+    stop("Forbidden reference or executable object at ", path, ".")
+  if (is.data.frame(x)) {
+    if (scan_truth_names && any(.v021_truth_name(names(x))))
+      stop("Truth-bearing name at ", path, ".")
+    if (length(setdiff(names(attributes(x)), c("names", "row.names", "class"))))
+      stop("Arbitrary attributes are forbidden at ", path, ".")
+    for (nm in names(x)) .v021_assert_plain_value(x[[nm]], paste0(path, "$", nm), scan_truth_names)
+    return(invisible(TRUE))
+  }
+  if (is.object(x))
+    stop("Unsupported S3/S4 object at ", path, ".")
+  if (!is.null(attributes(x))) {
+    allowed <- if (is.matrix(x) || is.array(x)) c("dim", "dimnames") else
+      if (is.list(x) || is.atomic(x)) "names" else character()
+    if (length(setdiff(names(attributes(x)), allowed)))
+      stop("Arbitrary attributes are forbidden at ", path, ".")
+  }
+  if (is.list(x)) {
+    if (is.null(names(x)) && length(x))
+      stop("Unnamed nested lists are forbidden at ", path, ".")
+    if (scan_truth_names && length(x) && any(.v021_truth_name(names(x))))
+      stop("Truth-bearing name at ", path, ".")
+    for (nm in names(x))
+      .v021_assert_plain_value(x[[nm]], paste0(path, "$", nm), scan_truth_names)
+  }
+  invisible(TRUE)
+}
+
+.v021_assert_physeq <- function(x) {
+  if (!methods::is(x, "phyloseq") || !identical(as.character(class(x)), "phyloseq"))
+    stop("physeq must be an approved phyloseq object.")
+  attrs <- names(attributes(x))
+  allowed_attrs <- c(methods::slotNames(x), "class")
+  if (length(setdiff(attrs, allowed_attrs)))
+    stop("physeq has arbitrary attributes.")
+  sample_names <- colnames(as.data.frame(phyloseq::sample_data(x), stringsAsFactors = FALSE))
+  taxonomy <- phyloseq::tax_table(x, errorIfNULL = FALSE)
+  taxonomy_names <- if (is.null(taxonomy)) character() else colnames(as(taxonomy, "matrix"))
+  if (any(.v021_truth_name(c(sample_names, taxonomy_names))))
+    stop("physeq contains truth-bearing annotations.")
+  invisible(TRUE)
+}
+
+.v021_validate_config <- function(x) {
+  if (!is.list(x)) stop("config must be a named list.")
+  if (!length(x)) return(invisible(TRUE))
+  .v021_assert_names(x, v021_inference_config_fields, path = "config")
+  for (nm in names(x)) {
+    value <- x[[nm]]
+    .v021_assert_plain_value(value, paste0("config$", nm))
+    if (length(value) != 1L || !is.atomic(value) || is.matrix(value) || is.array(value))
+      stop("config$", nm, " must be a plain scalar.")
+  }
+  invisible(TRUE)
+}
+
+build_v021_inference_spec <- function(study, config = list(), task) {
+  if (!is.list(study) || is.object(study)) stop("study must be a plain source list.")
+  if (!all(c("physeq", "taxa") %in% names(study)))
+    stop("study must provide physeq and taxa.")
+  if (!is.data.frame(task) || nrow(task) != 1L)
+    stop("task must be one directed task row.")
+  task_fields <- c("dataset_id", "task_id", "direction_index", "target", "source", "seed")
+  required_task <- setdiff(task_fields, "dataset_id")
+  if (!all(required_task %in% names(task))) stop("task lacks direction identity fields.")
+  .v021_assert_physeq(study$physeq)
+  .v021_validate_config(config)
+  selected <- intersect(task_fields, names(task))
+  spec <- c(list(
+    physeq = .v021_copy(study$physeq),
+    taxa_vec = as.character(.v021_copy(study$taxa)),
+    subject_col = "subject", time_col = "time",
+    config = .v021_copy(config)
+  ), lapply(task[selected], function(value) .v021_copy(value[[1L]])))
+  validate_v021_inference_spec(spec)
+  spec
+}
+
+validate_v021_inference_spec <- function(x) {
+  if (!is.list(x) || is.object(x)) stop("inference specification must be a plain list.")
+  .v021_assert_names(
+    x, v021_inference_spec_fields, v021_required_inference_spec_fields,
+    "inference specification"
+  )
+  if (any(.v021_truth_name(names(x)))) stop("Truth-bearing inference field.")
+  .v021_assert_physeq(x$physeq)
+  if (!is.character(x$taxa_vec) || !length(x$taxa_vec) || anyNA(x$taxa_vec) ||
+      any(!nzchar(x$taxa_vec)) || anyDuplicated(x$taxa_vec)) stop("Invalid taxa_vec.")
+  if (!all(x$taxa_vec %in% phyloseq::taxa_names(x$physeq)))
+    stop("taxa_vec is not contained in physeq.")
+  for (nm in c("subject_col", "time_col", "target", "source"))
+    if (!is.character(x[[nm]]) || length(x[[nm]]) != 1L || is.na(x[[nm]]) || !nzchar(x[[nm]]))
+      stop(nm, " must be one non-missing string.")
+  if (identical(x$target, x$source) || !all(c(x$target, x$source) %in% x$taxa_vec))
+    stop("target and source must be distinct selected taxa.")
+  for (nm in c("task_id", "direction_index", "seed"))
+    if (length(x[[nm]]) != 1L || !is.numeric(x[[nm]]) || !is.finite(x[[nm]]))
+      stop(nm, " must be one finite numeric identity.")
+  if ("dataset_id" %in% names(x))
+    .v021_assert_plain_value(x$dataset_id, "dataset_id")
+  .v021_validate_config(x$config)
+  allowed_attrs <- c("names")
+  if (length(setdiff(names(attributes(x)), allowed_attrs)))
+    stop("Inference specification has arbitrary attributes.")
+  invisible(TRUE)
+}
+
+build_v021_confirmation_target <- function(stage_b_row) {
+  fields <- c("task_id", "direction_index", "target", "source", "seed")
+  if (!is.data.frame(stage_b_row) || nrow(stage_b_row) != 1L ||
+      !all(fields %in% names(stage_b_row))) stop("Invalid Stage B direction row.")
+  out <- stage_b_row[fields]
+  rownames(out) <- NULL
+  .v021_copy(out)
+}
+
+build_v021_runtime_context <- function(ctx) {
+  if (!is.list(ctx) || is.object(ctx)) stop("Runtime context must be a plain list.")
+  missing <- setdiff(v021_runtime_context_fields, names(ctx))
+  if (length(missing))
+    stop("Runtime context lacks approved field(s): ", paste(missing, collapse = ", "))
+  if (!is.null(ctx$pair_builder))
+    stop("Custom pair builders are outside the approved Core runtime context.")
+  out <- lapply(ctx[v021_runtime_context_fields], .v021_copy)
+  for (nm in names(out))
+    .v021_assert_plain_value(out[[nm]], paste0("runtime_context$", nm))
+  validate_v021_runtime_context(out)
+  out
+}
+
+validate_v021_runtime_context <- function(ctx) {
+  if (!is.list(ctx) || is.object(ctx)) stop("Runtime context must be a plain list.")
+  .v021_assert_names(ctx, v021_runtime_context_fields, v021_runtime_context_fields,
+                     "runtime context")
+  for (nm in names(ctx))
+    .v021_assert_plain_value(ctx[[nm]], paste0("runtime_context$", nm))
+  if (!is.data.frame(ctx$meta_df) || !is.matrix(ctx$sm_mat) ||
+      !is.numeric(ctx$sm_mat) || nrow(ctx$meta_df) != nrow(ctx$sm_mat))
+    stop("Runtime inference data are structurally invalid.")
+  if (is.null(colnames(ctx$sm_mat)) || anyNA(colnames(ctx$sm_mat)) ||
+      anyDuplicated(colnames(ctx$sm_mat)))
+    stop("Runtime inference matrix lacks unique taxon columns.")
+  if (!is.character(ctx$mod_exe_file) || length(ctx$mod_exe_file) != 1L ||
+      is.na(ctx$mod_exe_file) || !nzchar(ctx$mod_exe_file))
+    stop("Runtime executable identity is invalid.")
+  invisible(TRUE)
+}
+
+make_v021_confirmation_fit_closure <- function(spec, runtime_context, fit_direction) {
+  validate_v021_inference_spec(spec)
+  validate_v021_runtime_context(runtime_context)
+  if (!is.function(fit_direction)) stop("fit_direction must be a function.")
+  closure_env <- new.env(parent = baseenv())
+  closure_env$spec <- .v021_copy(spec)
+  closure_env$runtime_context <- runtime_context
+  closure_env$fit_direction <- fit_direction
+  fn <- function() {
+    result <- fit_direction(
+      target = spec$target, partner = spec$source, ctx = runtime_context,
+      seed_override = as.integer(spec$seed), progress_local = "none"
+    )
+    if (!inherits(result, "pclv_failure")) result$.predictive_context <- NULL
+    result
+  }
+  environment(fn) <- closure_env
+  fn
+}
+
+.v021_group_columns <- function(grouping_keys) {
+  if (!length(grouping_keys)) return(c(dataset = NA_character_, interaction_matrix = NA_character_))
+  if (is.null(names(grouping_keys)) || any(!names(grouping_keys) %in% c("dataset", "interaction_matrix")) ||
+      anyDuplicated(names(grouping_keys)))
+    stop("grouping_keys must be a named character vector using dataset and/or interaction_matrix.")
+  out <- c(dataset = NA_character_, interaction_matrix = NA_character_)
+  out[names(grouping_keys)] <- grouping_keys
+  out
+}
+
+build_pair_group_manifest <- function(task_table, grouping_keys = character(), split_spec, seed = 1L) {
+  required <- c("task_id", "direction_index", "target", "source", "seed")
+  if (!is.data.frame(task_table) || !all(required %in% names(task_table)))
+    stop("task_table lacks required direction identifiers.")
+  if (!is.list(split_spec) || !identical(sort(names(split_spec)),
+      sort(c("grouping_level", "allowed_partitions", "assignments"))))
+    stop("split_spec must contain only grouping_level, allowed_partitions, and assignments.")
+  level <- split_spec$grouping_level
+  if (!is.character(level) || length(level) != 1L ||
+      !level %in% c("unordered_pair", "dataset", "interaction_matrix"))
+    stop("Invalid grouping_level.")
+  allowed <- split_spec$allowed_partitions
+  if (!is.character(allowed) || !length(allowed) || anyNA(allowed) ||
+      any(!nzchar(allowed)) || anyDuplicated(allowed)) stop("Invalid allowed_partitions.")
+  assignments <- split_spec$assignments
+  if (!is.data.frame(assignments) || !identical(names(assignments), c("group_id", "partition")))
+    stop("assignments must have exactly group_id and partition columns.")
+  if (anyNA(assignments) || anyDuplicated(assignments$group_id))
+    stop("Duplicate, incomplete, or conflicting assignments.")
+  if (any(!assignments$partition %in% allowed)) stop("Assignment uses a disallowed partition.")
+  if (length(seed) != 1L || !is.numeric(seed) || !is.finite(seed)) stop("Invalid manifest seed.")
+  if (anyDuplicated(paste(task_table$task_id, task_table$direction_index, sep = "\r")))
+    stop("Duplicate task/direction identifiers.")
+  columns <- .v021_group_columns(grouping_keys)
+  needed <- unname(columns[!is.na(columns)])
+  if (!all(needed %in% names(task_table))) stop("Required grouping metadata is missing.")
+  allowed_task_fields <- unique(c(required, needed, "pair_key"))
+  if (length(setdiff(names(task_table), allowed_task_fields)))
+    stop("task_table contains fields outside the manifest schema.")
+
+  out <- task_table[intersect(allowed_task_fields, names(task_table))]
+  out$dataset_group <- if (is.na(columns[["dataset"]])) NA_character_ else
+    as.character(out[[columns[["dataset"]]]])
+  out$matrix_group <- if (is.na(columns[["interaction_matrix"]])) NA_character_ else
+    as.character(out[[columns[["interaction_matrix"]]]])
+  pair_taxa <- vapply(seq_len(nrow(out)), function(i)
+    paste(sort(c(as.character(out$target[[i]]), as.character(out$source[[i]]))), collapse = "|"),
+    character(1))
+  derived_pair <- vapply(seq_len(nrow(out)), function(i) {
+    components <- c(out$matrix_group[[i]], out$dataset_group[[i]], pair_taxa[[i]])
+    paste(components[!is.na(components) & nzchar(components)], collapse = "::")
+  }, character(1))
+  if ("pair_key" %in% names(out)) {
+    if (anyNA(out$pair_key) || any(!nzchar(as.character(out$pair_key)))) stop("Invalid pair_key.")
+    pair_map <- split(as.character(out$pair_key), derived_pair)
+    if (any(vapply(pair_map, function(z) length(unique(z)) != 1L, logical(1))))
+      stop("Conflicting pair_key values.")
+    reverse_pair_map <- split(derived_pair, as.character(out$pair_key))
+    if (any(vapply(reverse_pair_map, function(z) length(unique(z)) != 1L, logical(1))))
+      stop("A pair_key identifies multiple unordered pairs.")
+    out$pair_group <- as.character(out$pair_key)
+  } else out$pair_group <- derived_pair
+  if ((level == "dataset" && all(is.na(out$dataset_group))) ||
+      (level == "interaction_matrix" && all(is.na(out$matrix_group))))
+    stop("Grouping level metadata is missing.")
+  group_id <- switch(level, unordered_pair = out$pair_group,
+                     dataset = out$dataset_group, interaction_matrix = out$matrix_group)
+  if (anyNA(group_id) || any(!nzchar(group_id))) stop("Incomplete grouping metadata.")
+  missing_groups <- setdiff(unique(group_id), assignments$group_id)
+  extra_groups <- setdiff(assignments$group_id, unique(group_id))
+  if (length(missing_groups) || length(extra_groups))
+    stop("Assignments are incomplete or contain unknown groups.")
+  out$grouping_level <- level
+  out$assignment_group <- group_id
+  out$partition <- assignments$partition[match(group_id, assignments$group_id)]
+  out$manifest_seed <- as.integer(seed)
+  order_fields <- c("matrix_group", "dataset_group", "pair_group", "direction_index")
+  out <- out[do.call(order, c(out[order_fields], list(na.last = TRUE))), , drop = FALSE]
+  rownames(out) <- NULL
+  assert_no_pair_split_leakage(out)
+  out
+}
+
+assert_no_pair_split_leakage <- function(manifest) {
+  required <- c("task_id", "direction_index", "target", "source", "pair_group", "partition")
+  if (!is.data.frame(manifest) || !all(required %in% names(manifest)) || anyNA(manifest[required]))
+    stop("Invalid or incomplete manifest.")
+  canonical <- vapply(seq_len(nrow(manifest)), function(i)
+    paste(sort(c(as.character(manifest$target[[i]]), as.character(manifest$source[[i]]))), collapse = "|"),
+    character(1))
+  pair_partition <- split(manifest$partition, manifest$pair_group)
+  if (any(vapply(pair_partition, function(x) length(unique(x)) != 1L, logical(1))))
+    stop("Unordered pair crosses partitions.")
+  pair_taxa <- split(canonical, manifest$pair_group)
+  if (any(vapply(pair_taxa, function(x) length(unique(x)) != 1L, logical(1))))
+    stop("Pair group identifies conflicting unordered pairs.")
+  rows <- split(seq_len(nrow(manifest)), manifest$pair_group)
+  complete <- vapply(rows, function(ix) {
+    if (length(ix) != 2L || length(unique(manifest$task_id[ix])) != 1L) return(FALSE)
+    identical(as.character(manifest$target[ix]), rev(as.character(manifest$source[ix])))
+  }, logical(1))
+  if (any(!complete)) stop("Manifest contains an incomplete unordered pair.")
+  invisible(TRUE)
+}
+
+.v021_validate_retained_artifact <- function(x, require_finalized = FALSE) {
+  allowed <- c("artifact_schema", "artifact_state", "execution_state", "inference_results", ".v021_finalized")
+  required <- c("artifact_schema", "artifact_state", "execution_state", "inference_results")
+  if (!is.list(x) || is.object(x)) stop("Inference artifact must be a plain structured list.")
+  if (length(setdiff(names(attributes(x)), "names")))
+    stop("Inference artifact has arbitrary attributes.")
+  .v021_assert_names(x, allowed, required, "inference artifact")
+  if (!identical(x$artifact_schema, v021_retained_fixture_schema))
+    stop("Unsupported inference artifact schema.")
+  if (!identical(x$artifact_state, "retained") || !x$execution_state %in% c("completed", "retained"))
+    stop("Inference artifact is unfinished, failed, incomplete, or unavailable.")
+  if (!is.list(x$inference_results) || is.object(x$inference_results))
+    stop("inference_results must be a plain list.")
+  if (length(setdiff(names(attributes(x$inference_results)), "names")))
+    stop("inference_results has arbitrary attributes.")
+  .v021_assert_names(x$inference_results, v021_inference_result_fields,
+                     v021_inference_result_fields, "inference_results")
+  if (any(.v021_truth_name(names(x$inference_results)))) stop("Truth-bearing inference result field.")
+  for (nm in names(x$inference_results))
+    .v021_assert_plain_value(x$inference_results[[nm]], paste0("inference_results$", nm))
+  if (require_finalized && !identical(x$.v021_finalized, TRUE))
+    stop("Truth join requires an explicitly finalized retained inference artifact.")
+  if (!require_finalized && ".v021_finalized" %in% names(x))
+    stop("Artifact is already finalized.")
+  invisible(TRUE)
+}
+
+finalize_v021_inference_artifact <- function(x) {
+  .v021_validate_retained_artifact(x, require_finalized = FALSE)
+  out <- .v021_copy(x)
+  out$.v021_finalized <- TRUE
+  out
+}
+
+classify_absolute_truth_outcome <- function(posterior_sign, absolute_A) {
+  unavailable <- function(reason) list(
+    absolute_truth_outcome = NA_character_,
+    absolute_truth_outcome_status = "unavailable",
+    absolute_truth_outcome_reason = list(code = reason)
+  )
+  if (length(posterior_sign) != 1L || !is.numeric(posterior_sign) ||
+      is.na(posterior_sign) || !is.finite(posterior_sign))
+    return(unavailable("posterior_sign_unavailable"))
+  if (!posterior_sign %in% c(-1, 1)) return(unavailable("posterior_sign_indeterminate"))
+  if (length(absolute_A) != 1L || !is.numeric(absolute_A) ||
+      is.na(absolute_A) || !is.finite(absolute_A))
+    return(unavailable("absolute_A_unavailable"))
+  outcome <- if (absolute_A == 0) "absolute_zero" else if (posterior_sign == sign(absolute_A))
+    "same_nonzero_sign" else "opposite_nonzero_sign"
+  list(absolute_truth_outcome = outcome,
+       absolute_truth_outcome_status = "classified",
+       absolute_truth_outcome_reason = NULL)
+}
+
+join_v021_truth_post_inference <- function(inference_artifact, truth_artifact) {
+  .v021_validate_retained_artifact(inference_artifact, require_finalized = TRUE)
+  if (!is.list(truth_artifact) || is.object(truth_artifact) || is.null(names(truth_artifact)))
+    stop("truth_artifact must be a named plain list.")
+  .v021_assert_plain_value(truth_artifact, "truth_artifact", scan_truth_names = FALSE)
+  out <- .v021_copy(inference_artifact)
+  out$evaluation <- .v021_copy(truth_artifact)
+  out
+}

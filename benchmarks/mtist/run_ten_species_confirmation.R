@@ -4,6 +4,7 @@ script_dir <- if (length(script_arg)) dirname(normalizePath(sub("^--file=", "", 
 repo <- normalizePath(file.path(script_dir, "../.."))
 source(file.path(script_dir, "mtist_adapter.R"))
 source(file.path(script_dir, "ten_species_helpers.R"))
+source(file.path(script_dir, "v021_truth_isolation.R"))
 `%||%` <- function(x, fallback) if (is.null(x)) fallback else x
 config <- source(file.path(script_dir, "configs", "ten_species_confirmation.R"))$value
 result_dir <- file.path(script_dir, "results", config$result_label)
@@ -11,7 +12,11 @@ dir.create(result_dir, recursive = TRUE, showWarnings = FALSE)
 stage_b_path <- file.path(script_dir, "results", config$stage_b_result_label, "direction_results.tsv")
 stage_b_config <- jsonlite::read_json(file.path(dirname(stage_b_path), "config.json"), simplifyVector = TRUE)
 stage_b <- utils::read.delim(stage_b_path, check.names = FALSE, stringsAsFactors = FALSE)
-targets <- select_confirmation_directions(stage_b)
+evaluation_targets <- select_confirmation_directions(stage_b)
+fit_targets <- lapply(seq_len(nrow(evaluation_targets)), function(i)
+  build_v021_confirmation_target(evaluation_targets[i, , drop = FALSE]))
+targets <- do.call(rbind, fit_targets)
+rm(stage_b)
 expected <- data.frame(
   source = c("species_1", "species_2", "species_3", "species_7", "species_8", "species_5"),
   target = c("species_7", "species_9", "species_7", "species_4", "species_4", "species_7"))
@@ -50,7 +55,12 @@ withr::with_libpaths(benchmark_library, action = "prefix",
 .libPaths(c(benchmark_library, .libPaths()))
 library(pclvbayes)
 root <- mtist_root(Sys.getenv("MTIST_ROOT", unset = "~/mtist"))
-study <- load_mtist_study(config$dataset_id, root)
+loaded_study <- load_mtist_study(config$dataset_id, root)
+inference_study <- list(
+  physeq = .v021_copy(loaded_study$physeq),
+  taxa = as.character(.v021_copy(loaded_study$taxa))
+)
+rm(loaded_study)
 
 fit_formals <- formals(fit_pclv_bayes)
 control_names <- setdiff(names(fit_formals), c("physeq", "subject_col", "time_col", "taxa_vec"))
@@ -70,13 +80,21 @@ overrides <- list(
 )
 controls[names(overrides)] <- overrides
 validated <- pclvbayes:::.validate_fit_pclv_inputs(
-  study$physeq, "subject", "time", study$taxa, controls)
+  inference_study$physeq, "subject", "time", inference_study$taxa, controls)
 runtime <- pclvbayes:::.prepare_fit_runtime(validated)
 if (inherits(runtime, "pclv_failure")) stop(runtime$reason)
 ctx <- runtime$ctx
 ctx$n_workers_kfold_eff <- 1L
 exe <- ctx$mod_exe_file
 exe_before <- file.info(exe)
+approved_runtime_context <- build_v021_runtime_context(ctx)
+
+inference_config <- controls[intersect(names(controls), v021_inference_config_fields)]
+inference_specs <- lapply(fit_targets, function(target)
+  build_v021_inference_spec(inference_study, config = inference_config, task = target))
+fit_jobs <- lapply(inference_specs, make_v021_confirmation_fit_closure,
+  runtime_context = approved_runtime_context,
+  fit_direction = pclvbayes:::.fit_direction_main_posterior)
 
 snapshot <- function(path) {
   entries <- if (dir.exists(path)) list.files(path, recursive = TRUE, full.names = TRUE,
@@ -102,14 +120,8 @@ started <- Sys.time()
 
 future::plan(future::multisession, workers = config$n_workers_outer)
 on.exit(future::plan(future::sequential), add = TRUE)
-results <- furrr::future_map(seq_len(nrow(targets)), function(i) {
-  row <- targets[i, , drop = FALSE]
-  result <- pclvbayes:::.fit_direction_main_posterior(
-    target = row$target[[1L]], partner = row$source[[1L]], ctx = ctx,
-    seed_override = as.integer(row$seed[[1L]]), progress_local = "none")
-  if (!inherits(result, "pclv_failure")) result$.predictive_context <- NULL
-  result
-}, .options = furrr::furrr_options(seed = TRUE, packages = "pclvbayes"))
+results <- furrr::future_map(fit_jobs, function(job) job(),
+  .options = furrr::furrr_options(seed = FALSE, packages = "pclvbayes"))
 future::plan(future::sequential)
 elapsed <- as.numeric(difftime(Sys.time(), started, units = "secs"))
 rss_after <- proc_value("VmRSS")
@@ -131,7 +143,7 @@ residual_text <- function(x, parameter) {
   paste(apply(d[c("chain", "mean", "median", "q05", "q95")], 1, paste, collapse = ":"), collapse = ";")
 }
 rows <- lapply(seq_along(results), function(i) {
-  b <- targets[i, , drop = FALSE]
+  b <- evaluation_targets[i, , drop = FALSE]
   x <- results[[i]]
   if (inherits(x, "pclv_failure")) x <- pclvbayes:::.failed_direction_result(x)
   long_sign <- if (is.finite(x$a_mean)) sign(x$a_mean) else NA_real_
