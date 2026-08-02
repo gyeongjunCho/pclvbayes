@@ -70,6 +70,21 @@ snapshot_with_argv <- function(argv, executable = "/models/pclv", pid = 301L,
   rbind(root, child)
 }
 
+add_cmdstan_diagnostic <- function(snapshot, pid = 900L, ppid = 200L,
+                                   executable = "/opt/cmdstan-2.36.0/bin/diagnose",
+                                   argv = c("bin/diagnose", "/output/chain-1.csv",
+                                            "/output/chain-2.csv"),
+                                   potential_cmdstan = TRUE) {
+  row <- data.frame(
+    timestamp = snapshot$timestamp[[1L]], pid = pid, ppid = ppid,
+    command = paste(argv, collapse = " "), executable = executable,
+    potential_cmdstan = potential_cmdstan, readable = TRUE,
+    stringsAsFactors = FALSE)
+  if ("argv" %in% names(snapshot)) row$argv <- I(list(argv))
+  row <- row[names(snapshot)]
+  rbind(snapshot, row)
+}
+
 test_that("Linux NUL-delimited cmdlines preserve exact argv boundaries", {
   argv <- c("/models/pclv", "method=sample", "num_samples=2000",
             "argument containing spaces", "", "id=1")
@@ -186,6 +201,57 @@ test_that("an attempt3-shaped eight-chain snapshot is verified without sampling"
   expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
   expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
   expect_identical(monitor$compliance_status, "compliant")
+})
+
+test_that("canonical CmdStan diagnose is a non-chain process slot", {
+  snapshot <- make_process_snapshot(8L, indirect = TRUE)
+  snapshot$argv <- I(lapply(snapshot$command,
+                            function(x) strsplit(x, "[[:space:]]+")[[1L]]))
+  snapshot <- snapshot[c("timestamp", "pid", "ppid", "command", "argv",
+                         "executable", "potential_cmdstan", "readable")]
+  snapshot <- add_cmdstan_diagnostic(snapshot)
+  classified <- classify_v021_process_snapshot(
+    snapshot, 100L, known_model_executables = "/models/pclv")
+  diagnostic <- classified[classified$pid == 900L, , drop = FALSE]
+  expect_identical(diagnostic$classification, "cmdstan_diagnostic")
+  expect_false(diagnostic$is_active_cmdstan_chain)
+
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 9L)
+  expect_identical(monitor$compliance_status, "compliant")
+
+  exceeded <- add_cmdstan_diagnostic(make_process_snapshot(10L, indirect = TRUE))
+  monitor <- monitor_v021_process_snapshots(
+    list(exceeded), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 10L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 11L)
+  expect_identical(monitor$compliance_status, "exceeded")
+})
+
+test_that("diagnose recognition requires canonical identity and R-worker ancestry", {
+  base <- make_process_snapshot(0L)
+  unrelated <- add_cmdstan_diagnostic(
+    base, executable = "/tmp/diagnose", potential_cmdstan = FALSE)
+  classified <- classify_v021_process_snapshot(unrelated, 100L, "/models/pclv")
+  expect_identical(classified$classification[classified$pid == 900L],
+                   "other_descendant")
+
+  wrong_parent <- add_cmdstan_diagnostic(base, ppid = 100L)
+  monitor <- monitor_v021_process_snapshots(
+    list(wrong_parent), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "unverified_process_tree")
+  expect_identical(monitor$reason, "unknown_potential_cmdstan_descendant")
+
+  unknown <- add_cmdstan_diagnostic(
+    base, executable = "/opt/cmdstan-2.36.0/bin/stansummary",
+    argv = c("bin/stansummary", "/output/chain-1.csv"))
+  monitor <- monitor_v021_process_snapshots(
+    list(unknown), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "unverified_process_tree")
+  expect_identical(monitor$reason, "unknown_potential_cmdstan_descendant")
 })
 
 test_that("the policy records the exact 12-thread, 2-reserved, 10-chain contract", {

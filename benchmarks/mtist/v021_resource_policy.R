@@ -359,13 +359,25 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   sample_process <- known_executable & sample_argument
   pathfinder_process <- known_executable & pathfinder_argument
   r_process <- grepl("(^|/)(R|Rscript)([[:space:]]|$)", out$command)
+  parent_index <- match(out$ppid, out$pid)
+  parent_is_r_worker <- !is.na(parent_index) & r_process[parent_index] &
+    out$pid[parent_index] != root_pid
+  canonical_diagnose_executable <- grepl(
+    "/cmdstan-[^/]+/bin/diagnose$", out$executable)
+  canonical_diagnose_argv <- vapply(argv, function(x) {
+    length(x) >= 2L && identical(x[[1L]], "bin/diagnose") &&
+      all(grepl("\\.csv$", x[-1L]))
+  }, logical(1))
+  diagnostic_process <- out$is_descendant & canonical_diagnose_executable &
+    canonical_diagnose_argv & parent_is_r_worker
   out$classification <- "other_descendant"
   out$classification[out$pid == root_pid] <- "parent_r"
   out$classification[out$is_descendant & r_process] <- "outer_worker"
   out$classification[out$is_descendant & pathfinder_process] <- "pathfinder_process"
   out$classification[out$is_descendant & sample_process] <- "cmdstan_chain"
+  out$classification[diagnostic_process] <- "cmdstan_diagnostic"
   unknown <- out$is_descendant & (out$potential_cmdstan | known_executable) &
-    !sample_process & !pathfinder_process
+    !sample_process & !pathfinder_process & !diagnostic_process
   out$classification[unknown] <- "unknown_potential_cmdstan"
   out$is_active_cmdstan_chain <- out$classification == "cmdstan_chain"
   out$operation <- NA_character_
@@ -407,7 +419,8 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   records <- do.call(rbind, classified)
   counts <- vapply(classified, function(x) sum(x$is_active_cmdstan_chain), integer(1))
   process_counts <- vapply(classified, function(x)
-    sum(x$classification %in% c("cmdstan_chain", "pathfinder_process")), integer(1))
+    sum(x$classification %in%
+          c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")), integer(1))
   peak <- max(counts)
   process_peak <- max(process_counts)
   complete <- all(vapply(snapshots, function(x) all(x$readable), logical(1)))
