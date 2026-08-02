@@ -91,7 +91,7 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
   no interaction.
 - PSP/LFSR is interpreted only when interaction-level identification and the
   required diagnostic gates are satisfied.
-- v0.3 should aim to reduce residual non-identifiability while preserving
+- v0.3.0 should aim to reduce residual non-identifiability while preserving
   interactions whose `a_ij` and PSP are already stable across chains.
 
 ### Remaining
@@ -101,7 +101,8 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Record chain-specific sign agreement and residual-allocation disagreement
   — indeterminate directions remain explicit and are never treated as zero.
 - [x] Audit temporary-file and CmdStan output lifecycle — temporary roots, workers, CmdStan processes, and executable reuse were verified.
-Maintainer commit of the completed MTIST benchmark infrastructure is an external release action, not a v0.2.0 functional task.
+**Maintainer note:** Commit of the completed MTIST benchmark infrastructure is an external release action, not a v0.2.0 functional task.
+
 - [x] Profile R preprocessing, K-fold, memory, serialization, and sampling —
   MTIST 361 baseline separates directly measurable R components from combined
   CmdStan/process boundaries and ranks measured optimization candidates.
@@ -111,13 +112,14 @@ Maintainer commit of the completed MTIST benchmark infrastructure is an external
 - [x] Optimize measured outer-worker orchestration — explicit immutable
   exports and pair-level load balancing reduced the representative two-worker
   MTIST profile without changing scientific signatures or one-worker runtime.
-Further optimization is an optional post-baseline backlog item and is undertaken only when profiling demonstrates a material release-relevant benefit.
+**Optimization note:** Further optimization is an optional post-baseline backlog item and is undertaken only when profiling demonstrates a material release-relevant benefit.
+
 - [x] Run representative 10-species MTIST benchmarks — dataset 37 completed
   all 45 pair tasks and 90 directed fits in smoke and multi-chain reference
   configurations with coverage-aware scoring and explicit indeterminacy.
 - [x] Documentation
 - [x] Reduce and freeze the public `fit_pclv_bayes()` API
-Maintainer-managed packaging, tagging, and source release operations are outside the v0.2.0 functional completion list.
+**Release note:** Maintainer-managed packaging, tagging, and source-release operations are outside the v0.2.0 functional completion list.
 
 ### Scientific estimand hardening and conservative sign interpretation
 
@@ -512,10 +514,10 @@ direct-gLV coefficient is estimated to have the opposite nonzero sign. High
 direct-effect misinterpretation risk means the pcLV sign is unlikely to
 represent the same nonzero absolute direct-gLV sign.
 
-Version boundary: v0.2 defines and reports the empirical 0–1 susceptibility
+Version boundary: v0.2 defines and documents the empirical 0–1 susceptibility contract; production calculation and integration are validated in v0.2.1
 without claiming an absolute-A probability; v0.2.1 calibrates the three
 truth-known outcome probabilities with multiple MTIST datasets and held-out
-validation; v0.3 investigates model changes that may reduce smoothing,
+validation; v0.3.0 investigates model changes that may reduce smoothing,
 interval, denominator, omitted-community, and state-dependence distortions
 while retaining this calibrated framework as a validation tool. Absolute-scale
 modeling is not moved into v0.2 or v0.2.1.
@@ -539,15 +541,15 @@ v0.2.2 is complete only when intended refactors are characterized, all frozen co
 
 ### Lightweight v0.2.x CI
 
-Lightweight checks may be introduced before v0.3.0 and do not require publication-scale sampling: package unit tests; frozen API/schema regressions; non-sampling adapter smoke tests; truth-isolation tests; checkpoint/restart fixtures; and deterministic task/seed-map tests.
+Lightweight checks may be introduced before v0.3.0 and do not require publication-scale sampling: package unit tests; frozen API/schema regressions; non-sampling adapter smoke tests; truth-isolation tests; checkpoint/restart fixtures; deterministic task-order and seed-map tests; and GitHub Actions package/adapter smoke tests.
 
 ## v0.3.0 — Scientific and statistical development
 
-Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all mandatory for v0.3 release and require separate promotion decisions. External absolute-scale confirmation is not mandatory for v0.3 release.
+Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all mandatory for v0.3.0 release and require separate promotion decisions. External absolute-scale confirmation is not mandatory for v0.3.0 release.
 
-### Core v0.3 work
+### Core v0.3.0 work
 
-### Shared time infrastructure
+#### Shared time infrastructure
 
 - Common time utilities for `fit_pclv_bayes()` and `cor_meta_resid()`
 - Numeric time with explicit units
@@ -557,7 +559,7 @@ Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest resear
 - Continuous-time OU utilities
 - OU half-life reporting
 
-### Continuous-time OU
+#### Continuous-time OU
 
 - Estimate one OU decay posterior from the complete retained data for each
   directed microbial interaction model.
@@ -572,7 +574,7 @@ Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest resear
   posterior geometry.
 - Do not silently switch to a different residual model.
 
-### OU and observation-scale identifiability
+#### OU and observation-scale identifiability
 
 Treat residual identifiability as a separate scientific problem.
 
@@ -604,7 +606,7 @@ omitted-community-, and state-dependence distortions without destabilizing
 directions whose pair-to-rest coefficient and PSP/LFSR are already identified.
 It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 
-### Latent and integrated interval dynamics
+#### Latent continuous-time dynamics
 
 - [ ] Replace fixed external spline smoothing with a latent continuous-time trajectory and observation model.
 - [ ] Propagate smoothing uncertainty into posterior inference.
@@ -612,26 +614,26 @@ It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 - [ ] Benchmark against exact noiseless transformed trajectories and the v0.2 smoothing-sensitive cases.
 - [ ] Do not promise that this alone recovers absolute `A`.
 
-### Integrated interval dynamics
+#### Integrated interval dynamics
 
 - [ ] Distinguish instantaneous and finite-interval estimands.
 - [ ] Evaluate interval-averaged or integrated source predictors.
 - [ ] Model irregular `dt` directly; retain one decay posterior per directed fit and preserve `rho(dt) = exp(-lambda * dt)`.
 - [ ] Quantify sign sensitivity to observation interval length.
 
-### Exploratory v0.3 research tracks
+### Exploratory v0.3.0 research tracks
 
-### Context-dependent pair-to-rest coefficients
+#### Context-dependent pair-to-rest coefficients
 
 - [ ] Investigate low-dimensional state-dependent or regime-dependent `a_ij` coefficients, including early/late coefficients, predefined regimes, varying-coefficient splines, Gaussian-process varying coefficients, and low-dimensional neural varying coefficients.
 - [ ] Report state-dependent sign changes, require sufficient information, preserve indeterminate results when context dependence is not identifiable, and protect pairwise scalability.
 
-### Rest-composition conditioning and denominator robustness
+#### Rest-composition conditioning and denominator robustness
 
 - [ ] Evaluate low-dimensional rest-composition covariates (ILR/principal balances, latent community factors or observed total-load covariates) with shrinkage and collinearity monitoring; do not call the result an unconditional direct effect.
 - [ ] Predefine defensible denominator/balance variants, measure denominator-sensitive directions, and never select a denominator by truth agreement. Preserve the canonical denominator until a new contract is formally adopted.
 
-### External scale-aware confirmation workflow
+#### External scale-aware confirmation workflow
 
 - [ ] Document a handoff workflow from pcLVbayes pair-to-rest screening to an
   external absolute-scale joint dynamical model when sequencing counts and
@@ -666,7 +668,7 @@ coverage/precision trade-offs, and diagonal estimands.
 
 Every task must define a scientific hypothesis, proposed change, estimand
 impact, benchmark datasets, primary metrics, failure criteria, comparison with
-frozen v0.2.x baselines, and any API/schema migration. No v0.3 implementation
+frozen v0.2.x baselines, and any API/schema migration. No v0.3.0 implementation
 starts before v0.2.2 is complete.
 
 1. **V030-01 — Hypothesis and estimand register.** Approve hypotheses and
@@ -688,7 +690,7 @@ starts before v0.2.2 is complete.
 
 ### Core validation and calibrated screening
 
-### Multi-dataset oracle validation
+#### Multi-dataset oracle validation
 
 This work may use the v0.2.1 calibrated risk framework to evaluate model improvements; it does not own the initial MTIST calibration task.
 
@@ -696,13 +698,13 @@ This work may use the v0.2.1 calibrated risk framework to evaluate model improve
 - [ ] Report transformed-oracle agreement, absolute-A agreement, state-dependent contrasts, smoothing/interval/noise sign changes, denominator sensitivity, posterior-oracle disagreement, and indeterminate rates with explicit denominators.
 - [ ] Acceptance criteria must follow the declared estimand rather than force agreement with absolute `A`.
 
-### Backward compatibility
+#### Backward compatibility
 
 - [ ] Retain the v0.2 pair-to-rest model as an explicitly supported model.
 - [ ] Do not silently change the meaning of `a_ij`; version schemas when a distinct estimand is introduced and label relative- and absolute-scale coefficients separately.
 - [ ] Preserve conservative failure and indeterminate semantics.
 
-### Calibrated Laplace screening
+#### Calibrated Laplace screening
 
 Pipeline:
 
@@ -726,7 +728,7 @@ Requirements:
 - Preserve strong microbial interactions
 - Reduce runtime without changing scientific conclusions
 
-### Adaptive escalation (optional)
+#### Adaptive escalation (optional)
 
 - Tier 0: reliable Laplace rejection
 - Tier 1: short multi-chain diagnostic NUTS
@@ -748,18 +750,38 @@ datasets, interaction matrices, or simulation regimes for transport and held-
 out evaluation. Both directions of an unordered pair stay in one split;
 interaction-matrix or dataset-level separation is preferred to random
 direction-level splitting. Auxiliary datasets need not use the primary
-publication-scale 4-chain 2000/2000 budget; any auxiliary budget is
-prospectively justified and documented. It never uses
+publication-scale 4-chain 2000/2000 budget. Auxiliary budgets are determined
+before examining held-out truth, must support the diagnostic quantities used in
+calibration, and must report inference quality and missingness. No auxiliary
+dataset is selectively rerun or strengthened because its truth agreement is
+favorable. It never uses
 MTIST truth for inference or feature generation, never flips coefficients, and
 never overwrites original posterior, significance, or diagnostic outputs.
 
 1. **V021-01 — Truth-isolation contract.** Define pair-level splits, inference
-   versus truth-labeling boundaries, and the three outcome labels. Likely files:
+   versus truth-labeling boundaries, and the exact truth-known outcome classes `same_nonzero_sign`,
+   `opposite_nonzero_sign`, and `absolute_zero`, assigned only after inference
+   relative to the canonical posterior sign and absolute MTIST
+   `A[target, source]`. Keep separate execution/reporting states for nonzero
+   truth omitted by the original policy, not reportable directions, and failed,
+   incomplete, or unavailable inference; these are not additional absolute-sign
+   outcome classes. Likely files:
    benchmark configuration and audit documentation. Add leakage tests. No
-   sampling. Acceptance: truth is unavailable to inference and both directions
-   of an unordered pair remain in one split. Commit boundary: contract only.
+   sampling. Inference code and diagnostic-feature generation must not load the
+   truth matrix. Join truth only in a physically or logically separate post-inference stage.
+   Both directions of an unordered pair remain in one split; interaction-matrix
+   or dataset-level separation is preferred for final transport evaluation;
+   truth-derived annotations never become production diagnostic inputs.
+   Acceptance: leakage tests pass. Commit boundary: contract only.
 2. **V021-02 — Resource and scheduling policy.** Encode 12 logical threads with
-   2 reserved threads, a maximum of 10 active CmdStan chains, one CPU thread per active chain, and fixed numerical-library/OpenMP threading. Safe outer concurrency is derived by preflight from observed per-fit chain concurrency; ten outer workers are not automatically safe. If each fit launches four chains concurrently, no more than two fits may run concurrently unless a verified global chain scheduler exists. The full benchmark waits for process-tree monitoring to demonstrate the ceiling. Retries, Pathfinder, main fits, and K-fold all count toward the same ceiling. Add preflight capacity tests. Sampling permitted only in
+   2 reserved threads, a maximum of 10 active CmdStan chains, one CPU thread
+   per active chain, and fixed numerical-library/OpenMP threading. Safe outer
+   concurrency is derived by preflight from observed per-fit chain concurrency;
+   ten outer workers are not automatically safe. If each fit launches four chains
+   concurrently, no more than two fits may run concurrently unless a verified
+   global chain scheduler exists. The full benchmark waits for process-tree
+   monitoring to demonstrate the ceiling. Retries, Pathfinder, main fits, and
+   K-fold all count toward the same ceiling. Add preflight capacity tests. Sampling permitted only in
    preflight. Acceptance: observed peak never exceeds 10 chains. Commit
    boundary: scheduler/resource policy.
 3. **V021-03 — Checkpoint and manifest architecture.** Add deterministic pair,
@@ -778,7 +800,7 @@ never overwrites original posterior, significance, or diagnostic outputs.
    states and resource measurements are retained; no K-fold truth leakage.
 6. **V021-06 — Full 100-species pairwise coverage.** Run 4,950 unordered
    pairs and 9,900 directions (not a joint 100-species NUTS model),
-   with 2,000 retained draws per chain and 8,000 nominal retained draws across four chains per direction under the global ceiling. Effective sample size is diagnostic-dependent and is not the nominal retained-draw count. Record all
+   with 4 chains, 2,000 warmup iterations per chain, 2,000 retained draws per chain, and 8,000 nominal retained draws across four chains per direction under the global ceiling. Nominal draws are not 8,000 effective independent samples; effective sample size is parameter- and diagnostic-dependent, and interpretation uses R-hat, bulk ESS, tail ESS, and applicable diagnostics rather than nominal count alone. Record all
    explicit states and denominators. Benchmark/sampling permitted. Acceptance:
    complete task manifest and reproducible restart.
 7. **V021-07 — Post-inference truth labeling.** Join truth only after inference
@@ -793,14 +815,24 @@ never overwrites original posterior, significance, or diagnostic outputs.
    approved.
 9. **V021-09 — Conservative output integration.** Add independent concepts
    `sign_reportable`, `sign_withheld`, and `sign_withhold_reason` while retaining original output.
-   Add schema/regression tests. Withholding is a transparent policy decision
-   based on named evidence, not a silently combined score. Candidate reason
+   Add schema/regression tests. Original v0.2 posterior coefficient values and
+   summaries, intervals and sign probabilities, significance decisions, diagnostic
+   classes, Bayesian eligibility, K-fold/ELPD/stacking results, public names,
+   classes, dimensions, matrices, masks, and unavailable/zero-placeholder
+   semantics remain unchanged. Only independently named conservative outputs
+   may be added after separate schema review. Evidence consists of
+   `empirical_sign_reversal_susceptibility`, worst-axis and component values,
+   validated absolute-sign probabilities when available,
+   `calibration_domain_status`, and existing posterior/diagnostic evidence.
+   Policy outputs are `sign_reportable`, `sign_withheld`, and
+   `sign_withhold_reason`; withholding is prospectively specified and transparent,
+   never an undocumented weighted combination. Candidate reason
    values (subject to v0.2.1 validation, not a frozen public schema) include
    `diagnostic_ineligible`, `empirical_preprocessing_sensitivity`,
    `empirical_context_sensitivity`, `high_absolute_sign_reversal_risk`,
    `high_absolute_zero_probability`, `outside_calibration_domain`, and
    `insufficient_information`. Acceptance: original posterior and significance
-   are byte/schema-equivalent and withholding is reversible and explicit.
+   are scientifically unchanged and withholding is reversible and explicit.
 10. **V021-10 — Documentation and regression release gate.** Document exact
     denominators, coverage/error trade-offs, resource ceilings, calibration
     domain, and limitations. Acceptance: all v0.2.1 completion gates below
@@ -813,6 +845,15 @@ thresholds are reproducible and frozen before evaluation; original results
 remain unchanged; no sign is flipped; withholding reasons are explicit;
 error reduction, coverage loss, over-withholding, uncertainty, and denominators
 are reported; checkpoint recovery and the 10-chain ceiling are validated.
+
+Failure to establish transportable benchmark-calibrated absolute-sign
+probabilities does not block v0.2.1 when the empirical susceptibility framework,
+predefined robustness analyses, conservative reporting/withholding policy,
+truth-isolation validation, locked evaluation, coverage/error reporting, and
+uncertainty/limitation documentation are complete. In that case the calibrated
+layer remains unavailable, `calibration_domain_status` records unavailable or
+insufficient support, no probability is fabricated, and no hard gate depends on
+the failed optional layer.
 
 ### v0.2.2 — Behavior-preserving internal simplification
 
@@ -863,7 +904,6 @@ This section covers heavy or durable automation only, after the relevant scienti
 
 Planned work:
 
-- GitHub Actions package and adapter smoke tests
 - Calibrated Laplace-screening regression tests
 - Representative full-NUTS reference benchmarks
 - Manual publication-scale benchmark workflows
@@ -911,5 +951,4 @@ These are intentionally **outside the current roadmap**.
 - Safe temporary-file and resource handling
 - Reproducible benchmarks
 - Durable benchmark history
-- GitHub Actions
-- Comprehensive documentation
+- Lightweight CI and comprehensive documentation
