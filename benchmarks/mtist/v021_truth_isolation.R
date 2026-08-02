@@ -216,8 +216,12 @@ validate_v021_runtime_context <- function(ctx) {
   if (anyNA(metadata_samples) || any(!nzchar(metadata_samples)) ||
       anyDuplicated(metadata_samples))
     stop("Runtime metadata lacks unique sample identifiers.")
-  if (!identical(metadata_samples, samples))
-    stop("Runtime metadata sample identifiers or ordering disagree with matrix columns.")
+  if (!setequal(metadata_samples, samples))
+    stop("Runtime metadata and matrix sample identifier sets disagree.")
+  sample_index <- match(metadata_samples, samples)
+  if (length(sample_index) != nrow(ctx$meta_df) || anyNA(sample_index) ||
+      anyDuplicated(sample_index))
+    stop("Runtime metadata-to-matrix sample alignment is incomplete or not one-to-one.")
   if (!is.character(ctx$mod_exe_file) || length(ctx$mod_exe_file) != 1L ||
       is.na(ctx$mod_exe_file) || !nzchar(ctx$mod_exe_file))
     stop("Runtime executable identity is invalid.")

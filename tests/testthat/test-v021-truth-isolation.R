@@ -113,11 +113,39 @@ test_that("runtime validation enforces canonical taxa-by-samples orientation", {
 
   reordered_samples <- canonical
   reordered_samples$meta_df <- reordered_samples$meta_df[rev(seq_len(nrow(reordered_samples$meta_df))), ]
-  expect_error(validate_v021_runtime_context(reordered_samples), "ordering")
+  expect_silent(validate_v021_runtime_context(reordered_samples))
+  sample_index <- match(reordered_samples$meta_df$Sample,
+                        colnames(reordered_samples$sm_mat))
+  expect_length(sample_index, nrow(reordered_samples$meta_df))
+  expect_false(anyNA(sample_index))
+  expect_identical(anyDuplicated(sample_index), 0L)
+  expect_identical(colnames(reordered_samples$sm_mat)[sample_index],
+                   as.character(reordered_samples$meta_df$Sample))
+
+  genuine_shape_permuted <- make_v021_runtime_source(10L, 150L)
+  genuine_shape_permuted$meta_df <- genuine_shape_permuted$meta_df[
+    c(121:150, 1:120), , drop = FALSE]
+  expect_silent(validate_v021_runtime_context(genuine_shape_permuted))
+
+  metadata_only <- canonical
+  metadata_only$meta_df$Sample[[1L]] <- "metadata-only-sample"
+  expect_error(validate_v021_runtime_context(metadata_only), "sets disagree")
+
+  matrix_only <- canonical
+  colnames(matrix_only$sm_mat)[[1L]] <- "matrix-only-sample"
+  expect_error(validate_v021_runtime_context(matrix_only), "sets disagree")
 
   duplicate_metadata_sample <- canonical
   duplicate_metadata_sample$meta_df$Sample[[2L]] <- duplicate_metadata_sample$meta_df$Sample[[1L]]
   expect_error(validate_v021_runtime_context(duplicate_metadata_sample), "unique sample")
+
+  missing_metadata_sample <- canonical
+  missing_metadata_sample$meta_df$Sample[[1L]] <- NA_character_
+  expect_error(validate_v021_runtime_context(missing_metadata_sample), "unique sample")
+
+  empty_metadata_sample <- canonical
+  empty_metadata_sample$meta_df$Sample[[1L]] <- ""
+  expect_error(validate_v021_runtime_context(empty_metadata_sample), "unique sample")
 
   duplicate_matrix_sample <- canonical
   colnames(duplicate_matrix_sample$sm_mat)[[2L]] <- colnames(duplicate_matrix_sample$sm_mat)[[1L]]
@@ -126,6 +154,10 @@ test_that("runtime validation enforces canonical taxa-by-samples orientation", {
   missing_matrix_sample <- canonical
   colnames(missing_matrix_sample$sm_mat)[[1L]] <- NA_character_
   expect_error(validate_v021_runtime_context(missing_matrix_sample), "unique sample")
+
+  empty_matrix_sample <- canonical
+  colnames(empty_matrix_sample$sm_mat)[[1L]] <- ""
+  expect_error(validate_v021_runtime_context(empty_matrix_sample), "unique sample")
 
   duplicate_taxon <- canonical
   rownames(duplicate_taxon$sm_mat)[[2L]] <- rownames(duplicate_taxon$sm_mat)[[1L]]
