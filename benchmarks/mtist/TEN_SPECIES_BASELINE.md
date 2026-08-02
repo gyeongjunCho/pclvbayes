@@ -103,7 +103,7 @@ whereas pcLVbayes estimates compositional pair-to-rest effects.
 | posterior mean | 0.523810 | 0.506757 |
 | conservative | 0.523810 | 0.506757 |
 
-All six converged directions passed LFSR <= 0.05. Conditional sign accuracy
+All six converged directions passed LFSR <= 0.05. Absolute-A cross-estimand sign agreement
 was 3/6 (50.0%) at 6/90 coverage. Eligible signs covered 1/33 positive and
 4/41 negative truth edges. Of 74 nonzero truth directions, 69 (93.24%) were
 omitted from significant output; 21/74 (28.38%) were specifically interaction
@@ -148,6 +148,12 @@ do not support broad MTIST recovery claims. Release preparation must preserve
 explicit indeterminate/residual-unstable reporting and document the
 compositional-versus-absolute estimand mismatch. No model, scoring,
 preprocessing, K-fold, or production optimization change was made.
+
+## Scientific estimand interpretation
+
+The benchmark reports two distinct validation targets. Primary implementation consistency is posterior versus the observed canonical transformed-data oracle: **6/6** among the six prespecified directions selected solely by Stage B `diagnostic_class == "converged"`. Secondary comparison is posterior versus absolute MTIST `A[target, source]`: **3/6**, explicitly **absolute-A cross-estimand sign agreement**, not pcLV recovery accuracy. The posterior coefficient is a directed pair-to-rest dynamic coefficient, not generally an absolute direct-gLV coefficient.
+
+The oracle audit found 44/90 instantaneous mechanistic pair-to-rest contrasts changing sign across states and 16/90 exact-zero absolute coefficients inducing nonzero transformed effects. No focused posterior-versus-observed deterministic discrepancy was found, and no focused disagreement was explained by finite-chain instability, observation noise, or finite-interval approximation. For `species_7 -> species_4`, absolute A = 0, the exact finite-interval transformed projection was positive, while canonical smoothing and the posterior were negative. This is a verified preprocessing-sensitivity warning, not evidence that smoothing generally reverses signs.
 
 ## Targeted four-chain confirmation
 

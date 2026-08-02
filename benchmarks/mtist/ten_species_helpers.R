@@ -174,13 +174,15 @@ coverage_sign_metrics <- function(directions) {
     metric("interaction_indeterminate_fraction", sum(directions$diagnostic_class == "interaction_indeterminate"), nrow(directions)),
     metric("diagnostic_failure_fraction", sum(directions$diagnostic_class == "sampler_diagnostics_failed"), nrow(directions)),
     metric("conditional_sign_accuracy", sum(directions$predicted_sign[eligible] == directions$truth_sign[eligible]), sum(eligible)),
+    metric("absolute_A_cross_estimand_accuracy", sum(directions$predicted_sign[eligible] == directions$truth_sign[eligible]), sum(eligible)),
     metric("conditional_false_sign", sum(directions$predicted_sign[eligible] != directions$truth_sign[eligible]), sum(eligible)),
     metric("positive_truth_coverage", sum(eligible & directions$truth_sign > 0), sum(directions$truth_sign > 0)),
     metric("negative_truth_coverage", sum(eligible & directions$truth_sign < 0), sum(directions$truth_sign < 0)),
     metric("significant_count", sum(significant), 1L),
     metric("significant_sign_accuracy", sum(directions$predicted_sign[significant] == directions$truth_sign[significant]), sum(significant)),
     metric("truth_nonzero_omitted", sum(truth_nz & !significant), sum(truth_nz)),
-    metric("truth_zero_false_positive", sum(!truth_nz & significant), sum(!truth_nz)))
+    metric("truth_zero_false_positive", sum(!truth_nz & significant), sum(!truth_nz)),
+    metric("absolute_A_zero_to_nonzero", sum(!truth_nz & significant), sum(!truth_nz)))
 }
 
 direction_asymmetry <- function(directions) {

@@ -36,6 +36,14 @@ This repository is temporarily viewable via GitFront for a conference demo at th
 
 ---
 
+## Scientific estimand and interpretation of `a_ij`
+
+pcLVbayes estimates a **directed pair-to-rest dynamic coefficient**: the posterior coefficient of the lagged source pair-to-rest log-ratio predictor in the target pair-to-rest log-ratio rate model, conditional on the target self predictor and the canonical preprocessing and residual model.
+
+This is a model-level compositional coefficient, not generally the absolute joint-gLV coefficient `A[i,j]`, a context-independent direct ecological interaction, or an absolute-abundance effect size. A positive `a_ij` is a positive fitted pair-to-rest dynamic direction under the declared model and observed state distribution; a negative value is a negative fitted direction. Neither sign alone proves biological facilitation or inhibition.
+
+The absolute coefficient `A[i,j]`, the state-dependent mechanistic contrast `C_ij(x) = A[i,j] - sum_{k in rest} w_k(x) A[k,j]`, the canonical deterministic transformed-data projection, and the Bayesian posterior coefficient `a_ij` are related but not interchangeable. A stable posterior sign validates the fitted transformed coefficient, not an absolute direct-gLV sign. A nonzero transformed coefficient may occur when `A[i,j] = 0`; an indeterminate direction is not a zero interaction. Absolute direct-interaction claims require additional assumptions or absolute-scale information.
+
 ## Core transformation
 
 The Core uses zero-aware pair-to-rest ALR for the `(i, j, rest)` triplet. Predictors are lag-1 ALR values; the unscaled response is ΔALR\_i / Δt.
@@ -109,7 +117,7 @@ The Core uses an irregular-time Ornstein–Uhlenbeck residual process with Δt-a
 
 ## Interpretation
 
-For edges, prioritize **signs** (posterior sign probabilities / LFSR from draws) and **MCMC diagnostics**;  
+For edges, prioritize **posterior-supported pair-to-rest directions** (sign probabilities / LFSR from draws) and **MCMC diagnostics**;
 use **per-subject ELPD** (from K×R) as **supporting evidence**.
 
 ---

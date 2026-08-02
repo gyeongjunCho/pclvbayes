@@ -90,7 +90,7 @@ posterior-versus-observed deterministic sign flips.
 
 ## All-direction summaries
 
-All denominators are 90 directed interactions.
+All denominators are 90 directed interactions. The focused denominator is six prespecified Stage B directions, selected only by `diagnostic_class == "converged"`.
 
 | Comparison with A | Agreement | Positive coverage | Negative coverage |
 |---|---:|---:|---:|
@@ -116,7 +116,7 @@ weight ranges span multiple states for every state-dependent focused direction.
 
 ## Interpretation and release recommendation
 
-Recommendation A is supported for the confirmed directions: posterior signs
+Primary transformed-oracle agreement is 6/6; absolute-A cross-estimand agreement is 3/6. Recommendation A is supported for the confirmed directions: posterior signs
 agree with canonical noiseless and observed deterministic transformed-data
 projections. They should be described as pair-to-rest compositional effects or
 transformed-data projection coefficients, not absolute direct MTIST gLV
