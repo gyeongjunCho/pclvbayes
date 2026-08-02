@@ -328,9 +328,11 @@ with_v021_single_thread_environment <- function(code) {
 
 .v021_snapshot_argv <- function(snapshot) {
   if ("argv" %in% names(snapshot)) {
+    vanished <- "capture_state" %in% names(snapshot) &
+      snapshot$capture_state == "vanished_during_capture"
     valid <- vapply(snapshot$argv, function(x)
       is.character(x) && length(x) > 0L && !anyNA(x) && nzchar(x[[1L]]), logical(1))
-    if (!all(valid)) stop("Malformed decoded process argv.")
+    if (!all(valid | vanished)) stop("Malformed decoded process argv.")
     return(snapshot$argv)
   }
   lapply(snapshot$command, function(x) {
@@ -345,12 +347,32 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   required <- c("timestamp", "pid", "ppid", "command", "executable",
                 "potential_cmdstan", "readable")
   allowed <- append(required, "argv", after = 4L)
+  extended <- c("timestamp", "discovery_time", "pid", "ppid", "start_time",
+                "command", "argv", "executable", "potential_cmdstan", "readable",
+                "capture_state", "disappearance_reason")
   if (!is.data.frame(snapshot) ||
-      !(identical(names(snapshot), required) || identical(names(snapshot), allowed)) ||
+      !(identical(names(snapshot), required) || identical(names(snapshot), allowed) ||
+        identical(names(snapshot), extended)) ||
       anyDuplicated(snapshot$pid) || !root_pid %in% snapshot$pid)
     stop("Invalid process snapshot.")
+  if (identical(names(snapshot), extended)) {
+    states <- c("captured", "vanished_during_capture", "unreadable_live",
+                "ambiguous_identity")
+    if (anyNA(snapshot$capture_state) || !all(snapshot$capture_state %in% states) ||
+        any(snapshot$readable != (snapshot$capture_state == "captured")))
+      stop("Invalid process capture state.")
+    vanished_rows <- snapshot$capture_state == "vanished_during_capture"
+    valid_vanished <- !snapshot$readable & !nzchar(snapshot$command) &
+      !nzchar(snapshot$executable) &
+      vapply(snapshot$argv, function(x) is.character(x) && !length(x), logical(1)) &
+      snapshot$disappearance_reason %in% c("pid_disappeared", "pid_reused")
+    if (any(vanished_rows & !valid_vanished))
+      stop("Invalid vanished process record.")
+  }
   descendants <- .v021_descendant_pids(snapshot, root_pid)
-  out <- snapshot[snapshot$pid %in% descendants, , drop = FALSE]
+  vanished <- if ("capture_state" %in% names(snapshot))
+    snapshot$capture_state == "vanished_during_capture" else rep(FALSE, nrow(snapshot))
+  out <- snapshot[snapshot$pid %in% descendants | vanished, , drop = FALSE]
   out$is_descendant <- out$pid != root_pid
   argv <- .v021_snapshot_argv(out)
   sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
@@ -370,7 +392,10 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   }, logical(1))
   diagnostic_process <- out$is_descendant & canonical_diagnose_executable &
     canonical_diagnose_argv & parent_is_r_worker
+  out_vanished <- if ("capture_state" %in% names(out))
+    out$capture_state == "vanished_during_capture" else rep(FALSE, nrow(out))
   out$classification <- "other_descendant"
+  out$classification[out_vanished] <- "vanished_during_capture"
   out$classification[out$pid == root_pid] <- "parent_r"
   out$classification[out$is_descendant & r_process] <- "outer_worker"
   out$classification[out$is_descendant & pathfinder_process] <- "pathfinder_process"
@@ -423,7 +448,11 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
           c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")), integer(1))
   peak <- max(counts)
   process_peak <- max(process_counts)
-  complete <- all(vapply(snapshots, function(x) all(x$readable), logical(1)))
+  complete <- all(vapply(snapshots, function(x) {
+    vanished <- if ("capture_state" %in% names(x))
+      x$capture_state == "vanished_during_capture" else rep(FALSE, nrow(x))
+    all(x$readable | vanished)
+  }, logical(1)))
   unknown <- any(records$classification == "unknown_potential_cmdstan")
   state <- if (!complete || unknown) "unverified_process_tree" else "verified"
   reason <- if (!complete) "unreadable_descendant_process" else if (unknown)
@@ -446,37 +475,92 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   )
 }
 
+.v021_parse_linux_stat <- function(stat, expected_pid) {
+  if (!is.character(stat) || length(stat) != 1L || is.na(stat) || !nzchar(stat))
+    stop("Linux process stat is unreadable.")
+  matched <- regexec("^([0-9]+) \\((.*)\\) ([^ ]) (.*)$", stat)
+  fields <- regmatches(stat, matched)[[1L]]
+  if (length(fields) != 5L || !identical(as.integer(fields[[2L]]), as.integer(expected_pid)))
+    stop("Linux process stat identity is malformed.")
+  remainder <- strsplit(fields[[5L]], " ", fixed = TRUE)[[1L]]
+  if (length(remainder) < 19L) stop("Linux process stat is incomplete.")
+  ppid <- suppressWarnings(as.integer(remainder[[1L]]))
+  start_time <- remainder[[19L]]
+  if (is.na(ppid) || !nzchar(start_time) || !grepl("^[0-9]+$", start_time))
+    stop("Linux process stat identity is malformed.")
+  list(ppid = ppid, start_time = start_time)
+}
+
+.v021_recheck_linux_process <- function(pid_dir, pid, start_time,
+                                         path_exists, stat_reader) {
+  if (!isTRUE(path_exists(pid_dir)))
+    return(list(state = "vanished_during_capture", reason = "pid_disappeared"))
+  observed <- tryCatch(
+    .v021_parse_linux_stat(stat_reader(file.path(pid_dir, "stat")), pid),
+    error = identity)
+  if (inherits(observed, "error"))
+    return(list(state = "ambiguous_identity", reason = "identity_recheck_unreadable"))
+  if (!identical(observed$start_time, start_time))
+    return(list(state = "vanished_during_capture", reason = "pid_reused"))
+  list(state = "unreadable_live", reason = "live_process_capture_failed")
+}
+
 capture_v021_linux_process_snapshot <- function(
     root_pid = Sys.getpid(), known_model_executables = character(),
-    timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE), proc_root = "/proc") {
+    timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE), proc_root = "/proc",
+    pid_lister = function(root) list.files(root, pattern = "^[0-9]+$", full.names = FALSE),
+    path_exists = dir.exists,
+    stat_reader = function(path) readLines(path, warn = FALSE, n = 1L),
+    cmdline_reader = .v021_read_linux_cmdline,
+    executable_reader = Sys.readlink) {
   if (!dir.exists(proc_root)) stop("Linux /proc process monitoring is unavailable.")
-  entries <- list.files(proc_root, pattern = "^[0-9]+$", full.names = FALSE)
-  rows <- lapply(entries, function(pid_text) {
+  discovery_time <- as.character(timestamp)
+  entries <- pid_lister(proc_root)
+  identities <- lapply(entries, function(pid_text) {
     stat_path <- file.path(proc_root, pid_text, "stat")
-    cmd_path <- file.path(proc_root, pid_text, "cmdline")
-    stat <- tryCatch(readLines(stat_path, warn = FALSE, n = 1L), error = function(e) character())
-    if (!length(stat)) return(NULL)
-    ppid <- suppressWarnings(as.integer(sub("^[0-9]+ \\(.*\\) [A-Z] ([0-9]+).*$", "\\1", stat)))
-    command_raw <- tryCatch(.v021_read_linux_cmdline(cmd_path),
-                            error = function(e) raw())
-    decoded <- tryCatch(.v021_decode_linux_cmdline(command_raw), error = function(e) NULL)
-    readable <- !is.null(decoded)
-    argv <- if (readable) decoded$argv else character()
-    command <- if (readable) decoded$command else ""
-    executable <- tryCatch(Sys.readlink(file.path(proc_root, pid_text, "exe")),
-                           error = function(e) "")
+    stat <- tryCatch(stat_reader(stat_path), error = function(e) character())
+    if (!length(stat)) {
+      if (isTRUE(path_exists(file.path(proc_root, pid_text))))
+        stop("Linux process stat remained unreadable for live PID ", pid_text, ".")
+      return(NULL)
+    }
+    parsed <- tryCatch(.v021_parse_linux_stat(stat, as.integer(pid_text)), error = identity)
+    if (inherits(parsed, "error")) return(NULL)
+    data.frame(pid = as.integer(pid_text), ppid = parsed$ppid,
+               start_time = parsed$start_time, stringsAsFactors = FALSE)
+  })
+  inventory <- do.call(rbind, identities[!vapply(identities, is.null, logical(1))])
+  if (is.null(inventory) || !root_pid %in% inventory$pid)
+    stop("Root process could not be established in /proc.")
+  descendants <- .v021_descendant_pids(inventory, root_pid)
+  inventory <- inventory[inventory$pid %in% descendants, , drop = FALSE]
+  rows <- lapply(seq_len(nrow(inventory)), function(i) {
+    pid <- inventory$pid[[i]]; pid_text <- as.character(pid)
+    pid_dir <- file.path(proc_root, pid_text)
+    cmd_result <- tryCatch({
+      raw <- cmdline_reader(file.path(pid_dir, "cmdline"))
+      .v021_decode_linux_cmdline(raw)
+    }, error = identity)
+    executable <- tryCatch(executable_reader(file.path(pid_dir, "exe")), error = identity)
+    capture_ok <- !inherits(cmd_result, "error") && !inherits(executable, "error") &&
+      is.character(executable) && length(executable) == 1L && nzchar(executable)
+    recheck <- if (capture_ok) list(state = "captured", reason = NA_character_) else
+      .v021_recheck_linux_process(pid_dir, pid, inventory$start_time[[i]],
+                                  path_exists, stat_reader)
+    readable <- identical(recheck$state, "captured")
+    argv <- if (readable) cmd_result$argv else character()
+    command <- if (readable) cmd_result$command else ""
+    executable <- if (readable) executable else ""
     potential <- any(grepl("^method=", argv)) || executable %in% known_model_executables ||
       grepl("cmdstan", command, ignore.case = TRUE)
-    data.frame(timestamp = as.character(timestamp), pid = as.integer(pid_text),
-               ppid = ppid, command = command, argv = I(list(argv)),
+    data.frame(timestamp = as.character(timestamp), discovery_time = discovery_time,
+               pid = pid, ppid = inventory$ppid[[i]],
+               start_time = inventory$start_time[[i]], command = command, argv = I(list(argv)),
                executable = executable, potential_cmdstan = potential,
-               readable = readable, stringsAsFactors = FALSE)
+               readable = readable, capture_state = recheck$state,
+               disappearance_reason = recheck$reason, stringsAsFactors = FALSE)
   })
-  snapshot <- do.call(rbind, rows[!vapply(rows, is.null, logical(1))])
-  if (is.null(snapshot) || !root_pid %in% snapshot$pid)
-    stop("Root process could not be established in /proc.")
-  descendants <- .v021_descendant_pids(snapshot, root_pid)
-  snapshot <- snapshot[snapshot$pid %in% descendants, , drop = FALSE]
+  snapshot <- do.call(rbind, rows)
   rownames(snapshot) <- NULL
   snapshot
 }

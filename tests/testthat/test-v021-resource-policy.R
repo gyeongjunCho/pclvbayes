@@ -55,6 +55,44 @@ raw_cmdline <- function(argv, terminal_nul = TRUE) {
   out
 }
 
+proc_stat <- function(pid, ppid, start_time) paste(
+  pid, "(fixture)", "S", paste(c(ppid, rep("0", 17L), start_time), collapse = " "))
+
+capture_race_fixture <- function(recheck = c("gone", "same", "reused", "ambiguous"),
+                                 malformed = FALSE) {
+  recheck <- match.arg(recheck)
+  root <- tempfile("v021-proc-"); dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  dir.create(file.path(root, "100")); dir.create(file.path(root, "200"))
+  stat_calls <- new.env(parent = emptyenv()); stat_calls$child <- 0L
+  stat_reader <- function(path) {
+    pid <- basename(dirname(path))
+    if (pid == "100") return(proc_stat(100L, 1L, "1000"))
+    stat_calls$child <- stat_calls$child + 1L
+    if (stat_calls$child == 1L) return(proc_stat(200L, 100L, "2000"))
+    if (recheck == "ambiguous") stop("fixture stat unreadable")
+    proc_stat(200L, 100L, if (recheck == "reused") "3000" else "2000")
+  }
+  cmdline_reader <- function(path) {
+    pid <- basename(dirname(path))
+    if (pid == "100") return(raw_cmdline(c("Rscript", "preflight.R")))
+    if (malformed) return(raw_cmdline(c("", "method=sample")))
+    stop("fixture cmdline disappeared")
+  }
+  path_exists <- function(path) {
+    pid <- basename(path)
+    if (pid == "200" && recheck == "gone") return(FALSE)
+    TRUE
+  }
+  capture_v021_linux_process_snapshot(
+    100L, proc_root = root, pid_lister = function(root) c("100", "200"),
+    path_exists = path_exists, stat_reader = stat_reader,
+    cmdline_reader = cmdline_reader,
+    executable_reader = function(path) {
+      if (basename(dirname(path)) == "100") "/usr/bin/R" else "/usr/bin/R"
+    })
+}
+
 snapshot_with_argv <- function(argv, executable = "/models/pclv", pid = 301L,
                                ppid = 100L, potential_cmdstan = TRUE,
                                readable = TRUE) {
@@ -147,6 +185,84 @@ test_that("live Linux procfs cmdline is read independently of pseudo-file size",
   expect_gt(length(decoded$argv), 0L)
   expect_true(nzchar(decoded$argv[[1L]]))
   expect_identical(tail(observed, 1L), as.raw(0L))
+})
+
+test_that("verified procfs disappearance is retained and consumes no slots", {
+  for (scenario in c("gone", "reused")) {
+    snapshot <- capture_race_fixture(scenario)
+    vanished <- snapshot[snapshot$pid == 200L, , drop = FALSE]
+    expect_identical(vanished$capture_state, "vanished_during_capture")
+    expect_identical(vanished$classification, NULL)
+    expect_identical(vanished$disappearance_reason,
+                     if (scenario == "gone") "pid_disappeared" else "pid_reused")
+    expect_identical(vanished$start_time, "2000")
+    expect_identical(vanished$ppid, 100L)
+    expect_true(nzchar(vanished$discovery_time))
+    expect_false(vanished$readable)
+    expect_identical(vanished$argv[[1L]], character())
+    monitor <- monitor_v021_process_snapshots(
+      list(snapshot), build_v021_resource_policy(), 100L)
+    record <- monitor$records[monitor$records$pid == 200L, , drop = FALSE]
+    expect_identical(record$classification, "vanished_during_capture")
+    expect_identical(monitor$monitoring_state, "verified")
+    expect_identical(monitor$observed_peak_active_cmdstan_chains, 0L)
+    expect_identical(monitor$observed_peak_active_cmdstan_processes, 0L)
+  }
+})
+
+test_that("live unreadable and ambiguous procfs identities fail closed", {
+  for (scenario in c("same", "ambiguous")) {
+    snapshot <- capture_race_fixture(scenario)
+    expect_identical(snapshot$capture_state[snapshot$pid == 200L],
+                     if (scenario == "same") "unreadable_live" else "ambiguous_identity")
+    monitor <- monitor_v021_process_snapshots(
+      list(snapshot), build_v021_resource_policy(), 100L)
+    expect_identical(monitor$monitoring_state, "monitoring_error")
+    expect_match(monitor$reason, "Malformed decoded process argv")
+  }
+
+  malformed <- capture_race_fixture("same", malformed = TRUE)
+  monitor <- monitor_v021_process_snapshots(
+    list(malformed), build_v021_resource_policy(), 100L)
+  expect_identical(monitor$monitoring_state, "monitoring_error")
+
+  root <- tempfile("v021-proc-live-stat-"); dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  dir.create(file.path(root, "100")); dir.create(file.path(root, "200"))
+  expect_error(capture_v021_linux_process_snapshot(
+    100L, proc_root = root, pid_lister = function(root) c("100", "200"),
+    path_exists = function(path) TRUE,
+    stat_reader = function(path) {
+      if (basename(dirname(path)) == "100") proc_stat(100L, 1L, "1000")
+      else stop("unreadable")
+    }), "stat remained unreadable")
+})
+
+test_that("attempt6-shaped worker exit is verified and compliant", {
+  base <- make_process_snapshot(8L, indirect = TRUE)
+  base$argv <- I(lapply(base$command,
+                        function(x) strsplit(x, "[[:space:]]+")[[1L]]))
+  snapshot <- data.frame(
+    timestamp = base$timestamp, discovery_time = base$timestamp,
+    pid = base$pid, ppid = base$ppid, start_time = as.character(base$pid * 10L),
+    command = base$command, argv = I(base$argv), executable = base$executable,
+    potential_cmdstan = base$potential_cmdstan, readable = base$readable,
+    capture_state = "captured", disappearance_reason = NA_character_)
+  vanished <- snapshot[snapshot$pid == 200L, , drop = FALSE]
+  vanished$pid <- 201L; vanished$start_time <- "2010"
+  vanished$command <- ""; vanished$argv <- I(list(character()))
+  vanished$executable <- ""; vanished$readable <- FALSE
+  vanished$capture_state <- "vanished_during_capture"
+  vanished$disappearance_reason <- "pid_disappeared"
+  snapshot <- rbind(snapshot, vanished)
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 8L)
+  expect_identical(monitor$records$classification[monitor$records$pid == 201L],
+                   "vanished_during_capture")
 })
 
 test_that("argv classification recognizes known operations and rejects impostors", {
