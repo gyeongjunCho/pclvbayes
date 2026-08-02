@@ -55,7 +55,11 @@ optional \code{pass_bayes_fdr}
 (a.k.a. pseudo-BMA+; Bayesian bootstrap), and \code{stacking}
 (true stacking if available; otherwise omitted)
 \item Diagnostics: \code{rhat}, \code{essb}, \code{esst}, \code{div},
-\code{tdhit}, \code{ebfmi_min}, \code{diag_ok}
+\code{tdhit}, \code{ebfmi_min}, \code{diagnostic_class}, and \code{diag_ok}.
+The cross coefficient is a directed pair-to-rest dynamic coefficient, not
+generally an absolute direct-gLV effect. Interaction and residual identifiability
+are classified separately;
+indeterminate directions remain explicit and are never interpreted as zero.
 }
 }
 \details{
