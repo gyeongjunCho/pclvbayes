@@ -418,7 +418,7 @@
   aii <- draws$a_ii
   list(
     coefficients = list(
-      interaction = c(mean = mean(aij), sd = stats::sd(aij),
+      interaction = c(mean = mean(aij), median = stats::median(aij), sd = stats::sd(aij),
                       q025 = unname(stats::quantile(aij, 0.025)),
                       q975 = unname(stats::quantile(aij, 0.975))),
       self = c(mean = mean(aii), sd = stats::sd(aii),
@@ -426,9 +426,13 @@
                q975 = unname(stats::quantile(aii, 0.975)))
     ),
     sign = {
-      interaction_p_two <- .clip01(2 * pmin(mean(aij > 0), mean(aij < 0)))
+      interaction_positive_probability <- mean(aij > 0)
+      interaction_negative_probability <- mean(aij < 0)
+      interaction_p_two <- .clip01(2 * pmin(interaction_positive_probability, interaction_negative_probability))
       self_p_two <- .clip01(2 * pmin(mean(aii > 0), mean(aii < 0)))
       list(
+        interaction_positive_probability = interaction_positive_probability,
+        interaction_negative_probability = interaction_negative_probability,
         interaction_p_two = interaction_p_two,
         interaction_lfsr = .lfsr_from_two_sided(interaction_p_two),
         self_p_two = self_p_two,
@@ -2340,11 +2344,11 @@
 #' @return A list with posterior summaries, diagnostics, and K-fold payload; or \code{NULL}.
 #' @noRd
 #' @keywords internal
-.run_one <- function(target,
-                     partner,
-                     ctx,
-                     seed_override = NULL,
-                     progress_local = progress) {
+.fit_direction_main_posterior <- function(target,
+                                          partner,
+                                          ctx,
+                                          seed_override = NULL,
+                                          progress_local = progress) {
 
   # ---- 컨텍스트 바인딩(워커 환경 내에서 사용) ----
   meta_df              <- ctx$meta_df
@@ -2642,72 +2646,29 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   nu_summary <- posterior_summary$nu
   rm(d)
 
-  # ----- 6) Repeated K-fold with outer retries ----------------------------------
+  # Predictive evaluation is a separate downstream phase.
+  predictive_context <- list(
+    mod = mod, stan_list = stan_list, pair_in = pair_in,
+    sample_args = final_args_main,
+    seed = if (is.null(final_args_main$seed)) seed_main else final_args_main$seed,
+    silent_sampler = silent_sampler, n_workers_kfold = n_workers_kfold_eff,
+    max_retries = max_retries, min_pairs = min_pairs, K = kfold_K, R = kfold_R,
+    pair_tag = pair_tag, progress = progress_local
+  )
   kfold <- NULL
-
-  # ▼ k-fold 메타 기본값(ELPD 계산 안 할 때도 반환값 보장)
-  kfold_rounds_attempted <- 0L
-  kfold_failed_overall   <- NA
-  kfold_n_ok   <- NA_integer_
-  kfold_n_fail <- NA_integer_
-
-  if (is.null(diagnostic_failure)) {
-    seed_for_kfold <- if (is.null(final_args_main$seed))
-      seed_main
-    else
-      final_args_main$seed
-    if (progress_local != "none")
-      cat(
-        sprintf(
-          "%s pair: k-fold evaluation started (K=%d, R=%d)\n",
-          pair_tag,
-          kfold_K,
-          kfold_R
-        )
-      )
-    sargs_kfold <- final_args_main
-    sargs_kfold$step_size   <- NULL   # 초기 step size 강제 금지 (폴드별 adapt)
-    sargs_kfold$inv_metric  <- NULL   # metric 파일/행렬 강제 금지
-    sargs_kfold$metric_file <- NULL
-
-    kfold <- .repkfold_eval(
-      mod = mod,
-      stan_list_base   = stan_list,
-      sample_args_base = sargs_kfold,
-      pair_in = pair_in,
-      K = kfold_K,
-      R = kfold_R,
-      seed = seed_for_kfold,
-      silent_sampler = silent_sampler,
-      n_workers_kfold = n_workers_kfold_eff,
-      max_retries = max_retries,
-      freeze_retry_hypers = TRUE,
-      min_pairs = min_pairs
-    )
-    if (progress_local != "none")
-      cat(sprintf("%s pair: k-fold evaluation completed\n", pair_tag))
-    kfold_n_ok   <- if (is.null(kfold))
-      NA_integer_
-    else
-      kfold$n_folds_ok
-    kfold_n_fail <- if (is.null(kfold))
-      NA_integer_
-    else
-      kfold$n_folds_fail
-    kfold_outer_rounds_local <- 1L
-  }
-
-
-
 
   # 7) 리턴 ----------------------------------------------------------------------
   list(
     n_pairs = nrow(pair_in),
 
     a_mean  = interaction_summary[["mean"]],
+    a_median = interaction_summary[["median"]],
     a_sd = interaction_summary[["sd"]],
     a_q2.5  = interaction_summary[["q025"]],
     a_q97.5 = interaction_summary[["q975"]],
+    positive_sign_probability = posterior_summary$sign$interaction_positive_probability,
+    negative_sign_probability = posterior_summary$sign$interaction_negative_probability,
+    lfsr = posterior_summary$sign$interaction_lfsr,
     p_sign2 = p_sign2_dir,
 
     aii_mean = self_summary[["mean"]],
@@ -2811,10 +2772,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NULL
       else
         kfold$splits_df),
-    kfold_seed_used     = if (is.null(kfold))
-      NA_integer_
-    else
-      seed_for_kfold,
+    kfold_seed_used     = NA_integer_,
     kfold_K             = if (is.null(kfold))
       NA_integer_
     else
@@ -2855,9 +2813,83 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
                                     is.null(kfold$nu_fold_means))
       NULL
       else
-        kfold$nu_fold_means)
+        kfold$nu_fold_means),
+    .predictive_context = predictive_context
   )
 }
+
+.add_predictive_evaluation <- function(main_result) {
+  if (.is_pclv_failure(main_result)) return(main_result)
+  predictive <- main_result$.predictive_context
+  if (is.null(predictive)) stop("Main-posterior result lacks predictive context.")
+  main_result$.predictive_context <- NULL
+  if (!is.null(main_result$diagnostic_failure[[1L]])) return(main_result)
+
+  if (predictive$progress != "none")
+    cat(sprintf("%s pair: k-fold evaluation started (K=%d, R=%d)\n",
+                predictive$pair_tag, predictive$K, predictive$R))
+  sample_args <- predictive$sample_args
+  sample_args$step_size <- NULL
+  sample_args$inv_metric <- NULL
+  sample_args$metric_file <- NULL
+  kfold <- .repkfold_eval(
+    mod = predictive$mod,
+    stan_list_base = predictive$stan_list,
+    sample_args_base = sample_args,
+    pair_in = predictive$pair_in,
+    K = predictive$K,
+    R = predictive$R,
+    seed = predictive$seed,
+    silent_sampler = predictive$silent_sampler,
+    n_workers_kfold = predictive$n_workers_kfold,
+    max_retries = predictive$max_retries,
+    freeze_retry_hypers = TRUE,
+    min_pairs = predictive$min_pairs
+  )
+  if (predictive$progress != "none")
+    cat(sprintf("%s pair: k-fold evaluation completed\n", predictive$pair_tag))
+
+  main_result$kfold <- kfold
+  main_result$kfold_mean <- if (is.null(kfold)) NA_real_ else kfold$elpd_mean
+  main_result$kfold_method <- if (is.null(kfold)) NA_character_ else kfold$elpd_method
+  main_result$kfold_outer_rounds <- 1L
+  main_result$kfold_failed <- is.null(kfold) ||
+    (!is.null(kfold$n_folds_fail) && kfold$n_folds_fail > 0L)
+  main_result$kfold_n_folds_ok <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_ok
+  main_result$kfold_n_folds_fail <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_fail
+  main_result$kfold_subject <- list(if (is.null(kfold)) NULL else kfold$elpd_subject)
+  main_result$kfold_subject_ppd <- list(if (is.null(kfold)) NULL else kfold$elpd_subject_ppd)
+  main_result$kfold_subject_ids <- list(if (is.null(kfold)) NULL else names(kfold$elpd_subject))
+  main_result$kfold_subject_counts <- list(if (is.null(kfold)) NULL else kfold$subject_test_counts)
+  main_result$kfold_subject_success <- list(if (is.null(kfold)) NULL else kfold$subject_success_counts)
+  main_result$kfold_subject_fail <- list(if (is.null(kfold)) NULL else kfold$subject_failure_counts)
+  main_result$kfold_success_total <- if (is.null(kfold)) NA_integer_ else kfold$total_successful_evaluations
+  main_result$kfold_failures <- list(if (is.null(kfold)) NULL else kfold$failures)
+  main_result$kfold_splits <- list(if (is.null(kfold)) NULL else kfold$splits_df)
+  main_result$kfold_seed_used <- if (is.null(kfold)) NA_integer_ else predictive$seed
+  main_result$kfold_K <- if (is.null(kfold)) NA_integer_ else kfold$K
+  main_result$kfold_R <- if (is.null(kfold)) NA_integer_ else kfold$R
+  main_result$kfold_sd <- if (is.null(kfold)) NA_real_ else stats::sd(kfold$elpd_subject, na.rm = TRUE)
+  main_result$kfold_se <- if (is.null(kfold)) NA_real_ else {
+    n <- sum(is.finite(kfold$elpd_subject))
+    stats::sd(kfold$elpd_subject, na.rm = TRUE) / sqrt(pmax(n, 1L))
+  }
+  main_result$kfold_n_subjects <- if (is.null(kfold)) NA_integer_ else sum(is.finite(kfold$elpd_subject))
+  main_result$kfold_retry_total <- if (is.null(kfold) || is.null(kfold$retry_total)) NA_integer_ else kfold$retry_total
+  main_result$kfold_retry_mean <- if (is.null(kfold) || is.null(kfold$retry_mean)) NA_real_ else kfold$retry_mean
+  main_result$kfold_nu_fold_means <- list(if (is.null(kfold) || is.null(kfold$nu_fold_means)) NULL else kfold$nu_fold_means)
+  main_result
+}
+
+.run_one <- function(target, partner, ctx, seed_override = NULL,
+                     progress_local = progress) {
+  main_result <- .fit_direction_main_posterior(
+    target = target, partner = partner, ctx = ctx,
+    seed_override = seed_override, progress_local = progress_local
+  )
+  .add_predictive_evaluation(main_result)
+}
+
 
 #' Expand pairwise results into directed edge table
 #'
