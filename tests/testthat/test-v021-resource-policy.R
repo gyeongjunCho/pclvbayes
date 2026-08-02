@@ -95,6 +95,45 @@ test_that("Linux cmdline decoding fails closed for malformed or unreadable bytes
                "executable")
 })
 
+test_that("bounded cmdline reads ignore reported size and reject unsafe input", {
+  path <- tempfile("v021-cmdline-")
+  on.exit(unlink(path), add = TRUE)
+  bytes <- raw_cmdline(c("/models/pclv", "method=sample", "argument with spaces"))
+  con <- file(path, open = "wb")
+  writeBin(bytes, con)
+  close(con)
+  observed <- .v021_read_linux_cmdline(path)
+  expect_identical(observed, bytes)
+  expect_identical(.v021_decode_linux_cmdline(observed)$argv,
+                   c("/models/pclv", "method=sample", "argument with spaces"))
+  expect_identical(.v021_linux_cmdline_max_bytes, 1048576L)
+
+  empty <- tempfile("v021-empty-cmdline-")
+  on.exit(unlink(empty), add = TRUE)
+  file.create(empty)
+  expect_error(.v021_read_linux_cmdline(empty), "empty")
+  expect_error(.v021_read_linux_cmdline(paste0(path, "-missing")), "unreadable")
+  expect_error(.v021_read_linux_cmdline(path, max_bytes = 8L), "truncated")
+
+  unterminated <- tempfile("v021-unterminated-cmdline-")
+  on.exit(unlink(unterminated), add = TRUE)
+  con <- file(unterminated, open = "wb")
+  writeBin(raw_cmdline(c("/models/pclv", "method=sample"), terminal_nul = FALSE), con)
+  close(con)
+  expect_error(.v021_decode_linux_cmdline(.v021_read_linux_cmdline(unterminated)), "NUL")
+})
+
+test_that("live Linux procfs cmdline is read independently of pseudo-file size", {
+  skip_if_not(Sys.info()[["sysname"]] == "Linux")
+  path <- "/proc/self/cmdline"
+  observed <- .v021_read_linux_cmdline(path)
+  decoded <- .v021_decode_linux_cmdline(observed)
+  expect_gt(length(observed), 0L)
+  expect_gt(length(decoded$argv), 0L)
+  expect_true(nzchar(decoded$argv[[1L]]))
+  expect_identical(tail(observed, 1L), as.raw(0L))
+})
+
 test_that("argv classification recognizes known operations and rejects impostors", {
   sample <- snapshot_with_argv(c("/models/pclv", "method=sample", "id=1"))
   classified <- classify_v021_process_snapshot(sample, 100L, "/models/pclv")

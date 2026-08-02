@@ -17,6 +17,8 @@ v021_operation_types <- c(
   "main_fit", "retry_fit", "pathfinder", "kfold_fit", "confirmation_fit"
 )
 
+.v021_linux_cmdline_max_bytes <- 1024L * 1024L
+
 .v021_resource_int <- function(x, name, positive = TRUE) {
   if (!is.numeric(x) || length(x) != 1L || is.na(x) || !is.finite(x) ||
       x != as.integer(x) || (positive && x < 1L) || (!positive && x < 0L))
@@ -294,6 +296,36 @@ with_v021_single_thread_environment <- function(code) {
   list(argv = argv, command = paste(argv, collapse = " "))
 }
 
+.v021_read_linux_cmdline <- function(path,
+                                      max_bytes = .v021_linux_cmdline_max_bytes) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path))
+    stop("Linux cmdline path must be one non-empty string.")
+  if (!is.numeric(max_bytes) || length(max_bytes) != 1L || is.na(max_bytes) ||
+      !is.finite(max_bytes) || max_bytes < 1L || max_bytes != as.integer(max_bytes))
+    stop("Linux cmdline maximum must be a positive integer.")
+  connection <- tryCatch(suppressWarnings(file(path, open = "rb")), error = identity)
+  if (inherits(connection, "error"))
+    stop("Linux cmdline is unreadable: ", conditionMessage(connection))
+  on.exit(close(connection), add = TRUE)
+  chunks <- list()
+  total <- 0L
+  repeat {
+    remaining <- as.integer(max_bytes) - total
+    request <- min(4096L, remaining + 1L)
+    chunk <- tryCatch(readBin(connection, what = "raw", n = request), error = identity)
+    if (inherits(chunk, "error"))
+      stop("Linux cmdline is unreadable: ", conditionMessage(chunk))
+    if (!length(chunk)) break
+    total <- total + length(chunk)
+    if (total > max_bytes)
+      stop("Linux cmdline exceeded the bounded read limit and may be truncated.")
+    chunks[[length(chunks) + 1L]] <- chunk
+  }
+  command_raw <- if (length(chunks)) do.call(c, chunks) else raw()
+  if (!length(command_raw)) stop("Linux cmdline is empty.")
+  command_raw
+}
+
 .v021_snapshot_argv <- function(snapshot) {
   if ("argv" %in% names(snapshot)) {
     valid <- vapply(snapshot$argv, function(x)
@@ -412,7 +444,7 @@ capture_v021_linux_process_snapshot <- function(
     stat <- tryCatch(readLines(stat_path, warn = FALSE, n = 1L), error = function(e) character())
     if (!length(stat)) return(NULL)
     ppid <- suppressWarnings(as.integer(sub("^[0-9]+ \\(.*\\) [A-Z] ([0-9]+).*$", "\\1", stat)))
-    command_raw <- tryCatch(readBin(cmd_path, "raw", n = file.info(cmd_path)$size),
+    command_raw <- tryCatch(.v021_read_linux_cmdline(cmd_path),
                             error = function(e) raw())
     decoded <- tryCatch(.v021_decode_linux_cmdline(command_raw), error = function(e) NULL)
     readable <- !is.null(decoded)
@@ -432,7 +464,6 @@ capture_v021_linux_process_snapshot <- function(
     stop("Root process could not be established in /proc.")
   descendants <- .v021_descendant_pids(snapshot, root_pid)
   snapshot <- snapshot[snapshot$pid %in% descendants, , drop = FALSE]
-  snapshot$readable[snapshot$pid == root_pid & !snapshot$readable] <- TRUE
   rownames(snapshot) <- NULL
   snapshot
 }
