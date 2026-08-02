@@ -114,6 +114,58 @@ remain unchanged under subject-wise and leave-one-subject-out checks, although
 species_2 -> species_9 has some subject-specific sign instability. Contrast
 weight ranges span multiple states for every state-dependent focused direction.
 
+
+## Empirical sign-reversal susceptibility
+
+The benchmark-side descriptive score is calculated from the retained canonical
+posterior sign and predefined deterministic comparisons. It is not a posterior
+probability and is not `absolute_sign_reversal_risk`.
+
+For axis `g`,
+
+    r_g = (n_opposite,g + 0.5 * n_ambiguous,g) /
+          (n_same,g + n_opposite,g + n_ambiguous,g)
+
+Unavailable comparisons are excluded. The direction score is the equal-axis
+mean of valid `r_g` values; the report also retains the maximum axis value,
+axis name, and valid-axis/comparison counts. Near-zero, rank-deficient, and
+otherwise unsupported comparisons are `ambiguous`; missing analyses are
+`unavailable`. No axis weights or thresholds are used.
+
+The completed audit had these available axes: preprocessing (the retained
+unsmoothed finite-interval projection compared with the canonical posterior),
+per-subject projection, and leave-one-subject-out projection. No prospectively
+defined time-window or denominator variant was retained, so those axes are
+reported as unavailable rather than invented.
+
+| Source -> target | Preprocessing r_g | Subject r_g | LOSO r_g | Overall | Worst axis | Valid axes | Valid comparisons |
+|---|---:|---:|---:|---:|---|---:|---:|
+| species_1 -> species_7 | 0.00 | 0.00 | 0.00 | 0.0000 | preprocessing;subject;LOSO | 3 | 21 |
+| species_2 -> species_9 | 0.00 | 0.40 | 0.00 | 0.1333 | subject | 3 | 21 |
+| species_3 -> species_7 | 0.00 | 0.10 | 0.00 | 0.0333 | subject | 3 | 21 |
+| species_7 -> species_4 | 1.00 | 0.10 | 0.00 | 0.0333 | preprocessing | 3 | 21 |
+| species_8 -> species_4 | 0.00 | 0.00 | 0.00 | 0.0000 | preprocessing;subject;LOSO | 3 | 21 |
+| species_5 -> species_7 | 0.00 | 0.00 | 0.00 | 0.0000 | preprocessing;subject;LOSO | 3 | 21 |
+
+The focused denominator is six retained Stage B-converged directions. All six
+had valid canonical signs and scores. The absolute-A annotation remains
+separate: three of six posterior signs agree with absolute `A`; it does not
+enter the susceptibility calculation. `species_7 -> species_4` derives
+preprocessing `r_g = 1` because the finite-interval projection is positive and
+the canonical posterior sign is negative, while `species_8 -> species_4` is
+stable across every available deterministic comparison.
+
+Across the eligible set, the score distribution is: 0.0000 for 3/6, 0.0333
+for 2/6, and 0.1333 for 1/6. No eligible direction lacked sufficient
+information; the 84 other directed interactions lack retained canonical
+four-chain posterior signs and therefore receive no fabricated score. This is
+an empirical interpretation warning only. It does not infer absolute `A`, does
+not define low/medium/high thresholds, and is not a calibrated hard gate.
+
+Machine-readable comparison, axis, and direction outputs are written by
+`Rscript benchmarks/mtist/run_oracle_estimand_audit.R` to the ignored
+`results/oracle_estimand_audit/susceptibility_*.tsv` files.
+
 ## Interpretation and release recommendation
 
 Primary transformed-oracle agreement is 6/6; absolute-A cross-estimand agreement is 3/6. Recommendation A is supported for the confirmed directions: posterior signs

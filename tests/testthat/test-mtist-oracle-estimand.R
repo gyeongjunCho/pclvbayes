@@ -61,3 +61,37 @@ test_that("oracle values are not converted to zero", {
   expect_equal(value, A["i", "j"])
   expect_false(isTRUE(value == 0))
 })
+
+
+test_that("empirical susceptibility uses the specified axis formula", {
+  out <- oracle_empirical_susceptibility(
+    canonical_sign = 1L,
+    axis_classifications = list(a = c("same", "opposite", "ambiguous", "unavailable"),
+                                b = c("same", "same")))
+  expect_equal(out$axis$r_g[out$axis$axis == "a"], 0.5)
+  expect_equal(out$axis$n_valid_comparisons[out$axis$axis == "a"], 3L)
+  expect_equal(out$direction$empirical_sign_reversal_susceptibility, (0.5 + 0) / 2)
+  expect_equal(out$direction$number_of_valid_comparisons, 5L)
+})
+
+test_that("missing and ambiguous comparisons are handled structurally", {
+  out <- oracle_empirical_susceptibility(
+    canonical_sign = 1L,
+    axis_classifications = list(empty = "unavailable", amb = c("ambiguous", "unavailable")))
+  expect_true(is.na(out$axis$r_g[out$axis$axis == "empty"]))
+  expect_equal(out$axis$r_g[out$axis$axis == "amb"], 0.5)
+  expect_equal(out$direction$number_of_valid_axes, 1L)
+  missing <- oracle_empirical_susceptibility(NA_integer_, axis_classifications = list(a = "same"))
+  expect_identical(missing$direction$score_status, "missing")
+  expect_identical(missing$direction$score_reason, "missing_canonical_posterior_sign")
+})
+
+test_that("worst-axis ties are deterministic and absolute A is external", {
+  out <- oracle_empirical_susceptibility(
+    canonical_sign = -1L,
+    axis_classifications = list(preprocessing = c("opposite"), subject = c("opposite"),
+                                denominator = c("unavailable")))
+  expect_equal(out$direction$worst_axis, "preprocessing;subject")
+  expect_equal(out$direction$worst_axis_sign_reversal_susceptibility, 1)
+  expect_equal(out$direction$number_of_valid_axes, 2L)
+})

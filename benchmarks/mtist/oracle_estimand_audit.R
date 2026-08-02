@@ -153,3 +153,87 @@ oracle_sign_text <- function(x) {
   value <- oracle_sign(x)
   if (is.na(value)) "NA" else as.character(value)
 }
+
+
+oracle_classify_sign_comparison <- function(comparison_sign, canonical_sign,
+                                            tolerance = 1e-10,
+                                            identifiable = TRUE,
+                                            attempted = TRUE) {
+  if (!attempted) return("unavailable")
+  if (!is.finite(canonical_sign) || canonical_sign == 0L) return("unavailable")
+  if (!isTRUE(identifiable) || !is.finite(comparison_sign)) return("ambiguous")
+  value <- oracle_sign(comparison_sign, tolerance)
+  if (is.na(value) || value == 0L) return("ambiguous")
+  if (value == canonical_sign) "same" else "opposite"
+}
+
+oracle_axis_summary <- function(axis, classifications, notes = NA_character_) {
+  classifications <- as.character(classifications)
+  n <- table(factor(classifications,
+                    levels = c("same", "opposite", "ambiguous", "unavailable")))
+  valid <- unname(n[["same"]] + n[["opposite"]] + n[["ambiguous"]])
+  risk <- if (valid > 0L)
+    unname((n[["opposite"]] + 0.5 * n[["ambiguous"]]) / valid) else NA_real_
+  data.frame(axis = axis, n_same = unname(n[["same"]]),
+             n_opposite = unname(n[["opposite"]]),
+             n_ambiguous = unname(n[["ambiguous"]]),
+             n_unavailable = unname(n[["unavailable"]]),
+             n_valid_comparisons = valid, r_g = risk,
+             notes = notes, stringsAsFactors = FALSE)
+}
+
+oracle_empirical_susceptibility <- function(canonical_sign,
+                                             canonical_sign_probability = NA_real_,
+                                             canonical_lfsr = NA_real_,
+                                             diagnostic_class = NA_character_,
+                                             axis_classifications = list(),
+                                             axis_notes = list(),
+                                             tolerance = 1e-10) {
+  valid_sign <- is.finite(canonical_sign) && canonical_sign %in% c(-1, 1)
+  if (!valid_sign) return(list(
+    axis = data.frame(), direction = data.frame(
+      canonical_posterior_sign = NA_integer_,
+      canonical_posterior_sign_probability = canonical_sign_probability,
+      canonical_lfsr = canonical_lfsr, diagnostic_class = diagnostic_class,
+      empirical_sign_reversal_susceptibility = NA_real_,
+      worst_axis_sign_reversal_susceptibility = NA_real_, worst_axis = NA_character_,
+      number_of_valid_axes = 0L, number_of_valid_comparisons = 0L,
+      score_status = "missing", score_reason = "missing_canonical_posterior_sign",
+      stringsAsFactors = FALSE)))
+  axes <- names(axis_classifications)
+  if (!length(axes)) return(list(
+    axis = data.frame(), direction = data.frame(
+      canonical_posterior_sign = canonical_sign,
+      canonical_posterior_sign_probability = canonical_sign_probability,
+      canonical_lfsr = canonical_lfsr, diagnostic_class = diagnostic_class,
+      empirical_sign_reversal_susceptibility = NA_real_,
+      worst_axis_sign_reversal_susceptibility = NA_real_, worst_axis = NA_character_,
+      number_of_valid_axes = 0L, number_of_valid_comparisons = 0L,
+      score_status = "missing", score_reason = "no_robustness_axes_available",
+      stringsAsFactors = FALSE)))
+  axis <- do.call(rbind, lapply(axes, function(a) {
+    note <- axis_notes[[a]]
+    if (is.null(note)) note <- NA_character_
+    oracle_axis_summary(a, axis_classifications[[a]], note)
+  }))
+  valid <- is.finite(axis$r_g)
+  if (!any(valid)) status <- "missing" else status <- "available"
+  if (!any(valid)) score <- worst <- NA_real_ else {
+    score <- mean(axis$r_g[valid])
+    worst <- max(axis$r_g[valid])
+  }
+  worst_axes <- if (any(valid)) axis$axis[valid & axis$r_g == worst] else character()
+  direction <- data.frame(
+    canonical_posterior_sign = canonical_sign,
+    canonical_posterior_sign_probability = canonical_sign_probability,
+    canonical_lfsr = canonical_lfsr, diagnostic_class = diagnostic_class,
+    empirical_sign_reversal_susceptibility = score,
+    worst_axis_sign_reversal_susceptibility = worst,
+    worst_axis = if (length(worst_axes)) paste(worst_axes, collapse = ";") else NA_character_,
+    number_of_valid_axes = sum(valid),
+    number_of_valid_comparisons = sum(axis$n_valid_comparisons[valid]),
+    score_status = status,
+    score_reason = if (status == "available") NA_character_ else "no_valid_axis",
+    stringsAsFactors = FALSE)
+  list(axis = axis, direction = direction)
+}

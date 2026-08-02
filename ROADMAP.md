@@ -204,19 +204,19 @@ uses benchmark-side comparisons where available; expanded subject, LOSO,
 time-window, and denominator components remain v0.2.1 validation work unless
 already implemented and validated.
 
-- [ ] Define `empirical_sign_reversal_susceptibility` on a 0–1 scale from
+- [x] Define `empirical_sign_reversal_susceptibility` on a 0–1 scale from
   predefined deterministic robustness comparisons.
-- [ ] Report component-level `r_g` values, `worst_axis_sign_reversal_susceptibility`,
+- [x] Report component-level `r_g` values, `worst_axis_sign_reversal_susceptibility`,
   `worst_axis`, `number_of_valid_axes`, and `number_of_valid_comparisons`.
-- [ ] Keep posterior sign probability, PSP/LFSR, sampler diagnostics, and
+- [x] Keep posterior sign probability, PSP/LFSR, sampler diagnostics, and
   empirical sign-reversal susceptibility as separate outputs and concepts.
-- [ ] Preserve missing, rank-deficient, and indeterminate comparisons rather
+- [x] Preserve missing, rank-deficient, and indeterminate comparisons rather
   than treating them as agreement or zero risk.
-- [ ] Use only prospectively defined robustness analyses; do not search for
+- [x] Use only prospectively defined robustness analyses; do not search for
   transformations that best match absolute truth.
-- [ ] Treat the v0.2 score as an interpretation warning and descriptive measure,
+- [x] Treat the v0.2 score as an interpretation warning and descriptive measure,
   not as a calibrated hard exclusion threshold.
-- [ ] Do not call the score `absolute_sign_reversal_risk` or interpret it as a
+- [x] Do not call the score `absolute_sign_reversal_risk` or interpret it as a
   universal ecological probability.
 
 #### Conservative output and release gate
@@ -306,7 +306,7 @@ Also define
 `absolute_zero_probability` is not an opposite-sign event, while
 `direct_effect_misinterpretation_risk` includes both opposite-sign and
 absolute-zero possibilities. These are benchmark-calibrated probabilities,
-distinct from the uncalibrated v0.2 empirical susceptibility score.
+distinct from the uncalibrated v0.2 empirical susceptibility score. Multi-dataset MTIST calibration belongs to v0.2.1, not v0.3.
 
 Candidate calibration inputs include empirical susceptibility components and
 worst-axis values, posterior sign probability and LFSR, diagnostic and
@@ -320,6 +320,13 @@ outcomes or truth-known annotations, not production inputs.
 - [ ] Construct a multi-dataset truth-known calibration corpus spanning
   interaction matrices, initial states, noise levels, sample sizes, time-point
   counts, interval structures, and community-dominance regimes.
+- [ ] Require interaction-matrix-level train/test separation and held-out
+  simulation regimes.
+- [ ] Evaluate multiclass log loss, classwise Brier scores, calibration error,
+  opposite-sign discrimination, and comparisons with class-frequency and
+  simple-information baselines.
+- [ ] Report uncertainty intervals and the calibration domain for every
+  estimated probability.
 - [ ] Estimate same-sign, opposite-sign, and absolute-zero probabilities as
   separate outcomes, with uncertainty intervals.
 - [ ] Report the simulation and data domain over which calibration is supported.
@@ -374,6 +381,8 @@ Diagnostic classification must also consider:
       - uncertainty interval
       - calibration-domain status
 
+The benchmark-calibrated third level is optional and may remain unavailable when held-out MTIST validation does not demonstrate sufficient predictive information.
+
 High posterior sign probability means the fitted pair-to-rest coefficient has a
 stable posterior sign. High empirical susceptibility means that sign is
 sensitive to predefined analysis perturbations. High absolute-sign reversal
@@ -401,7 +410,7 @@ maximize MTIST truth agreement.
 
 ## v0.3 — Time infrastructure, OU identifiability, and acceleration
 
-Core v0.3 work is the release-bound scope below. Exploratory research tracks are not all mandatory for v0.3 release and require separate promotion decisions.
+Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all mandatory for v0.3 release and require separate promotion decisions. External absolute-scale confirmation is not mandatory for v0.3 release.
 
 ### Core v0.3 work
 
@@ -457,9 +466,10 @@ Validation requires:
 No new residual parameterization should replace the canonical model until it
 performs consistently across real and synthetic cases.
 
-A successful v0.3 change should reduce the number of residual-indeterminate
-directions without destabilizing directions whose interaction coefficient and
-PSP/LFSR are already identified.
+A successful v0.3 change should reduce smoothing-, interval-, denominator-,
+omitted-community-, and state-dependence distortions without destabilizing
+directions whose pair-to-rest coefficient and PSP/LFSR are already identified.
+It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 
 ### Latent and integrated interval dynamics
 
@@ -488,15 +498,33 @@ PSP/LFSR are already identified.
 - [ ] Evaluate low-dimensional rest-composition covariates (ILR/principal balances, latent community factors or observed total-load covariates) with shrinkage and collinearity monitoring; do not call the result an unconditional direct effect.
 - [ ] Predefine defensible denominator/balance variants, measure denominator-sensitive directions, and never select a denominator by truth agreement. Preserve the canonical denominator until a new contract is formally adopted.
 
-### Optional absolute-scale information and joint confirmation
+### External scale-aware confirmation workflow
 
-- [ ] Support uncertain optional total-load or absolute-abundance information from qPCR, spike-ins, flow cytometry, biomass, or calibrated sequencing.
-- [ ] Separate measured from prior-imputed scale and retain pair-to-rest inference when scale is unavailable; absolute direct-gLV claims require an explicitly scale-aware model with sufficient information.
-- [ ] Preserve pcLV as scalable screening and add optional sparse joint confirmation for selected candidates, keeping estimands separate and never converting omitted candidates to confirmed zeros.
+- [ ] Document a handoff workflow from pcLVbayes pair-to-rest screening to an
+  external absolute-scale joint dynamical model when sequencing counts and
+  total-load qPCR, spike-in, flow-cytometry, biomass, or equivalent scale
+  information are available.
+- [ ] Use MDSINE2 as an example of an external scale-aware Bayesian microbial
+  dynamics framework, without claiming guaranteed one-to-one API integration
+  or edge-level confirmation.
+- [ ] Keep pcLVbayes and external-model estimands, coefficient signs,
+  uncertainty summaries, and identifiability claims explicitly separate.
+- [ ] Evaluate whether posterior-supported pcLVbayes directions can be used as
+  a candidate-screening or prioritization layer for external confirmation.
+- [ ] Do not treat directions omitted by pcLVbayes screening as confirmed zero
+  interactions.
+- [ ] Do not require an external model to preserve the exact pcLV pairwise
+  parameterization or coefficient meaning.
+- [ ] Document the data requirements and interpretation boundary for the
+  external confirmation workflow.
+- [ ] Do not implement a duplicate absolute-scale joint-gLV engine inside
+  pcLVbayes.
 
 ### Core validation and calibrated screening
 
 ### Multi-dataset oracle validation
+
+This work may use the v0.2.1 calibrated risk framework to evaluate model improvements; it does not own the initial MTIST calibration task.
 
 - [ ] Extend oracle audits across matrices, initial states, noise levels, sampling intervals, series lengths, dominance, extinction/entry scenarios, and denominators.
 - [ ] Report transformed-oracle agreement, absolute-A agreement, state-dependent contrasts, smoothing/interval/noise sign changes, denominator sensitivity, posterior-oracle disagreement, and indeterminate rates with explicit denominators.
