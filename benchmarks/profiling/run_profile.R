@@ -98,10 +98,8 @@ run_fit <- function(label, outer_workers) {
     study$physeq, "subject", "time", taxa_vec = study$taxa,
     chains = config$chains, iter_warmup = config$iter_warmup,
     iter_sampling = config$iter_sampling, seed = config$seed,
-    quiet = TRUE, progress = "none", silent_sampler = TRUE,
-    n_workers_outer = outer_workers, n_workers_kfold = config$kfold_workers,
-    kfold_K = config$kfold_K, kfold_R = config$kfold_R,
-    max_retries = config$max_retries, use_pathfinder_init = config$use_pathfinder_init
+      n_workers_outer = outer_workers, n_workers_kfold = config$kfold_workers,
+    kfold_K = config$kfold_K, kfold_R = config$kfold_R
   ), scope = "includes preprocessing, CmdStan startup/sampling, K-fold, and assembly"),
     warning = function(w) captured_warnings <<- c(captured_warnings, conditionMessage(w)))
   Rprof(NULL)

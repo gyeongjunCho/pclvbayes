@@ -638,3 +638,25 @@ test_that("canonical projection scoring is Kalman OU with draw-specific Student-
   expect_identical(names(formals(pclvbayes:::.proj_loglik_subject)),
                    c("draws_df", "pair_in"))
 })
+
+test_that("v0.2 public fit API is frozen and prototype is absent", {
+  retained <- c(
+    "physeq", "subject_col", "time_col", "taxa_vec", "nz_partner_min_frac",
+    "min_unique_times", "min_pairs", "chains", "iter_warmup", "iter_sampling",
+    "seed", "init", "adapt_delta", "max_treedepth", "progress",
+    "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R", "kfold_seed"
+  )
+  expect_identical(names(formals(pclvbayes::fit_pclv_bayes)), retained)
+  removed <- c("zero_mode_alr", "minpos_alpha", "minpos_base", "smooth_scale",
+               "alr_spline_df", "alr_spline_spar", "alr_spline_cv", "eps",
+               "eps_fixed", "lib_eps_c", "rest_floor_frac", "metric", "quiet",
+               "progress_every", "silent_sampler", "max_retries", "use_pathfinder_init",
+               "pf_num_paths", "pf_draws", "pf_history_size", "pf_max_lbfgs_iters",
+               "pf_psis_resample")
+  expect_length(intersect(removed, names(formals(pclvbayes::fit_pclv_bayes))), 0L)
+  expect_false("fit_pclv_bayes2" %in% getNamespaceExports("pclvbayes"))
+  expect_false(file.exists(testthat::test_path("../../man/fit_pclv_bayes2.Rd")))
+  expect_error(do.call(pclvbayes::fit_pclv_bayes,
+                       c(list(physeq = list(), subject_col = "subject", time_col = "time"),
+                         list(eps = 1e-6))), "unused argument")
+})

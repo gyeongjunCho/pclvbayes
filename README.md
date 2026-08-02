@@ -64,7 +64,7 @@ The Core estimates one shared Student-t degrees-of-freedom parameter per directe
 
 ## Sampling robustness
 
-A diagnostics-aware retry policy (up to `max_retries`) monitors divergences, tree depth, and E-BFMI without changing the Student-t model or its `nu` prior. Diagnostics are returned for downstream filtering.
+A diagnostics-aware retry policy monitors divergences, tree depth, and E-BFMI without changing the Student-t model or its `nu` prior. Retry and Pathfinder settings follow the private canonical v0.2 policy; diagnostics are returned for downstream filtering.
 
 ---
 

@@ -16,6 +16,13 @@ core_controls <- function() {
     out[[nm]] <- eval(f[[nm]], envir = env)
     assign(nm, out[[nm]], envir = env)
   }
+  out[c("eps", "zero_mode_alr", "minpos_alpha", "minpos_base", "eps_fixed",
+        "lib_eps_c", "rest_floor_frac", "smooth_scale", "alr_spline_df",
+        "alr_spline_spar", "alr_spline_cv", "metric", "quiet", "progress_every",
+        "silent_sampler", "max_retries", "use_pathfinder_init", "pf_num_paths",
+        "pf_draws", "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample")] <-
+    list(1e-6, "minpos_time", 0.5, "ij", 1e-6, 0.65, 1, "logra", NULL, NULL,
+         TRUE, "diag_e", FALSE, 1L, FALSE, 3L, TRUE, 8L, 1000L, 50L, 200L, TRUE)
   out
 }
 

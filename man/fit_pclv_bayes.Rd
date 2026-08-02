@@ -2,7 +2,7 @@
 % Please edit documentation in R/fit_pclv_bayes.R
 \name{fit_pclv_bayes}
 \alias{fit_pclv_bayes}
-\title{Pairwise Bayesian \strong{pcLV} Core fitting with irregular-time OU residuals}
+\title{Bayesian directed pair-to-rest fitting with irregular-time OU residuals}
 \usage{
 fit_pclv_bayes(
   physeq,
@@ -10,19 +10,8 @@ fit_pclv_bayes(
   time_col,
   taxa_vec = NULL,
   nz_partner_min_frac = 0.15,
-  eps = 1e-06,
   min_unique_times = 3,
   min_pairs = 4,
-  zero_mode_alr = c("minpos_time", "minpos_subject", "lib", "fixed"),
-  minpos_alpha = 0.5,
-  minpos_base = c("ij", "triplet"),
-  eps_fixed = 1e-06,
-  lib_eps_c = 0.65,
-  rest_floor_frac = 1,
-  smooth_scale = c("logra", "alr"),
-  alr_spline_df = NULL,
-  alr_spline_spar = NULL,
-  alr_spline_cv = TRUE,
   chains = 4,
   iter_warmup = 2000,
   iter_sampling = 2000,
@@ -30,23 +19,12 @@ fit_pclv_bayes(
   init = 0.2,
   adapt_delta = 0.98,
   max_treedepth = 14,
-  metric = "diag_e",
-  quiet = FALSE,
   progress = c("bar", "verbose", "none"),
-  progress_every = 1,
-  silent_sampler = FALSE,
   n_workers_outer = 1L,
+  n_workers_kfold = 1L,
   kfold_K = 5,
   kfold_R = 3,
-  kfold_seed = seed,
-  n_workers_kfold = 1L,
-  max_retries = 3,
-  use_pathfinder_init = TRUE,
-  pf_num_paths = 8,
-  pf_draws = 1000,
-  pf_history_size = 50,
-  pf_max_lbfgs_iters = 200,
-  pf_psis_resample = TRUE
+  kfold_seed = seed
 )
 }
 \arguments{
@@ -61,65 +39,23 @@ fit_pclv_bayes(
 \item{nz_partner_min_frac}{Drop subjects whose partner predictor is non-zero in fewer than this
 fraction of rows; default \code{0.15}.}
 
-\item{eps}{Small constant for legacy log-RA smoothing at the builder stage; default \code{1e-6}.}
+\item{min_unique_times}{Minimum unique times per subject; default \code{3}.}
 
-\item{min_pairs}{Minimum number of valid time-adjacent pairs per direction; default \code{4}.}
-
-\item{zero_mode_alr}{Mode for zero-aware replacement in the ALR triplet; one of
-\code{"minpos_time"}, \code{"minpos_subject"}, \code{"lib"}, \code{"fixed"}.}
-
-\item{minpos_alpha}{Multiplier for minimal positive pseudo-count when applicable; default \code{0.5}.}
-
-\item{minpos_base}{Basis for minimal positive detection, \code{"ij"} or \code{"triplet"}.}
-
-\item{eps_fixed}{Fixed pseudo-count floor; default \code{1e-6}.}
-
-\item{lib_eps_c}{Library-size scaled pseudo-count constant; default \code{0.65}.}
-
-\item{rest_floor_frac}{Floor fraction for the rest component; default \code{1.0}.}
-
-\item{smooth_scale}{Smoothing scale for optional per-subject spline on predictors;
-one of \code{"logra"}, \code{"alr"}.}
-
-\item{alr_spline_df, alr_spline_spar, alr_spline_cv}{Controls for spline smoothing if used.}
-
-\item{chains, iter_warmup, iter_sampling, seed, quiet, adapt_delta, max_treedepth, metric, init}{Sampling controls passed to \pkg{cmdstanr}.}
+\item{min_pairs}{Minimum valid adjacent pairs per direction; default \code{4}.}
 
 \item{progress}{Progress output: \code{"bar"}, \code{"verbose"}, or \code{"none"}.
 When \code{"bar"} and \pkg{progressr} is available, outer/K-fold progress bars are displayed.}
 
-\item{progress_every}{Update frequency for the legacy sequential progress bar; default \code{1}.}
-
-\item{silent_sampler}{If \code{TRUE}, silence cmdstanr progress/messages in the wrapper; default \code{FALSE}.}
-
 \item{n_workers_outer}{Number of parallel workers for the outer pair loop; default \code{1}.
 If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested parallelism.}
+
+\item{n_workers_kfold}{Number of parallel workers for K-fold; default \code{1}.}
 
 \item{kfold_K}{Number of folds K; default \code{5}.}
 
 \item{kfold_R}{Number of repetitions R; default \code{3}.}
 
 \item{kfold_seed}{Seed for K-fold split reproducibility (defaults to \code{seed}).}
-
-\item{n_workers_kfold}{Number of parallel workers for K-fold (PSOCK via future/furrr); default \code{1}.}
-
-\item{max_retries}{Maximum sampler retry attempts (diagnostics-aware); default \code{3}.}
-
-\item{use_pathfinder_init}{Logical; whether to run \code{cmdstanr::pathfinder()} to
-obtain Pathfinder-based initial draws before HMC/NUTS. \strong{Default = TRUE (recommended)}.
-When enabled and \code{iter_warmup >= 1500}, warmup is automatically reduced to
-\code{max(500, floor(iter_warmup/2))}. This typically preserves or improves convergence
-while reducing runtime.}
-
-\item{pf_num_paths}{Integer; number of quasi-Newton paths for Pathfinder (default e.g. \code{8}).}
-
-\item{pf_draws}{Integer; number of draws to sample from the Pathfinder approximation (default e.g. \code{2000}).}
-
-\item{pf_history_size}{Integer; limited-memory BFGS history size (default e.g. \code{10}).}
-
-\item{pf_max_lbfgs_iters}{Integer; maximum L-BFGS iterations per path (default e.g. \code{1000}).}
-
-\item{pf_psis_resample}{Logical; if \code{TRUE}, use PSIS-importance resampling inside Pathfinder.}
 }
 \value{
 A list containing directional and self-effect summaries, pointwise repeated
@@ -136,8 +72,8 @@ Conceptually, the gLV equations are reformulated on the additive
 log-ratio (ALR) scale to handle compositional constraints, and are then
 estimated in a \strong{pairwise Bayesian regression} structure with irregular-time
 OU residuals. Each unordered taxon pair \verb{\{i, j\}} is fitted in
-both directions (j → i and i → j), providing directional interaction
-coefficients that can be aggregated across subjects.
+both directions (j → i and i → j), providing directed pair-to-rest dynamic coefficients that can be aggregated
+across subjects; these are not generally absolute direct-gLV coefficients.
 
 Residual dependence follows an irregular-time OU process. Student-t observation
 noise and repeated subject-level K-fold Kalman ELPD scoring are fixed Core choices.
@@ -157,15 +93,8 @@ are scored with the irregular-time OU Kalman path using a Student-t observation
 likelihood with one posterior-estimated \code{nu > 2} per directed fit. Spline smoothing is selected by cross-validation.
 Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 \itemize{
-\item A diagnostics-aware \strong{retry} policy (up to \code{max_retries}) monitors divergences,
-tree depth, and E-BFMI without changing the Student-t model or its \code{nu} prior.
-Diagnostics are returned for downstream filtering.
-\item Optional \strong{Pathfinder} initialization (\code{use_pathfinder_init = TRUE}) uses
-\code{cmdstanr::pathfinder()} to obtain near-posterior inits (and mass-matrix info) before HMC.
-When enabled and \code{iter_warmup >= 1500}, the warmup is \strong{auto-shortened} to
-\code{max(500, floor(iter_warmup/2))} to exploit the better starting point. You can fine-tune
-Pathfinder via \code{pf_num_paths}, \code{pf_draws}, \code{pf_history_size}, \code{pf_max_lbfgs_iters},
-and \code{pf_psis_resample}.
+\item A diagnostics-aware retry policy and Pathfinder initialization use the fixed
+canonical v0.2 settings; their implementation controls are private.
 }
 
 \strong{Parallelism & progress}
@@ -179,7 +108,9 @@ pairs and K-fold tasks; otherwise it falls back silently.
 
 \strong{Interpretation}
 \itemize{
-\item For edges, prioritize \strong{signs} (PSP/LFSR derived from posterior draws) and \strong{MCMC diagnostics};
+\item For edges, prioritize \strong{posterior-supported pair-to-rest directions} (PSP/LFSR
+derived from posterior draws) and \strong{MCMC diagnostics}. A sign is not by
+itself evidence of direct biological facilitation or inhibition.
 optionally use \strong{ELPD per subject} (from K x R) as supporting evidence. Aggregation is \strong{subject-uniform}.
 }
 }
@@ -202,12 +133,12 @@ if (requireNamespace("progressr", quietly = TRUE)) {
 }
 EP_res <- fit_pclv_bayes(
   physeq = EP_phy_obj, subject_col = "plot2", time_col = "week",
-  use_pathfinder_init = TRUE,
+  # Pathfinder initialization is fixed by the private v0.2 policy.
   chains = 4, iter_warmup = 1000, iter_sampling = 1500,
   n_workers_outer = 4,   # outer pair loop in parallel
   n_workers_kfold = 1,   # k-fold parallel disabled when outer > 1
   progress = "bar"
 )
 }
-
+#' @rdname fit_pclv_bayes
 }
