@@ -135,6 +135,42 @@
 #' @rdname fit_pclv_bayes
 #' @export
 
+.prepare_fit_runtime <- function(validated) {
+  controls <- validated$controls
+  mod <- tryCatch(
+    get_pclv_model(quiet = controls$quiet),
+    error = function(e) .pclv_failure(
+      "model_loading", "canonical_model_compilation_failed",
+      list(message = conditionMessage(e))
+    )
+  )
+  if (.is_pclv_failure(mod)) return(mod)
+  sm_mat <- .precompute_spline_smoothed(
+    validated$mat_rel, validated$meta_df, validated$taxa_vec,
+    controls$eps, controls$min_unique_times
+  )
+  if (.is_pclv_failure(sm_mat)) return(sm_mat)
+  context_names <- c(
+    "eps", "min_pairs", "min_unique_times", "zero_mode_alr",
+    "minpos_alpha", "minpos_base", "eps_fixed", "lib_eps_c",
+    "rest_floor_frac", "smooth_scale", "alr_spline_df",
+    "alr_spline_spar", "alr_spline_cv", "nz_partner_min_frac",
+    "max_retries", "chains", "iter_warmup", "iter_sampling",
+    "adapt_delta", "max_treedepth", "metric", "init", "seed",
+    "quiet", "silent_sampler", "kfold_K", "kfold_R",
+    "use_pathfinder_init", "pf_num_paths", "pf_draws",
+    "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample"
+  )
+  list(
+    ctx = c(list(
+      mod_exe_file = mod$exe_file(),
+      meta_df = validated$meta_df,
+      sm_mat = sm_mat
+    ), controls[context_names]),
+    model = mod
+  )
+}
+
 fit_pclv_bayes <- function(# --- 필수 입력 ---
   physeq,
   subject_col,
@@ -232,80 +268,12 @@ fit_pclv_bayes <- function(# --- 필수 입력 ---
     .cleanup_stale_csv_start(older_than_hours = 24)
   }, silent = TRUE)
 
-  # Stan model (canonical Student-t likelihood)
-  mod <- tryCatch(
-    get_pclv_model(quiet = quiet),
-    error = function(e) .pclv_failure("model_loading", "canonical_model_compilation_failed",
-                                      list(message = conditionMessage(e)))
-  )
-  if (.is_pclv_failure(mod)) return(mod)
-
-  # legacy smoothing on log(RA+eps)
-  sm_mat <- .precompute_spline_smoothed(
-    mat_rel,
-    meta_df,
-    taxa_vec,
-    eps,
-    min_unique_times
-  )
-  if (inherits(sm_mat, "pclv_failure")) return(sm_mat)
-
-  # --------------------------------------------------------
-  # --- Avoid nested parallelism: if outer-parallel, disable kfold-parallel
-  n_workers_kfold_eff <- if (n_workers_outer > 1L)
-    1L
-  else
-    n_workers_kfold
-
-  # progressr availability (optional)
+  runtime <- .prepare_fit_runtime(validated)
+  if (.is_pclv_failure(runtime)) return(runtime)
+  ctx <- runtime$ctx
+  n_workers_kfold_eff <- if (n_workers_outer > 1L) 1L else n_workers_kfold
+  ctx$n_workers_kfold_eff <- n_workers_kfold_eff
   has_progressr <- requireNamespace("progressr", quietly = TRUE)
-
-  # ---------- 런타임 컨텍스트를 한데 모아 병렬 워커로 전달 ----------
-  ctx <- list(
-    mod_exe_file = mod$exe_file(),
-    # 데이터
-    meta_df = meta_df,
-    sm_mat = sm_mat,
-    eps = eps,
-    min_pairs = min_pairs,
-    min_unique_times = min_unique_times,
-    # 입력/전처리 설정
-    zero_mode_alr = zero_mode_alr,
-    minpos_alpha = minpos_alpha,
-    minpos_base  = minpos_base,
-    eps_fixed = eps_fixed,
-    lib_eps_c = lib_eps_c,
-    rest_floor_frac = rest_floor_frac,
-    smooth_scale = smooth_scale,
-    alr_spline_df = alr_spline_df,
-    alr_spline_spar = alr_spline_spar,
-    alr_spline_cv = alr_spline_cv,
-    nz_partner_min_frac = nz_partner_min_frac,
-    # 모델/샘플러 설정
-    max_retries = max_retries,
-    chains = chains,
-    iter_warmup = iter_warmup,
-    iter_sampling = iter_sampling,
-    adapt_delta = adapt_delta,
-    max_treedepth = max_treedepth,
-    metric = metric,
-    init = init,
-    seed = seed,
-    quiet = quiet,
-    silent_sampler = silent_sampler,
-    # K-fold/병렬
-    kfold_K = kfold_K,
-    kfold_R = kfold_R,
-
-    # PF 옵션 전달
-    use_pathfinder_init = use_pathfinder_init,
-    pf_num_paths = pf_num_paths,
-    pf_draws = pf_draws,
-    pf_history_size = pf_history_size,
-    pf_max_lbfgs_iters = pf_max_lbfgs_iters,
-    pf_psis_resample = pf_psis_resample
-  )
-
 
   if (has_progressr && identical(progress, "bar")) {
     old_opt <- options(

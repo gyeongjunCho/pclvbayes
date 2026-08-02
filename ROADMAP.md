@@ -117,6 +117,67 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [ ] Reduce and freeze the public `fit_pclv_bayes()` API
 - [ ] Release preparation
 
+### Scientific estimand hardening and conservative sign interpretation
+
+The targeted four-chain confirmation remained converged for 6/6 prespecified directions, and posterior signs matched the observed canonical deterministic transformed-data projection for 6/6. Posterior signs matched absolute MTIST `A[target, source]` for 3/6. This is an estimand distinction, not a software defect or recovery of the absolute direct-gLV coefficient: 44/90 instantaneous mechanistic pair-to-rest contrasts changed sign across states, and 16/90 exact-zero absolute coefficients induced nonzero transformed effects. No focused discrepancy was caused by MCMC instability, finite-chain error, observation noise, finite-interval approximation, or a posterior-versus-observed-oracle discrepancy. `species_7 -> species_4` is the verified special case where absolute `A` was zero, the finite-interval transformed projection was positive, and canonical smoothing changed the projection and posterior sign to negative.
+
+The v0.2 objective is to retain the canonical posterior model while preventing stable pair-to-rest coefficients from being misrepresented as context-independent absolute biological interactions, separating statistical convergence from scientific sign robustness, and completing this bounded remediation before release.
+
+#### Estimand contract
+
+- [ ] Define `a_ij` consistently as the posterior coefficient of the lagged source pair-to-rest log-ratio predictor in the target pair-to-rest log-ratio rate model, conditional on the self predictor and canonical preprocessing.
+- [ ] State prominently that `a_ij` is not generally identical to absolute joint-gLV coefficient `A[i,j]`.
+- [ ] Distinguish absolute direct-gLV `A[i,j]`, state-dependent mechanistic contrast `C_ij(x)`, deterministic canonical transformed-data projection, and Bayesian posterior coefficient `a_ij`.
+- [ ] Explain that the sign of `a_ij` describes a fitted pair-to-rest dynamic direction, not alone biological facilitation, inhibition, or absolute interaction strength.
+- [ ] Preserve indeterminate-not-zero semantics.
+- [ ] Explain that a nonzero transformed coefficient may occur when `A[i,j]` is zero.
+
+The mechanistic contrast is
+
+    C_ij(x) = A[i,j] - sum_{k in rest} w_k(x) A[k,j]
+
+and is state dependent; it is not identical to the fitted constant posterior coefficient.
+
+#### Terminology, metrics, and interpretation
+
+- [ ] Audit user-facing documentation, examples, reports, plots, tables, and summaries for unqualified direct-interaction, facilitation, inhibition, or absolute-strength claims.
+- [ ] Prefer qualified pair-to-rest terminology; preserve historical names only with definitions.
+- [ ] Do not change the public API solely for terminology cleanup.
+- [ ] Make transformed-estimand validation primary: posterior versus canonical transformed oracle = 6/6.
+- [ ] Report absolute-A comparison separately: posterior versus absolute-A cross-estimand agreement = 3/6; do not call it primary pcLV recovery.
+- [ ] Prefer explicit metrics `transformed_oracle_sign_agreement`, `absolute_A_sign_agreement`, `absolute_A_zero_to_nonzero`, and `state_dependent_contrast`.
+- [ ] Preserve explicit denominators and the prespecified six-direction rule.
+
+#### Interpretation and preprocessing robustness
+
+- [ ] Add interpretation states separate from `diagnostic_class`: `pair_to_rest_direction_supported`, `preprocessing_sensitive`, `empirically_context_sensitive`, `interpretation_indeterminate`, and `insufficient_information`.
+- [ ] Allow statistical convergence with scientific interpretation sensitivity; convergence alone must not create an unqualified ecological sign.
+- [ ] Preserve missing and indeterminate values rather than converting them to zero.
+- [ ] Compare canonical smoothed projections with unsmoothed finite-interval projections using QR/SVD rank and conditioning diagnostics.
+- [ ] Mark identifiable disagreements as preprocessing-sensitive without selecting the variant that best matches absolute truth.
+- [ ] Preserve the canonical posterior and document `species_7 -> species_4` as the first verified smoothing-sensitive case.
+- [ ] Measure smoothing-sign sensitivity on additional datasets before any calibrated hard exclusion threshold.
+
+#### Empirical sign-heterogeneity diagnostics
+
+- [ ] Add lightweight diagnostics for per-subject projections, leave-one-subject-out projections, predefined time-window signs, canonical-versus-unsmoothed signs, rank-deficient subset reasons, and the fraction agreeing with the canonical posterior sign.
+- [ ] Document that these diagnostics cannot recover a mechanistic state-dependent contrast without absolute-model information.
+- [ ] Do not define an arbitrary hard gate before multi-dataset calibration.
+
+#### Conservative output and release gate
+
+- [ ] Distinguish posterior sign support from scientific sign robustness and expose posterior coefficient, PSP, LFSR, diagnostic and interpretation classes, preprocessing sensitivity, and heterogeneity where available.
+- [ ] Do not give preprocessing-sensitive or interpretation-indeterminate directions unqualified facilitation/inhibition labels.
+- [ ] Document the 44/90 state-dependent contrast, 16/90 absolute-zero induced-effect, and smoothing-sensitive focused findings.
+- [ ] Keep the existing model, Stan code, priors, posterior thresholds, and public API unchanged unless a separately reviewed defect is found.
+
+Explicit v0.2 exclusions:
+
+- recovering absolute `A[i,j]` from relative abundance alone;
+- forcing posterior signs to agree with absolute MTIST truth;
+- replacing the canonical spline model;
+- latent biomass, nonlinear/state-dependent coefficients, or a full joint absolute interaction matrix.
+
 ### Final public API reduction
 
 Perform only after benchmarking, profiling, and measured optimization are
@@ -233,6 +294,49 @@ performs consistently across real and synthetic cases.
 A successful v0.3 change should reduce the number of residual-indeterminate
 directions without destabilizing directions whose interaction coefficient and
 PSP/LFSR are already identified.
+
+### Latent continuous-time trajectory model
+
+- [ ] Replace fixed external spline smoothing with a latent continuous-time trajectory and observation model.
+- [ ] Propagate smoothing uncertainty into posterior inference.
+- [ ] Reduce boundary-derivative artifacts and directly support irregular intervals while preserving subject resets, structured failures, and conservative identifiability semantics.
+- [ ] Benchmark against exact noiseless transformed trajectories and the v0.2 smoothing-sensitive cases.
+- [ ] Do not promise that this alone recovers absolute `A`.
+
+### Integrated interval dynamics
+
+- [ ] Distinguish instantaneous and finite-interval estimands.
+- [ ] Evaluate interval-averaged or integrated source predictors.
+- [ ] Model irregular `dt` directly; retain one decay posterior per directed fit and preserve `rho(dt) = exp(-lambda * dt)`.
+- [ ] Quantify sign sensitivity to observation interval length.
+
+### Context-dependent pair-to-rest coefficients
+
+- [ ] Investigate low-dimensional state-dependent or regime-dependent `a_ij` coefficients, including early/late coefficients, predefined regimes, varying-coefficient splines, Gaussian-process varying coefficients, and low-dimensional neural varying coefficients.
+- [ ] Report state-dependent sign changes, require sufficient information, preserve indeterminate results when context dependence is not identifiable, and protect pairwise scalability.
+
+### Rest-composition conditioning and denominator robustness
+
+- [ ] Evaluate low-dimensional rest-composition covariates (ILR/principal balances, latent community factors, environmental or total-load covariates) with shrinkage and collinearity monitoring; do not call the result an unconditional direct effect.
+- [ ] Predefine defensible denominator/balance variants, measure denominator-sensitive directions, and never select a denominator by truth agreement. Preserve the canonical denominator until a new contract is formally adopted.
+
+### Optional absolute-scale information and joint confirmation
+
+- [ ] Support uncertain optional total-load or absolute-abundance information from qPCR, spike-ins, flow cytometry, biomass, or calibrated sequencing.
+- [ ] Separate measured from prior-imputed scale and retain pair-to-rest inference when scale is unavailable; absolute direct-gLV claims require an explicitly scale-aware model with sufficient information.
+- [ ] Preserve pcLV as scalable screening and add optional sparse joint confirmation for selected candidates, keeping estimands separate and never converting omitted candidates to confirmed zeros.
+
+### Multi-dataset oracle validation
+
+- [ ] Extend oracle audits across matrices, initial states, noise levels, sampling intervals, series lengths, dominance, extinction/entry scenarios, and denominators.
+- [ ] Report transformed-oracle agreement, absolute-A agreement, state-dependent contrasts, smoothing/interval/noise sign changes, denominator sensitivity, posterior-oracle disagreement, and indeterminate rates with explicit denominators.
+- [ ] Acceptance criteria must follow the declared estimand rather than force agreement with absolute `A`.
+
+### Backward compatibility
+
+- [ ] Retain the v0.2 pair-to-rest model as an explicitly supported model.
+- [ ] Do not silently change the meaning of `a_ij`; version schemas when a distinct estimand is introduced and label relative- and absolute-scale coefficients separately.
+- [ ] Preserve conservative failure and indeterminate semantics.
 
 ### Laplace screening
 
