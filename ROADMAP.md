@@ -99,7 +99,7 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Record chain-specific sign agreement and residual-allocation disagreement
   — indeterminate directions remain explicit and are never treated as zero.
 - [x] Audit temporary-file and CmdStan output lifecycle — temporary roots, workers, CmdStan processes, and executable reuse were verified.
-- [ ] Commit MTIST benchmark infrastructure — representative 10-species benchmark, targeted four-chain confirmation, and oracle estimand audit are complete but remain uncommitted.
+Maintainer commit of the completed MTIST benchmark infrastructure is an external release action, not a v0.2.0 functional task.
 - [x] Profile R preprocessing, K-fold, memory, serialization, and sampling —
   MTIST 361 baseline separates directly measurable R components from combined
   CmdStan/process boundaries and ranks measured optimization candidates.
@@ -109,13 +109,13 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Optimize measured outer-worker orchestration — explicit immutable
   exports and pair-level load balancing reduced the representative two-worker
   MTIST profile without changing scientific signatures or one-worker runtime.
-- [ ] Optimize other measured bottlenecks only when profiling demonstrates a material release-relevant benefit.
+Further optimization is an optional post-baseline backlog item and is undertaken only when profiling demonstrates a material release-relevant benefit.
 - [x] Run representative 10-species MTIST benchmarks — dataset 37 completed
   all 45 pair tasks and 90 directed fits in smoke and multi-chain reference
   configurations with coverage-aware scoring and explicit indeterminacy.
 - [x] Documentation
 - [x] Reduce and freeze the public `fit_pclv_bayes()` API
-- [ ] Release preparation (maintainer-managed packaging and source release operations)
+Maintainer-managed packaging, tagging, and source release operations are outside the v0.2.0 functional completion list.
 
 ### Scientific estimand hardening and conservative sign interpretation
 
@@ -374,23 +374,22 @@ scientific baseline is documented, the estimand and limitations are explicit,
 and no unresolved functional or stability defect is known to invalidate that
 baseline. Maintainer-managed packaging operations are separate.
 
-## v0.2.1 — Frozen Core release validation
+## v0.2.1 — Sign-reversal risk diagnosis and calibration
 
-Validate the frozen Core without reopening removed model options.
+v0.2.1 develops and validates a conservative sign-reversal diagnostic for the
+frozen v0.2.0 Core. The primary real-data-capable measure is
+`empirical_sign_reversal_susceptibility`, an uncalibrated within-estimand
+robustness score. The optional benchmark-calibrated layer reports
+`absolute_same_sign_probability`, `absolute_sign_reversal_risk`,
+`absolute_zero_probability`, and `direct_effect_misinterpretation_risk` only
+when held-out validation and calibration-domain checks pass. These quantities
+are not interchangeable, and the empirical score is never an absolute-A
+probability.
 
-- Posterior ν calibration
-- Multi-chain diagnostic gating
-- Chain-specific sign agreement
-- OU and observation-scale identifiability reporting
-- CV spline robustness
-- Zero-heavy datasets
-- Extinction and external-entry scenarios
-- Irregular sampling
-- Retry policy validation
-- Synthetic parameter recovery
-- Synthetic sign recovery
-- MTIST validation
-- Publication-grade sampling recommendations
+Zero-heavy, extinction, irregular-time, synthetic-recovery, residual-model,
+and other scientific-development studies belong to v0.3.0 unless explicitly
+used as prespecified strata of the v0.2.1 calibration corpus. They are not
+v0.2.1 feature work.
 
 ### Deferred interpretation validation
 
@@ -523,7 +522,7 @@ maximize MTIST truth agreement.
 
 ---
 
-## v0.3 — Time infrastructure, OU identifiability, and acceleration
+## v0.3.0 — Scientific and statistical development
 
 Core v0.3 work is the release-bound scope below. Exploratory pair-to-rest research tracks are not all mandatory for v0.3 release and require separate promotion decisions. External absolute-scale confirmation is not mandatory for v0.3 release.
 
@@ -635,6 +634,39 @@ It must not promise recovery of absolute `A[i,j]` from relative abundance alone.
 - [ ] Do not implement a duplicate absolute-scale joint-gLV engine inside
   pcLVbayes.
 
+### Executable v0.3.0 scientific-development plan
+
+v0.3.0 is the first version allowed to change model assumptions, priors,
+residual model, diagnostics, estimand, preprocessing, eligibility thresholds,
+significance policy, or interaction-recovery behavior. Research themes are
+residual instability and indeterminacy, sign-reversal mechanisms,
+estimand-aligned truth, compositional versus absolute relationships, prior and
+regularization alternatives, residual-process alternatives, timing/interval,
+series-count, observation-count, read-depth, noise, zeros/extinction,
+coverage/precision trade-offs, and diagonal estimands.
+
+Every task must define a scientific hypothesis, proposed change, estimand
+impact, benchmark datasets, primary metrics, failure criteria, comparison with
+frozen v0.2.x baselines, and any API/schema migration. No v0.3 implementation
+starts before v0.2.2 is complete.
+
+1. **V030-01 — Hypothesis and estimand register.** Approve hypotheses and
+   baseline comparisons before coding. No implementation. Acceptance: each
+   candidate has explicit failure criteria.
+2. **V030-02 — Benchmark matrix.** Define compositional and absolute-scale
+   truth relationships across timing, series count, observations, read depth,
+   noise, zeros, and extinction. Deterministic simulation only after approval.
+3. **V030-03 — Residual and indeterminacy research.** Test proposed residual,
+   prior, and regularization alternatives against frozen baselines. Sampling
+   permitted only under an approved benchmark plan.
+4. **V030-04 — Estimand/preprocessing research.** Evaluate interval, smoothing,
+   denominator, and diagonal alternatives with explicit estimand labels and
+   no truth-driven sign flipping.
+5. **V030-05 — Decision and migration.** Promote only changes meeting declared
+   metrics; document rejected hypotheses, schema/API impact, and migration.
+
+
+
 ### Core validation and calibrated screening
 
 ### Multi-dataset oracle validation
@@ -700,8 +732,9 @@ never overwrites original posterior, significance, or diagnostic outputs.
    of an unordered pair remain in one split. Commit boundary: contract only.
 2. **V021-02 — Resource and scheduling policy.** Encode 12 logical threads with
    2 reserved, at most 10 active CmdStan chains, one thread per chain, fixed
-   numerical-library/OpenMP threading, and ten outer slots without four-chain
-   oversubscription. Add preflight capacity tests. Sampling permitted only in
+   numerical-library/OpenMP threading. Safe outer concurrency is derived by
+   preflight from observed chain behavior; ten outer workers are not assumed
+   safe when each fit can launch four chains. Add preflight capacity tests. Sampling permitted only in
    preflight. Acceptance: observed peak never exceeds 10 chains. Commit
    boundary: scheduler/resource policy.
 3. **V021-03 — Checkpoint and manifest architecture.** Add deterministic pair,
@@ -718,7 +751,8 @@ never overwrites original posterior, significance, or diagnostic outputs.
    preflight at 4 chains, 2000 warmup, 2000 sampling, validating scheduler,
    checkpointing, manifests, cleanup, and executable reuse. Acceptance: all
    states and resource measurements are retained; no K-fold truth leakage.
-6. **V021-06 — Full 100-species inference.** Run 4,950 pairs/9,900 directions
+6. **V021-06 — Full 100-species pairwise coverage.** Run 4,950 unordered
+   pairs and 9,900 directions (not a joint 100-species NUTS model),
    with 8,000 retained draws per direction under the global ceiling. Record all
    explicit states and denominators. Benchmark/sampling permitted. Acceptance:
    complete task manifest and reproducible restart.
@@ -733,7 +767,7 @@ never overwrites original posterior, significance, or diagnostic outputs.
    no threshold selected on locked data and no near-zero-coverage solution is
    approved.
 9. **V021-09 — Conservative output integration.** Add independent concepts
-   `sign_reversal_risk`, `sign_risk_class`, `sign_reportable`,
+   `conservative_sign_withholding_risk`, `sign_risk_class`, `sign_reportable`,
    `sign_withheld`, and `sign_withhold_reason` while retaining original output.
    Add schema/regression tests. Acceptance: original posterior and significance
    are byte/schema-equivalent and withholding is reversible and explicit.
@@ -778,37 +812,6 @@ ELPD, stacking, ordering, seeds, or unavailable/placeholder semantics.
 v0.2.2 completion requires unchanged public API, exports, schema, masks,
 seeds, generated Stan data, diagnostics, withholding classifications, and all
 tests passing. Unfinished cleanup does not leak into v0.3.0.
-
-### v0.3.0 — Intentional scientific development
-
-v0.3.0 is the first version allowed to change model assumptions, priors,
-residual model, diagnostics, estimand, preprocessing, eligibility thresholds,
-significance policy, or interaction-recovery behavior. Research themes are
-residual instability and indeterminacy, sign-reversal mechanisms,
-estimand-aligned truth, compositional versus absolute relationships, prior and
-regularization alternatives, residual-process alternatives, timing/interval,
-series-count, observation-count, read-depth, noise, zeros/extinction,
-coverage/precision trade-offs, and diagonal estimands.
-
-Every task must define a scientific hypothesis, proposed change, estimand
-impact, benchmark datasets, primary metrics, failure criteria, comparison with
-frozen v0.2.x baselines, and any API/schema migration. No v0.3 implementation
-starts before v0.2.2 is complete.
-
-1. **V030-01 — Hypothesis and estimand register.** Approve hypotheses and
-   baseline comparisons before coding. No implementation. Acceptance: each
-   candidate has explicit failure criteria.
-2. **V030-02 — Benchmark matrix.** Define compositional and absolute-scale
-   truth relationships across timing, series count, observations, read depth,
-   noise, zeros, and extinction. Deterministic simulation only after approval.
-3. **V030-03 — Residual and indeterminacy research.** Test proposed residual,
-   prior, and regularization alternatives against frozen baselines. Sampling
-   permitted only under an approved benchmark plan.
-4. **V030-04 — Estimand/preprocessing research.** Evaluate interval, smoothing,
-   denominator, and diagonal alternatives with explicit estimand labels and
-   no truth-driven sign flipping.
-5. **V030-05 — Decision and migration.** Promote only changes meeting declared
-   metrics; document rejected hypotheses, schema/API impact, and migration.
 
 ### Transition gates
 
@@ -865,7 +868,7 @@ These are intentionally **outside the current roadmap**.
 - Hierarchical OU
 - Experiment-specific OU
 - AI surrogate approximation
-- Full unrestricted 100+ taxa NUTS inference
+- Full joint 100+ taxa multivariate NUTS inference
 
 ---
 
