@@ -7,6 +7,6 @@
 # * https://testthat.r-lib.org/articles/special-files.html
 
 library(testthat)
-library(pglvbayes)
+library(pclvbayes)
 
-test_check("pglvbayes")
+test_check("pclvbayes")

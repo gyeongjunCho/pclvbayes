@@ -89,6 +89,13 @@
 #' @param nz_partner_min_frac Minimum partner nonzero fraction for eligibility; default \code{0.15}.
 #' @param min_unique_times Minimum unique times per subject; default \code{3}.
 #' @param min_pairs Minimum valid adjacent pairs per direction; default \code{4}.
+#' @param chains Number of MCMC chains; default \code{4}.
+#' @param iter_warmup Warmup iterations per chain; default \code{2000}.
+#' @param iter_sampling Post-warmup sampling iterations per chain; default \code{2000}.
+#' @param seed Reproducibility seed for fitting; default \code{1234}.
+#' @param init Initial value or initializer specification passed to the sampler; default \code{0.2}.
+#' @param adapt_delta Target HMC acceptance probability; default \code{0.98}.
+#' @param max_treedepth Maximum HMC tree depth; default \code{14}.
 #'
 #' @param subject_col Column name in sample metadata indicating subjects (e.g., plant/plot).
 #' @param time_col    Column name in sample metadata indicating (numeric) time within subject.

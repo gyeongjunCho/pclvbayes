@@ -43,6 +43,20 @@ fraction of rows; default \code{0.15}.}
 
 \item{min_pairs}{Minimum valid adjacent pairs per direction; default \code{4}.}
 
+\item{chains}{Number of MCMC chains; default \code{4}.}
+
+\item{iter_warmup}{Warmup iterations per chain; default \code{2000}.}
+
+\item{iter_sampling}{Post-warmup sampling iterations per chain; default \code{2000}.}
+
+\item{seed}{Reproducibility seed for fitting; default \code{1234}.}
+
+\item{init}{Initial value or initializer specification passed to the sampler; default \code{0.2}.}
+
+\item{adapt_delta}{Target HMC acceptance probability; default \code{0.98}.}
+
+\item{max_treedepth}{Maximum HMC tree depth; default \code{14}.}
+
 \item{progress}{Progress output: \code{"bar"}, \code{"verbose"}, or \code{"none"}.
 When \code{"bar"} and \pkg{progressr} is available, outer/K-fold progress bars are displayed.}
 

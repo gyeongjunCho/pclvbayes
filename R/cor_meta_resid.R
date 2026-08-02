@@ -49,6 +49,50 @@
 #'     `partial_rest=FALSE`, the `partial_method` column is dropped.
 #'   - `TRUE`: Keep all columns regardless of relevance, filling unused ones with `NA`.
 #'
+#' @param physeq A phyloseq object.
+#' @param subject_col Sample metadata column identifying subjects.
+#' @param time_col Sample metadata column identifying numeric sampling times.
+#' @param taxa_vec Optional taxa identifiers to analyze.
+#' @param interesting_taxa Optional taxa subset for pair screening.
+#' @param method Correlation method, `"pearson"` or `"spearman"`.
+#' @param transform Transformation, `"alr"` or `"raw"`.
+#' @param min_n Minimum observations per subject.
+#' @param min_k Minimum number of eligible subjects.
+#' @param meta_method Meta-analysis method, `"DL"` or `"REML"`.
+#' @param use_knha Whether to use Knapp-Hartung adjustment.
+#' @param prevalence_cut Optional prevalence filter.
+#' @param mean_ra_cut Optional mean relative-abundance filter.
+#' @param detrend Whether to detrend within subjects.
+#' @param q_method Multiple-testing correction method.
+#' @param q_weight_by Weighting scheme for q-value correction.
+#' @param k_filter Optional minimum subject count filter.
+#' @param r_abs_min Optional minimum absolute correlation filter.
+#' @param var_method Variance estimator method.
+#' @param return_subjectwise Whether to return subject-level results.
+#' @param partial_rest Whether to adjust raw correlations for the rest component.
+#' @param partial_method Partial-correlation method.
+#' @param zero_minpos_alpha Multiplier for minimum-positive zero replacement.
+#' @param zero_minpos_base Base used for minimum-positive replacement.
+#' @param zero_mode_alr Zero-replacement mode for ALR inputs.
+#' @param zero_lib_pseudo Library-size pseudo-count coefficient.
+#' @param rest_floor_frac Minimum rest fraction after replacement.
+#' @param alr_cap_mode ALR capping mode.
+#' @param alr_cap_value ALR cap value when fixed capping is used.
+#' @param effn_method Effective-sample-size correction method.
+#' @param effn_L Optional Bartlett lag cutoff.
+#' @param effn_bw Optional bandwidth for effective sample size.
+#' @param effn_aggregate_by_time Time aggregation for effective sample size.
+#' @param effn_time_tol Time tolerance for aggregation.
+#' @param effn_phi_cap Cap for AR(1) correlation products.
+#' @param effn_blend Blend toward raw sample size.
+#' @param effn_min_frac Minimum effective-sample-size fraction.
+#' @param cozero_check Whether to screen co-zero patterns.
+#' @param cozero_tol Co-zero screening tolerance.
+#' @param cozero_action Action for co-zero findings.
+#' @param cozero_min_subject_frac Minimum subject fraction for co-zero screening.
+#' @param acf_correction Whether to apply autocorrelation correction.
+#' @param nz_partner_min_frac Minimum partner nonzero fraction.
+#' @param warn_alr Whether to warn on extreme ALR values.
 #' @return
 #' If `return_subjectwise = TRUE`, a list with `meta` and `subjectwise`.
 #' the `n_eff` settings used.
