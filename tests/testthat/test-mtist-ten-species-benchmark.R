@@ -82,6 +82,31 @@ test_that("coverage metrics expose conditional denominators", {
   expect_equal(metrics$denominator[metrics$metric == "eligible_sign_coverage"], 90L)
 })
 
+test_that("absolute-A aliases preserve legacy benchmark metrics", {
+  x <- make_benchmark_directions()
+  metrics <- coverage_sign_metrics(x)
+  old <- metrics[metrics$metric == "conditional_sign_accuracy", ]
+  explicit <- metrics[metrics$metric == "absolute_A_cross_estimand_accuracy", ]
+  expect_equal(explicit$value, old$value)
+  expect_equal(explicit$numerator, old$numerator)
+  expect_equal(explicit$denominator, old$denominator)
+  zero_old <- metrics[metrics$metric == "truth_zero_false_positive", ]
+  zero_new <- metrics[metrics$metric == "absolute_A_zero_to_nonzero", ]
+  expect_equal(zero_new$value, zero_old$value)
+  expect_equal(zero_new$denominator, zero_old$denominator)
+})
+
+test_that("focused transformed-oracle fixture preserves six-direction denominator", {
+  focused <- data.frame(absolute_A_sign = c(-1, 1, -1, 0, -1, -1),
+                        posterior_sign = c(1, 1, -1, -1, -1, 1),
+                        transformed_oracle_sign = c(1, 1, -1, -1, -1, 1),
+                        state_dependent = c(TRUE, TRUE, TRUE, TRUE, FALSE, TRUE))
+  expect_equal(nrow(focused), 6L)
+  expect_equal(sum(focused$posterior_sign == focused$transformed_oracle_sign), 6L)
+  expect_equal(sum(focused$posterior_sign == focused$absolute_A_sign), 3L)
+  expect_equal(sum(focused$state_dependent), 5L)
+})
+
 test_that("diagonal uses median across pair-specific posterior self-effect means", {
   x <- make_benchmark_directions()
   n_self <- sum(x$target == "species_0" & x$diagnostic_class == "converged")

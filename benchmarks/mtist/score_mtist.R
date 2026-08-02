@@ -45,7 +45,9 @@ sign_metrics <- function(truth, prediction, matrix_name, n_success, n_failed) {
   pred_nz <- ps != 0
   rows <- list(
     .metric("sign_accuracy_truth_nonzero", sum(ps[truth_nz] == ts[truth_nz]), sum(truth_nz),
-            "correct predicted sign / nonzero truth edges"),
+            "legacy alias: correct predicted sign / nonzero absolute-A truth edges"),
+    .metric("absolute_A_sign_agreement", sum(ps[truth_nz] == ts[truth_nz]), sum(truth_nz),
+            "correct predicted sign / nonzero absolute-A truth edges"),
     .metric("positive_recall", sum(ps[truth_pos] > 0), sum(truth_pos),
             "predicted positive / positive truth edges"),
     .metric("negative_recall", sum(ps[truth_neg] < 0), sum(truth_neg),
@@ -53,7 +55,9 @@ sign_metrics <- function(truth, prediction, matrix_name, n_success, n_failed) {
     .metric("signed_precision", sum(pred_nz & ps == ts), sum(pred_nz),
             "correct signed predictions / predicted nonzero edges"),
     .metric("false_positive_rate_truth_zero", sum(pred_nz & truth_zero), sum(truth_zero),
-            "predicted nonzero / zero truth edges"),
+            "legacy alias: predicted nonzero / zero absolute-A truth edges"),
+    .metric("absolute_A_zero_to_nonzero", sum(pred_nz & truth_zero), sum(truth_zero),
+            "predicted nonzero / zero absolute-A truth edges"),
     .metric("predicted_zero_fraction", sum(!pred_nz), length(ps),
             "predicted zero / all off-diagonal entries")
   )

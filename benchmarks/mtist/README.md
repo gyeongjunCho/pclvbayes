@@ -31,6 +31,12 @@ pcLVbayes estimates compositional pair-to-rest effects and repeated
 pair-specific self effects. Scores including the diagonal are retained only
 for benchmark compatibility.
 
+## Oracle metric interpretation
+
+The primary implementation-consistency target is posterior versus the observed canonical transformed-data oracle: 6/6 among the six prespecified Stage B-converged directions. This denominator is not generalized to all 90 directions. The secondary result is posterior versus absolute MTIST `A`: 3/6 among the same six directions, reported as **absolute-A cross-estimand sign agreement**, not pcLV recovery accuracy. The pair-to-rest posterior is not an absolute direct-gLV coefficient.
+
+The oracle audit found 44/90 instantaneous mechanistic pair-to-rest contrasts changing sign across states and 16/90 exact-zero absolute coefficients inducing nonzero transformed effects. No focused posterior-versus-observed deterministic discrepancy or focused finite-chain, observation-noise, or finite-interval explanation was found. `species_7 -> species_4` is a verified preprocessing-sensitivity warning: absolute A = 0, the exact finite-interval transformed projection was positive, and canonical smoothing and the posterior were negative. This does not imply smoothing generally reverses signs.
+
 ## Ten-species benchmark
 
 The deterministic 10-species benchmark selects dataset 37 and runs fixed smoke

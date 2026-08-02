@@ -5,7 +5,7 @@
 #' summary tables for \strong{cross} (from→to) edges and \strong{self} effects.
 #'
 #' Included fields:
-#' - Key intuitive metrics: \code{from}, \code{to}, \code{n_pairs}, \code{a_sign},
+#' - Key model-level metrics: \code{from}, \code{to}, \code{n_pairs}, \code{a_sign},
 #'   \code{a_mean}, \code{a_q2.5}, \code{a_q97.5}
 #' - Reliability metrics: \code{p_sign2}, \code{bayes_FDR} (=\code{LFSR}),
 #'   optional \code{pass_bayes_fdr}
@@ -14,7 +14,9 @@
 #'   (true stacking if available; otherwise omitted)
 #' - Diagnostics: \code{rhat}, \code{essb}, \code{esst}, \code{div},
 #'   \code{tdhit}, \code{ebfmi_min}, \code{diagnostic_class}, and \code{diag_ok}.
-#'   Interaction and residual identifiability are classified separately;
+#'   The cross coefficient is a directed pair-to-rest dynamic coefficient, not
+#'   generally an absolute direct-gLV effect. Interaction and residual identifiability
+#'   are classified separately;
 #'   indeterminate directions remain explicit and are never interpreted as zero.
 #'
 #' @details

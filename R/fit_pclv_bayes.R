@@ -11,8 +11,8 @@
 #' log-ratio (ALR) scale to handle compositional constraints, and are then
 #' estimated in a **pairwise Bayesian regression** structure with irregular-time
 #' OU residuals. Each unordered taxon pair `{i, j}` is fitted in
-#' both directions (j → i and i → j), providing directional interaction
-#' coefficients that can be aggregated across subjects.
+#' both directions (j → i and i → j), providing directed pair-to-rest dynamic coefficients that can be aggregated
+#' across subjects; these are not generally absolute direct-gLV coefficients.
 #'
 #' Residual dependence follows an irregular-time OU process. Student-t observation
 #' noise and repeated subject-level K-fold Kalman ELPD scoring are fixed Core choices.
@@ -50,7 +50,9 @@
 #'   pairs and K-fold tasks; otherwise it falls back silently.
 #'
 #' **Interpretation**
-#' - For edges, prioritize **signs** (PSP/LFSR derived from posterior draws) and **MCMC diagnostics**;
+#' - For edges, prioritize **posterior-supported pair-to-rest directions** (PSP/LFSR
+#'   derived from posterior draws) and **MCMC diagnostics**. A sign is not by
+#'   itself evidence of direct biological facilitation or inhibition.
 #'   optionally use **ELPD per subject** (from K x R) as supporting evidence. Aggregation is **subject-uniform**.
 #'
 #' @param physeq A \code{phyloseq} object with taxa in rows (will be transposed if needed).

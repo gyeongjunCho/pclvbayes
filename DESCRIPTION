@@ -1,5 +1,5 @@
 Package: pclvbayes
-Title: Bayesian Pairwise compositional Lotka-Volterra
+Title: Bayesian Directed Pair-to-Rest Microbial Dynamics
 Version: 0.0.0.9000
 Authors@R: c(person(given="Gyeongjun", family="Cho",
     email="chogj88@korea.kr", role=c("aut","cre"),
@@ -8,7 +8,7 @@ Authors@R: c(person(given="Gyeongjun", family="Cho",
               country="Korea, Republic of")),
     person(given="Rural Development Administration (RDA)", role="cph"),
     person(given="National Institute of Agricultural Sciences (NAS)", role="cph"))
-Description: Implements Bayesian pairwise generalized Lotka–Volterra (gLV)-inspired regressions for microbiome time-series from amplicon sequencing. Residuals are OU (≈AR(1)) or white-noise with Δt-aware options; includes optional correlation-based screening, tidy edge reshaping, Kalman ELPD for OU, and diagnostics; uses cmdstanr/CmdStan.
+Description: Implements Bayesian inference of directed pair-to-rest microbial dynamics for compositional longitudinal microbiome data, supporting qualified interaction screening. Residuals are OU (≈AR(1)) or white-noise with Δt-aware options; includes optional correlation-based screening, tidy edge reshaping, Kalman ELPD for OU, and diagnostics; uses cmdstanr/CmdStan.
 License: file LICENSE
 URL: https://github.com/gyeongjunCho/pglvbayes
 BugReports: https://github.com/gyeongjunCho/pglvbayes/issues
