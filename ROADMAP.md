@@ -94,7 +94,7 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - v0.3.0 should aim to reduce residual non-identifiability while preserving
   interactions whose `a_ij` and PSP are already stable across chains.
 
-### Remaining
+### Completion record and maintainer notes
 
 - [x] Strengthen multi-chain diagnostic reporting — deterministic interaction
   and residual identifiability classes now gate interpretation separately.
@@ -149,7 +149,9 @@ and is state dependent; it is not identical to the fitted constant posterior coe
 
 - [x] Audit user-facing documentation, examples, reports, plots, tables, and summaries for unqualified direct-interaction, facilitation, inhibition, or absolute-strength claims.
 - [x] Prefer qualified pair-to-rest terminology; preserve historical names only with definitions.
+
 The public API is not changed solely for terminology cleanup.
+
 - [x] Make transformed-estimand validation primary: posterior versus canonical transformed oracle = 6/6.
 - [x] Report absolute-A comparison separately: posterior versus absolute-A cross-estimand agreement = 3/6; do not call it primary pcLV recovery.
 - [x] Prefer explicit metrics `transformed_oracle_sign_agreement`, `absolute_A_sign_agreement`, `absolute_A_zero_to_nonzero`, and `state_dependent_contrast`.
@@ -158,11 +160,19 @@ The public API is not changed solely for terminology cleanup.
 #### Interpretation and preprocessing robustness
 
 - [ ] Define candidate interpretation states separate from `diagnostic_class`: `pair_to_rest_direction_supported`, `preprocessing_sensitive`, `empirically_context_sensitive`, `interpretation_indeterminate`, and `insufficient_information`; implement them only after v0.2.1 validation.
+
 Statistical convergence may coexist with interpretation sensitivity; convergence alone must not create an unqualified ecological sign.
+
+
 Missing and indeterminate values are preserved and never converted to scientific zero.
+
 - [ ] Compare canonical smoothed projections with unsmoothed finite-interval projections using QR/SVD rank and conditioning diagnostics.
+
 Identifiable disagreements are marked preprocessing-sensitive; preprocessing variants are never selected by agreement with absolute truth.
+
+
 The canonical posterior is preserved; `species_7 -> species_4` is documented as the first verified smoothing-sensitive case.
+
 - [ ] Measure smoothing-sign sensitivity on additional datasets before any calibrated hard exclusion threshold.
 
 #### Empirical sign-heterogeneity diagnostics
@@ -230,9 +240,13 @@ already implemented and validated.
 
 #### Conservative output and release gate
 
-- [ ] Distinguish posterior sign support from scientific sign robustness in documentation and benchmark reports; do not add a new public result field or calibrated hard gate in v0.2.
+- [x] Document posterior sign support, empirical sign-reversal susceptibility, and absolute-gLV sign interpretation as separate concepts in the normative roadmap and scientific contract.
+- [x] State that low empirical susceptibility does not guarantee agreement with absolute `A[i,j]`.
 - [x] Document the 44/90 state-dependent contrast, 16/90 absolute-zero induced-effect, and smoothing-sensitive focused findings.
-- [ ] Document the distinction among posterior sign support, empirical sign-reversal susceptibility, and absolute-gLV sign interpretation; state that low empirical susceptibility does not guarantee agreement with absolute `A[i,j]`.
+- [ ] Apply the same distinction consistently to remaining benchmark reports and user-facing interpretation documents during v0.2.1 documentation work.
+
+No new public result field or calibrated hard gate is added in v0.2.
+
 - [x] Keep the existing model, Stan code, priors, posterior thresholds, public API, and result schema unchanged unless a separately reviewed defect is found.
 
 Explicit v0.2 exclusions:
@@ -400,7 +414,10 @@ v0.2.1 feature work.
   calibration.
 - [ ] Consider production `interpretation_class`, calibrated hard interpretation
   gates, and public significant-edge schema extensions only after that validation.
-Indeterminate-not-zero semantics remain mandatory; any production schema change requires a separately reviewed promotion decision.
+
+Indeterminate-not-zero semantics remain mandatory.
+
+Production schema changes require a separately reviewed promotion decision.
 
 ### Benchmark-calibrated absolute-sign interpretation risk
 
@@ -420,7 +437,7 @@ Also define
 `absolute_zero_probability` is not an opposite-sign event, while
 `direct_effect_misinterpretation_risk` includes both opposite-sign and
 absolute-zero possibilities. These are benchmark-calibrated probabilities,
-distinct from the uncalibrated v0.2 empirical susceptibility score. Multi-dataset MTIST calibration belongs to v0.2.1, not v0.3.
+distinct from the uncalibrated v0.2 empirical susceptibility score. Multi-dataset MTIST calibration belongs to v0.2.1, not v0.3.0.
 
 Candidate calibration inputs include empirical susceptibility components and
 worst-axis values, posterior sign probability and LFSR, diagnostic and
@@ -583,8 +600,8 @@ never overwrites original posterior, significance, or diagnostic outputs.
    unless a verified global chain scheduler exists. Retries, Pathfinder, main
    fits, and K-fold all consume the same ceiling. The full benchmark cannot
    begin until process-tree monitoring demonstrates compliance; failure to
-   enforce the ceiling is a preflight failure. Add preflight capacity tests. Sampling permitted only in
-   preflight. Acceptance: observed peak never exceeds 10 chains. Commit
+   enforce the ceiling is a preflight failure. Add preflight capacity tests.
+   Sampling is permitted only in preflight. Acceptance: observed peak never exceeds 10 chains. Commit
    boundary: scheduler/resource policy.
 3. **V021-03 — Checkpoint and manifest architecture.** Add deterministic pair,
    direction, task, and chain seeds; atomic writes; restart; completed/failed/
@@ -597,12 +614,17 @@ never overwrites original posterior, significance, or diagnostic outputs.
    completion, abundance/sparsity, and temporal sufficiency. Add schema and
    missingness tests. No truth-derived features.
 5. **V021-05 — Four-chain preflight.** Run a bounded final-configuration
-   preflight at 4 chains, 2000 warmup, 2000 sampling, validating scheduler,
-   checkpointing, manifests, cleanup, and executable reuse. Acceptance: all
-   states and resource measurements are retained; no K-fold truth leakage.
+   preflight at 4 chains, 2,000 warmup iterations per chain, and 2,000 retained
+   sampling iterations per chain, exactly matching the primary configuration.
+   Validate process-tree concurrency, checkpointing, manifests, cleanup,
+   executable reuse, explicit execution states, resource measurements, and
+   truth isolation. Acceptance: all states and measurements are retained; no
+   K-fold truth leakage and no nominal-draw/ESS equivalence is assumed.
 6. **V021-06 — Full 100-species pairwise coverage.** Run 4,950 unordered
    pairs and 9,900 directions (not a joint 100-species NUTS model),
-   with 4 chains, 2,000 warmup iterations per chain, 2,000 retained draws per chain, and 8,000 nominal retained draws across four chains per direction under the global ceiling. Nominal draws are not 8,000 effective independent samples; effective sample size is parameter- and diagnostic-dependent, and interpretation uses R-hat, bulk ESS, tail ESS, and applicable diagnostics rather than nominal count alone. Record all
+   with 4 chains, 2,000 warmup iterations per chain, 2,000 retained draws per chain,
+   and 8,000 nominal retained draws across four chains per direction under the
+   global ceiling. Nominal draws are not 8,000 effective independent samples; effective sample size is parameter- and diagnostic-dependent, and interpretation uses R-hat, bulk ESS, tail ESS, and applicable diagnostics rather than nominal count alone. Record all
    explicit states and denominators. Benchmark/sampling permitted. Acceptance:
    complete task manifest and reproducible restart.
 7. **V021-07 — Post-inference truth labeling.** Join truth only after inference
