@@ -53,6 +53,94 @@ cor_meta_resid(
 )
 }
 \arguments{
+\item{physeq}{A phyloseq object.}
+
+\item{subject_col}{Sample metadata column identifying subjects.}
+
+\item{time_col}{Sample metadata column identifying numeric sampling times.}
+
+\item{taxa_vec}{Optional taxa identifiers to analyze.}
+
+\item{interesting_taxa}{Optional taxa subset for pair screening.}
+
+\item{method}{Correlation method, \code{"pearson"} or \code{"spearman"}.}
+
+\item{transform}{Transformation, \code{"alr"} or \code{"raw"}.}
+
+\item{min_n}{Minimum observations per subject.}
+
+\item{min_k}{Minimum number of eligible subjects.}
+
+\item{meta_method}{Meta-analysis method, \code{"DL"} or \code{"REML"}.}
+
+\item{use_knha}{Whether to use Knapp-Hartung adjustment.}
+
+\item{prevalence_cut}{Optional prevalence filter.}
+
+\item{mean_ra_cut}{Optional mean relative-abundance filter.}
+
+\item{detrend}{Whether to detrend within subjects.}
+
+\item{q_method}{Multiple-testing correction method.}
+
+\item{q_weight_by}{Weighting scheme for q-value correction.}
+
+\item{k_filter}{Optional minimum subject count filter.}
+
+\item{r_abs_min}{Optional minimum absolute correlation filter.}
+
+\item{var_method}{Variance estimator method.}
+
+\item{return_subjectwise}{Whether to return subject-level results.}
+
+\item{partial_rest}{Whether to adjust raw correlations for the rest component.}
+
+\item{partial_method}{Partial-correlation method.}
+
+\item{zero_minpos_alpha}{Multiplier for minimum-positive zero replacement.}
+
+\item{zero_minpos_base}{Base used for minimum-positive replacement.}
+
+\item{zero_mode_alr}{Zero-replacement mode for ALR inputs.}
+
+\item{zero_lib_pseudo}{Library-size pseudo-count coefficient.}
+
+\item{rest_floor_frac}{Minimum rest fraction after replacement.}
+
+\item{alr_cap_mode}{ALR capping mode.}
+
+\item{alr_cap_value}{ALR cap value when fixed capping is used.}
+
+\item{effn_method}{Effective-sample-size correction method.}
+
+\item{effn_L}{Optional Bartlett lag cutoff.}
+
+\item{effn_bw}{Optional bandwidth for effective sample size.}
+
+\item{effn_aggregate_by_time}{Time aggregation for effective sample size.}
+
+\item{effn_time_tol}{Time tolerance for aggregation.}
+
+\item{effn_phi_cap}{Cap for AR(1) correlation products.}
+
+\item{effn_blend}{Blend toward raw sample size.}
+
+\item{effn_min_frac}{Minimum effective-sample-size fraction.}
+
+\item{cozero_check}{Whether to screen co-zero patterns.}
+
+\item{cozero_tol}{Co-zero screening tolerance.}
+
+\item{cozero_action}{Action for co-zero findings.}
+
+\item{cozero_min_subject_frac}{Minimum subject fraction for co-zero screening.}
+
+\item{acf_correction}{Whether to apply autocorrelation correction.}
+
+\item{nz_partner_min_frac}{Minimum partner nonzero fraction.}
+
+\item{warn_alr}{Whether to warn on extreme ALR values.}
+
 \item{all_columns}{Logical (default \code{FALSE}). Controls whether the output table
 includes \strong{all possible columns} or only those relevant to the chosen settings:
 \itemize{

@@ -1,6 +1,6 @@
 Package: pclvbayes
 Title: Bayesian Directed Pair-to-Rest Microbial Dynamics
-Version: 0.0.0.9000
+Version: 0.2.0
 Authors@R: c(person(given="Gyeongjun", family="Cho",
     email="chogj88@korea.kr", role=c("aut","cre"),
     comment=c(ORCID="0000-0001-6820-2969",

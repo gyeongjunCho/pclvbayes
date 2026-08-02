@@ -9,3 +9,10 @@
 ^docs$
 ^LICENSE\.md$
 ^vignettes$
+^benchmarks/mtist/results$
+^benchmarks/profiling/results$
+^benchmarks/mtist/ou_diagnostics/results$
+^inst/stan/pclv$
+^ROADMAP\.md
+^TODO\.md
+^AGENTS\.md$

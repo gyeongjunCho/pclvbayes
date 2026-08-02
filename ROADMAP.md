@@ -113,9 +113,9 @@ pcLVbayes distinguishes between interaction identifiability and residual-paramet
 - [x] Run representative 10-species MTIST benchmarks — dataset 37 completed
   all 45 pair tasks and 90 directed fits in smoke and multi-chain reference
   configurations with coverage-aware scoring and explicit indeterminacy.
-- [ ] Documentation
-- [ ] Reduce and freeze the public `fit_pclv_bayes()` API
-- [ ] Release preparation
+- [x] Documentation
+- [x] Reduce and freeze the public `fit_pclv_bayes()` API
+- [ ] Release preparation (maintainer-managed packaging and source release operations)
 
 ### Scientific estimand hardening and conservative sign interpretation
 
@@ -258,6 +258,121 @@ complete.
   release.
 
 ---
+
+## v0.2.0 — Frozen functional baseline
+
+v0.2.0 is the first frozen functional baseline. Packaging and source-tarball
+operations are maintained separately and are not part of this functional
+roadmap.
+
+### Implemented functionality
+
+- phyloseq-based longitudinal input with selected-taxa pairwise analysis;
+- deterministic unordered-pair and directed source-to-target enumeration;
+- pair-to-rest compositional modeling and directional posterior fitting;
+- posterior interaction and residual diagnostics with separate Bayesian
+  eligibility;
+- significance evaluation, conditional K-fold execution, ELPD calculation,
+  and stacking when common evidence is available;
+- complete directed matrices with explicit masks for unavailable or
+  non-reportable values;
+- pair-specific posterior self-effect aggregation for diagonal output;
+- bounded outer parallel execution, deterministic direction seeds, executable
+  reuse, and explicit retention of failed or incomplete states;
+- one canonical preprocessing path and the frozen public
+  `fit_pclv_bayes()` interface.
+
+The obsolete `fit_pclv_bayes2()` prototype, duplicate public controls, public
+canonical preprocessing constants, retry controls, and Pathfinder tuning
+controls were removed from the public surface. Those policies remain private;
+they are not public configurability.
+
+### Stability contract
+
+Public stability includes the exact exported functions, the frozen
+`fit_pclv_bayes()` formals, public result structure, source-to-target and matrix
+orientation conventions, diagnostic/status vocabulary, unavailable-value
+semantics, and zero-placeholder semantics. A zero in a complete external
+matrix is a placeholder for an unavailable or non-reportable direction, not an
+inferred scientific zero.
+
+Computational stability includes deterministic task ordering and direction
+indices, unique deterministic seeds, bounded workers, one canonical
+preprocessing path, executable reuse, no worker-side model compilation,
+explicit retry outcomes, and explicit completed, incomplete, failed, skipped,
+and unavailable states. Unstable directions are never silently promoted and
+indeterminate estimates are never converted to scientific zero.
+
+Inferential stability includes separate interaction and residual assessment.
+Residual instability does not automatically invalidate an internal interaction
+coefficient, but it prevents promotion to the fully eligible class.
+Interaction-indeterminate, sampler-failed, insignificant, residual-unstable,
+and unavailable states remain distinct. Bayesian evidence is finalized before
+K-fold and stacking; stacking does not rewrite finalized Bayesian evidence;
+and opposite directions are assessed independently.
+
+Only resource behavior actually exercised by the benchmark and lifecycle tests
+is treated as established: worker and CmdStan cleanup, package-owned
+successful temporary-root return, and compiled-executable reuse. No broader
+resource guarantee is implied.
+
+### Scientific philosophy
+
+The model estimates compositional pair-to-rest effects and directional effects
+under the current pairwise conditional formulation, together with posterior
+uncertainty and diagnostic eligibility. It does not directly estimate an
+absolute-abundance joint-gLV interaction matrix, causal ecological interactions
+from observational data alone, a truth-equivalent MTIST absolute-gLV
+coefficient, or an inferred zero whenever a value is unavailable, unstable, or
+indeterminate.
+
+The v0.2.0 principles are:
+
+1. Keep uncertainty visible.
+2. Keep failure, instability, indeterminacy, insignificance, and zero as
+   different scientific states.
+3. Do not report a coefficient merely because a finite posterior exists.
+4. Assess directions independently.
+5. Prefer conservative omission to confident reporting of an unreliable sign.
+6. Never flip an estimated sign using benchmark truth.
+7. Use external truth to evaluate diagnostics only; never use it in inference.
+8. Report accuracy with coverage and explicit denominators.
+9. Interpret MTIST results in light of the absolute-gLV versus compositional
+   pair-to-rest estimand mismatch.
+10. Document limitations rather than hiding them with placeholders or
+    optimistic summaries.
+
+### Validated 10-species MTIST baseline
+
+The validated dataset contains 10 taxa, 10 independent series, 15 observations
+per series, 45 unordered pairs, and 90 directed interactions. Orientation is
+`source -> target = A[target, source]`.
+
+Stage B classified 6 directions as `converged`, 61 as
+`interaction_stable_residual_unstable`, 23 as `interaction_indeterminate`, and
+0 as `sampler_diagnostics_failed`. Posterior records were retained for 90/90
+directions; 6/90 were Bayesian-eligible; K-fold completed for 6/6 eligible
+directions; finite ELPD was available for 6/6; stacking was available for 5/6;
+and 6 directions were final-significant.
+
+Conditional sign accuracy was 3/6. Significant-direction coverage was 6/90;
+69/74 nonzero truth directions were omitted from significant output; 21/74
+nonzero truth directions were interaction-indeterminate; and 1/16 truth-zero
+directions was called nonzero.
+
+This validates operational scalability to the representative benchmark, not
+broad recovery of the MTIST absolute interaction matrix. Six reportable
+directions are insufficient to calibrate a reliable sign-reversal diagnostic;
+the larger benchmark in v0.2.1 is required to study when a statistically
+significant sign should still be withheld.
+
+### v0.2.0 functional completion gate
+
+The v0.2.0 functional baseline is complete when the public API and canonical
+behavior are frozen, supporting tests pass, the 10-species operational and
+scientific baseline is documented, the estimand and limitations are explicit,
+and no unresolved functional or stability defect is known to invalidate that
+baseline. Maintainer-managed packaging operations are separate.
 
 ## v0.2.1 — Frozen Core release validation
 
@@ -567,6 +682,147 @@ Requirements:
 - Tier 2: full NUTS + K-fold
 
 ---
+
+## Post-v0.2 executable development plans
+
+### A. v0.2.1 sign-reversal risk diagnostic and 100-species study
+
+v0.2.1 aims to reduce confidently reported incorrect signs while preserving as
+much useful coverage as possible. The diagnostic uses observed-data, posterior,
+sampler, residual, K-fold, ELPD, and stacking information only. It never uses
+MTIST truth for inference or feature generation, never flips coefficients, and
+never overwrites original posterior, significance, or diagnostic outputs.
+
+1. **V021-01 — Truth-isolation contract.** Define pair-level splits, inference
+   versus truth-labeling boundaries, and the three outcome labels. Likely files:
+   benchmark configuration and audit documentation. Add leakage tests. No
+   sampling. Acceptance: truth is unavailable to inference and both directions
+   of an unordered pair remain in one split. Commit boundary: contract only.
+2. **V021-02 — Resource and scheduling policy.** Encode 12 logical threads with
+   2 reserved, at most 10 active CmdStan chains, one thread per chain, fixed
+   numerical-library/OpenMP threading, and ten outer slots without four-chain
+   oversubscription. Add preflight capacity tests. Sampling permitted only in
+   preflight. Acceptance: observed peak never exceeds 10 chains. Commit
+   boundary: scheduler/resource policy.
+3. **V021-03 — Checkpoint and manifest architecture.** Add deterministic pair,
+   direction, task, and chain seeds; atomic writes; restart; completed/failed/
+   skipped/incomplete states; elapsed times; retry/Pathfinder records; and
+   cleanup checks. Add interruption/restart fixture tests. No full benchmark.
+   Acceptance: restart does not duplicate or alter completed results.
+4. **V021-04 — Diagnostic-feature schema.** Define reproducible feature records
+   for PSP/LFSR, posterior distance and spread, chain agreement, R-hat/ESS,
+   divergences, treedepth/E-BFMI, interaction/residual classes, predictive
+   completion, abundance/sparsity, and temporal sufficiency. Add schema and
+   missingness tests. No truth-derived features.
+5. **V021-05 — Four-chain preflight.** Run a bounded final-configuration
+   preflight at 4 chains, 2000 warmup, 2000 sampling, validating scheduler,
+   checkpointing, manifests, cleanup, and executable reuse. Acceptance: all
+   states and resource measurements are retained; no K-fold truth leakage.
+6. **V021-06 — Full 100-species inference.** Run 4,950 pairs/9,900 directions
+   with 8,000 retained draws per direction under the global ceiling. Record all
+   explicit states and denominators. Benchmark/sampling permitted. Acceptance:
+   complete task manifest and reproducible restart.
+7. **V021-07 — Post-inference truth labeling.** Join truth only after inference
+   completion, keeping both directions in pair-level splits. No inference
+   result may be changed. Acceptance: leakage audit passes and all labels have
+   explicit denominators.
+8. **V021-08 — Calibration and locked evaluation.** Freeze development,
+   threshold-calibration, and held-out evaluation sets. Evaluate error rate,
+   retained coverage, incorrect signs withheld, correct signs withheld,
+   truth-zero behavior, calibration, and diagnostic-class strata. Acceptance:
+   no threshold selected on locked data and no near-zero-coverage solution is
+   approved.
+9. **V021-09 — Conservative output integration.** Add independent concepts
+   `sign_reversal_risk`, `sign_risk_class`, `sign_reportable`,
+   `sign_withheld`, and `sign_withhold_reason` while retaining original output.
+   Add schema/regression tests. Acceptance: original posterior and significance
+   are byte/schema-equivalent and withholding is reversible and explicit.
+10. **V021-10 — Documentation and regression release gate.** Document exact
+    denominators, coverage/error trade-offs, resource ceilings, calibration
+    domain, and limitations. Acceptance: all v0.2.1 completion gates below
+    pass. Recommended commit boundary: documentation and tests only.
+
+v0.2.1 completion gates: every planned task has an explicit state; incomplete
+and failed directions remain denominators; truth leakage is excluded and
+verified; development and locked evaluation are separated; features and
+thresholds are reproducible and frozen before evaluation; original results
+remain unchanged; no sign is flipped; withholding reasons are explicit;
+error reduction, coverage loss, over-withholding, uncertainty, and denominators
+are reported; checkpoint recovery and the 10-chain ceiling are validated.
+
+### v0.2.2 — Behavior-preserving internal simplification
+
+v0.2.2 begins only after v0.2.1 policy is frozen. It may remove dead private
+code, obsolete compatibility paths, duplicate helpers, nested control flow,
+private naming inconsistencies, and coupling among inference, diagnostics,
+assembly, and benchmark code. It may centralize private constants and simplify
+worker/checkpoint/cleanup logic. It may not change public formals/exports,
+result schema or masks, diagnostic vocabulary, sign-risk policy, estimand,
+preprocessing, priors, thresholds, Stan, eligibility, significance, K-fold,
+ELPD, stacking, ordering, seeds, or unavailable/placeholder semantics.
+
+1. **V022-01 — Characterization inventory.** Capture public names/classes/
+   dimensions/masks, fixed preprocessing outputs, Stan data, task ordering,
+   seed maps, statuses, and fixed-fixture outputs. Add tests; no sampling.
+2. **V022-02 — Private dead-code cleanup.** Remove only code proven unused by
+   call-graph and tests. Acceptance: characterization suite unchanged.
+3. **V022-03 — Helper and control-flow consolidation.** Simplify private helpers
+   and normalize errors/statuses in isolated commits. Acceptance: fixed-fixture
+   outputs and failure semantics unchanged.
+4. **V022-04 — Worker/checkpoint/resource simplification.** Refactor only after
+   lifecycle and restart tests exist. Acceptance: ordering, seeds, manifests,
+   ceilings, and cleanup unchanged.
+5. **V022-05 — Architecture documentation and final regression.** Document
+   concrete duplication/complexity reductions and run the complete suite.
+
+v0.2.2 completion requires unchanged public API, exports, schema, masks,
+seeds, generated Stan data, diagnostics, withholding classifications, and all
+tests passing. Unfinished cleanup does not leak into v0.3.0.
+
+### v0.3.0 — Intentional scientific development
+
+v0.3.0 is the first version allowed to change model assumptions, priors,
+residual model, diagnostics, estimand, preprocessing, eligibility thresholds,
+significance policy, or interaction-recovery behavior. Research themes are
+residual instability and indeterminacy, sign-reversal mechanisms,
+estimand-aligned truth, compositional versus absolute relationships, prior and
+regularization alternatives, residual-process alternatives, timing/interval,
+series-count, observation-count, read-depth, noise, zeros/extinction,
+coverage/precision trade-offs, and diagonal estimands.
+
+Every task must define a scientific hypothesis, proposed change, estimand
+impact, benchmark datasets, primary metrics, failure criteria, comparison with
+frozen v0.2.x baselines, and any API/schema migration. No v0.3 implementation
+starts before v0.2.2 is complete.
+
+1. **V030-01 — Hypothesis and estimand register.** Approve hypotheses and
+   baseline comparisons before coding. No implementation. Acceptance: each
+   candidate has explicit failure criteria.
+2. **V030-02 — Benchmark matrix.** Define compositional and absolute-scale
+   truth relationships across timing, series count, observations, read depth,
+   noise, zeros, and extinction. Deterministic simulation only after approval.
+3. **V030-03 — Residual and indeterminacy research.** Test proposed residual,
+   prior, and regularization alternatives against frozen baselines. Sampling
+   permitted only under an approved benchmark plan.
+4. **V030-04 — Estimand/preprocessing research.** Evaluate interval, smoothing,
+   denominator, and diagonal alternatives with explicit estimand labels and
+   no truth-driven sign flipping.
+5. **V030-05 — Decision and migration.** Promote only changes meeting declared
+   metrics; document rejected hypotheses, schema/API impact, and migration.
+
+### Transition gates
+
+- **v0.2.0 functional completion:** frozen API and canonical behavior; passing
+  characterization tests; documented 10-species operational/scientific
+  baseline; explicit estimand and limitations; no known functional or
+  stability defect invalidating the baseline.
+- **v0.2.1 start:** v0.2.0 baseline and diagnostic semantics frozen, truth
+  isolation approved, and the 100-species execution plan documented.
+- **v0.2.2 start:** v0.2.1 diagnostic policy complete and frozen, with
+  characterization targets identified and correctness separated from cleanup.
+- **v0.3.0 start:** v0.2.2 cleanup complete, frozen v0.2.x baselines
+  reproducible, and scientific hypotheses/success criteria approved before
+  implementation.
 
 ## Post-v0.3 — CI and reproducible benchmark automation
 
