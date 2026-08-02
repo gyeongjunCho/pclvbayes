@@ -30,3 +30,18 @@ MTIST truth contains joint absolute-abundance gLV coefficients, whereas
 pcLVbayes estimates compositional pair-to-rest effects and repeated
 pair-specific self effects. Scores including the diagonal are retained only
 for benchmark compatibility.
+
+## Ten-species benchmark
+
+The deterministic 10-species benchmark selects dataset 37 and runs fixed smoke
+and multi-chain reference stages. Commands, selection criteria, orientation,
+configurations, and reviewed results are in `TEN_SPECIES_BASELINE.md`.
+Generated outputs remain ignored under `results/`.
+
+Run the targeted four-chain main-posterior confirmation with:
+
+    Rscript benchmarks/mtist/run_ten_species_confirmation.R
+
+This command deterministically selects the six Stage B converged directions and
+does not run K-fold, Kalman scoring, ELPD, or stacking. The public canonical fit
+path remains unchanged and continues through predictive evaluation.
