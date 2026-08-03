@@ -1040,6 +1040,56 @@ test_that("unknown potential CmdStan descendants fail closed", {
   expect_identical(monitor$compliance_status, "unverified")
 })
 
+test_that("unknown descendants retain a complete atomic post-mortem record", {
+  snapshot <- capture_recapture_fixture("readable")$snapshot
+  unknown <- snapshot[snapshot$pid == 100L, , drop = FALSE]
+  unknown$pid <- 999L
+  unknown$ppid <- 200L
+  unknown$start_time <- "9990"
+  unknown$process_state <- "S"
+  unknown$initial_process_state <- "S"
+  unknown$final_process_state <- "S"
+  unknown$command <- "/models/pclv method=mystery id=9"
+  unknown$argv <- I(list(c("/models/pclv", "method=mystery", "id=9")))
+  unknown$executable <- "/models/pclv"
+  unknown$potential_cmdstan <- TRUE
+  unknown$readable <- TRUE
+  unknown$capture_state <- "captured"
+  unknown$disappearance_reason <- NA_character_
+  unknown$zombie_reason <- NA_character_
+  unknown$capture_retry_count <- 0L
+  unknown$capture_retry_timestamps <- I(list(character()))
+  unknown$resolution_reason <- "readable_initial_capture"
+  snapshot <- rbind(snapshot, unknown)
+
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "unverified_process_tree")
+  expect_identical(monitor$reason, "unknown_potential_cmdstan_descendant")
+  offender <- monitor$offending_processes
+  expect_identical(names(offender), c(
+    "pid", "ppid", "start_time", "argv", "command", "executable",
+    "classification", "capture_state", "ancestry", "classifier_stage", "reason"))
+  expect_identical(nrow(offender), 1L)
+  expect_identical(offender$pid, 999L)
+  expect_identical(offender$ppid, 200L)
+  expect_identical(offender$start_time, "9990")
+  expect_identical(offender$argv[[1L]], c("/models/pclv", "method=mystery", "id=9"))
+  expect_identical(offender$command, "/models/pclv method=mystery id=9")
+  expect_identical(offender$executable, "/models/pclv")
+  expect_identical(offender$classification, "unknown_potential_cmdstan")
+  expect_identical(offender$capture_state, "captured")
+  expect_identical(offender$ancestry[[1L]], c(100L, 200L, 999L))
+  expect_identical(offender$classifier_stage, "operation_classification")
+  expect_identical(offender$reason, "unknown_potential_cmdstan_descendant")
+
+  path <- tempfile("v021-monitor-failure-", fileext = ".rds")
+  .v021_atomic_save_rds(list(latest_monitor = monitor), path)
+  persisted <- readRDS(path)$latest_monitor$offending_processes
+  expect_identical(persisted, offender)
+  expect_false(any(grepl("tmp-", list.files(dirname(path), basename(path)))))
+})
+
 test_that("process-tree peak twelve passes and greater than twelve fails", {
   policy <- build_v021_resource_policy()
   at_ceiling <- monitor_v021_process_snapshots(

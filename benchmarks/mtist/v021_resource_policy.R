@@ -392,6 +392,61 @@ with_v021_single_thread_environment <- function(code) {
   })
 }
 
+.v021_process_ancestry <- function(records, pid, root_pid) {
+  path <- as.integer(pid)
+  seen <- integer()
+  current <- as.integer(pid)
+  repeat {
+    if (current %in% seen) break
+    seen <- c(seen, current)
+    if (identical(current, as.integer(root_pid))) break
+    row <- match(current, records$pid)
+    if (is.na(row)) break
+    parent <- as.integer(records$ppid[[row]])
+    if (is.na(parent) || !parent %in% records$pid) break
+    path <- c(parent, path)
+    current <- parent
+  }
+  path
+}
+
+.v021_empty_offending_processes <- function() {
+  data.frame(
+    pid = integer(), ppid = integer(), start_time = character(),
+    argv = I(list()), command = character(), executable = character(),
+    classification = character(), capture_state = character(),
+    ancestry = I(list()), classifier_stage = character(), reason = character(),
+    stringsAsFactors = FALSE)
+}
+
+.v021_offending_processes <- function(classified, reason) {
+  if (!is.list(classified) || !length(classified))
+    return(.v021_empty_offending_processes())
+  rows <- list()
+  for (records in classified) {
+    hit <- which(records$classification == "unknown_potential_cmdstan")
+    if (!length(hit)) next
+    for (i in hit) {
+      rows[[length(rows) + 1L]] <- data.frame(
+        pid = as.integer(records$pid[[i]]),
+        ppid = as.integer(records$ppid[[i]]),
+        start_time = if ("start_time" %in% names(records))
+          as.character(records$start_time[[i]]) else NA_character_,
+        argv = I(list(records$argv[[i]])),
+        command = as.character(records$command[[i]]),
+        executable = as.character(records$executable[[i]]),
+        classification = as.character(records$classification[[i]]),
+        capture_state = if ("capture_state" %in% names(records))
+          as.character(records$capture_state[[i]]) else "captured",
+        ancestry = I(list(.v021_process_ancestry(
+          records, records$pid[[i]], records$pid[records$classification == "parent_r"][[1L]]))),
+        classifier_stage = "operation_classification",
+        reason = as.character(reason), stringsAsFactors = FALSE)
+    }
+  }
+  if (!length(rows)) .v021_empty_offending_processes() else do.call(rbind, rows)
+}
+
 classify_v021_process_snapshot <- function(snapshot, root_pid,
                                             known_model_executables = character(),
                                             operation_map = NULL,
@@ -488,6 +543,7 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   if ("capture_state" %in% names(out))
     registered_unreadable <- registered & out$capture_state == "unreadable_live"
   argv <- .v021_snapshot_argv(out, allow_empty = registered_unreadable)
+  if (!"argv" %in% names(out)) out$argv <- I(argv)
   sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
   pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
   known_executable <- out$executable %in% known_model_executables
@@ -563,7 +619,9 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   validate_v021_resource_policy(policy)
   if (!is.list(snapshots) || !length(snapshots))
     return(list(monitoring_state = "monitoring_error", reason = "no_process_snapshots",
-                records = data.frame(), observed_peak_active_cmdstan_chains = NA_integer_,
+                records = data.frame(),
+                offending_processes = .v021_empty_offending_processes(),
+                observed_peak_active_cmdstan_chains = NA_integer_,
                 observed_peak_active_cmdstan_processes = NA_integer_,
                 configured_ceiling = policy$maximum_active_cmdstan_chains,
                 compliance_status = "unverified"))
@@ -573,6 +631,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   if (inherits(classified, "error"))
     return(list(monitoring_state = "monitoring_error",
                 reason = conditionMessage(classified), records = data.frame(),
+                offending_processes = .v021_empty_offending_processes(),
                 observed_peak_active_cmdstan_chains = NA_integer_,
                 observed_peak_active_cmdstan_processes = NA_integer_,
                 configured_ceiling = policy$maximum_active_cmdstan_chains,
@@ -597,6 +656,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   state <- if (!complete || unknown) "unverified_process_tree" else "verified"
   reason <- if (!complete) "unreadable_descendant_process" else if (unknown)
     "unknown_potential_cmdstan_descendant" else NA_character_
+  offending_processes <- .v021_offending_processes(classified, reason)
   records$active_cmdstan_chain_count <- rep(counts, vapply(classified, nrow, integer(1)))
   records$active_cmdstan_process_count <- rep(
     process_counts, vapply(classified, nrow, integer(1)))
@@ -610,6 +670,7 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
       process_peak <= policy$maximum_cmdstan_process_slots) "compliant" else "exceeded"
   list(
     monitoring_state = state, reason = reason, records = records,
+    offending_processes = offending_processes,
     observed_peak_active_cmdstan_chains = as.integer(peak),
     observed_peak_active_cmdstan_processes = as.integer(process_peak),
     configured_ceiling = policy$maximum_active_cmdstan_chains,
