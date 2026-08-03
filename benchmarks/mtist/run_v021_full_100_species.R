@@ -32,6 +32,7 @@ for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "inference_artifacts"),
                file.path(paths$output_root, "feature_records"),
                file.path(paths$output_root, "worker_registries"),
+               file.path(paths$output_root, "failure_traces"),
                file.path(paths$output_root, "cmdstan-owned")))
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
 
@@ -157,6 +158,8 @@ study <- list(physeq = observations$physeq, taxa = observations$taxa)
 peak_chains <- 0L
 peak_slots <- 0L
 batch_number <- 0L
+trace_root <- file.path(paths$output_root, "failure_traces")
+parent_trace <- new_v021_failure_trace_context(trace_root, "parent")
 
 status_counts <- function() {
   states <- table(factor(manifest$execution_state, levels = v021_checkpoint_states))
@@ -181,9 +184,12 @@ mark_running <- function(indices) {
 }
 
 store_outcome <- function(i, result, elapsed) {
-  if (inherits(result, "try-error") || inherits(result, "pclv_failure")) {
+  set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
+  if (inherits(result, "try-error") || inherits(result, "pclv_failure") ||
+      inherits(result, "v021_traced_child_error")) {
     reason <- if (inherits(result, "pclv_failure"))
       paste(result$stage %||% "fit", result$reason %||% "unknown", sep = ":")
+    else if (inherits(result, "v021_traced_child_error")) result$condition_message
     else as.character(result)
     checkpoint <- .v021_record_from_row(
       manifest[i, , drop = FALSE], "failed", elapsed_time = elapsed,
@@ -193,7 +199,10 @@ store_outcome <- function(i, result, elapsed) {
       pathfinder_used = FALSE)
   } else {
     result$.predictive_context <- NULL
+    set_v021_failure_trace_phase(parent_trace, "scientific_state_classification")
     retained <- v021_preflight_retained_record(tasks[i, , drop = FALSE], result)
+    set_v021_failure_trace_phase(parent_trace, "scientific_state_classification",
+                                 completed = TRUE)
     inference_results <- setNames(vector("list", length(v021_inference_result_fields)),
                                   v021_inference_result_fields)
     inference_results$posterior_coefficients <- retained$posterior_mean
@@ -217,12 +226,16 @@ store_outcome <- function(i, result, elapsed) {
     inference_results$unavailable_values <- list(kfold = NA_real_, elpd = NA_real_,
                                                  stacking = NA_real_)
     inference_results$zero_placeholders <- list()
+    set_v021_failure_trace_phase(parent_trace, "artifact_finalization")
     artifact <- finalize_v021_inference_artifact(list(
       artifact_schema = v021_retained_fixture_schema, artifact_state = "retained",
       execution_state = "completed", inference_results = inference_results))
+    set_v021_failure_trace_phase(parent_trace, "artifact_finalization", completed = TRUE)
+    set_v021_failure_trace_phase(parent_trace, "feature_generation")
     feature <- build_v021_diagnostic_feature_record(
       retained, observations$design,
       list(chains = config$chains, iter_sampling = config$iter_sampling))
+    set_v021_failure_trace_phase(parent_trace, "feature_generation", completed = TRUE)
     .v021_atomic_save_rds(artifact, file.path(paths$output_root, "inference_artifacts",
       paste0(manifest$direction_id[[i]], ".rds")))
     .v021_atomic_save_rds(feature, file.path(paths$output_root, "feature_records",
@@ -233,16 +246,25 @@ store_outcome <- function(i, result, elapsed) {
       completion_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
       result = artifact)
   }
+  set_v021_failure_trace_phase(parent_trace, "checkpoint_write")
   write_v021_checkpoint_atomic(checkpoint)
+  set_v021_failure_trace_phase(parent_trace, "checkpoint_write", completed = TRUE)
   manifest <<- .v021_apply_checkpoint(manifest, i, checkpoint)
+  set_v021_failure_trace_phase(parent_trace, "manifest_update")
   write_v021_manifest_atomic(manifest, paths$manifest)
+  set_v021_failure_trace_phase(parent_trace, "manifest_update", completed = TRUE)
 }
 
 run_batch <- function(indices) {
+  set_v021_failure_trace_phase(parent_trace, "batch_launch")
   validate_v021_preflight_launch_capacity(policy, length(indices))
   batch_number <<- batch_number + 1L
   batch_id <- sprintf("batch-%05d", batch_number)
+  parent_trace$batch_id <- batch_id
+  parent_trace$task_ids <- as.integer(manifest$task_id[indices])
+  parent_trace$direction_ids <- as.character(manifest$direction_id[indices])
   mark_running(indices)
+  set_v021_failure_trace_phase(parent_trace, "batch_launch", completed = TRUE)
   specs <- lapply(indices, function(i)
     build_v021_inference_spec(study, inference_config, tasks[i, , drop = FALSE]))
   jobs <- lapply(specs, make_v021_confirmation_fit_closure,
@@ -256,9 +278,19 @@ run_batch <- function(indices) {
   final_file <- file.path(paths$monitor_root, paste0(batch_id, ".rds"))
   latest_file <- file.path(paths$monitor_root, "latest.rds")
   parent_pid <- Sys.getpid()
+  worker_traces <- lapply(seq_along(indices), function(j)
+    new_v021_failure_trace_context(
+      trace_root, "outer_worker", batch_id,
+      manifest$task_id[[indices[[j]]]], manifest$direction_id[[indices[[j]]]]))
   fit_jobs <- lapply(seq_along(indices), function(j) parallel::mcparallel({
     while (!file.exists(start_file)) Sys.sleep(0.01)
-    with_v021_single_thread_environment(jobs[[j]])
+    set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution")
+    run_v021_traced_child(function() {
+      value <- with_v021_single_thread_environment(jobs[[j]])
+      set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution",
+                                   completed = TRUE)
+      value
+    }, worker_traces[[j]])
   }, silent = TRUE))
   fit_pids <- vapply(fit_jobs, function(job) as.integer(job$pid), integer(1))
   fit_registry <- do.call(rbind, lapply(seq_along(fit_pids), function(j)
@@ -275,11 +307,15 @@ run_batch <- function(indices) {
     }
     for (pid in rev(owned)) system2("kill", c("-INT", as.character(pid)))
   }
-  monitor_job <- parallel::mcparallel({
+  monitor_trace <- new_v021_failure_trace_context(
+    trace_root, "monitor_child", batch_id,
+    manifest$task_id[indices], manifest$direction_id[indices])
+  monitor_job <- parallel::mcparallel(run_v021_traced_child(function() {
     while (!file.exists(monitor_start_file)) Sys.sleep(0.01)
     registry <- readRDS(registry_file)
     snapshots <- list()
     repeat {
+      set_v021_failure_trace_phase(monitor_trace, "monitor_polling")
       snap <- tryCatch(capture_v021_preflight_process_snapshot(parent_pid, executable),
                        error = identity)
       if (inherits(snap, "error")) {
@@ -303,15 +339,19 @@ run_batch <- function(indices) {
         stop_owned(snap)
         break
       }
+      set_v021_failure_trace_phase(monitor_trace, "monitor_polling", completed = TRUE)
       if (file.exists(stop_file)) {
+        set_v021_failure_trace_phase(monitor_trace, "monitor_shutdown")
         payload$snapshots <- snapshots
         .v021_atomic_save_rds(payload, final_file)
+        set_v021_failure_trace_phase(monitor_trace, "monitor_shutdown",
+                                     completed = TRUE)
         break
       }
       Sys.sleep(1)
     }
     TRUE
-  }, silent = TRUE)
+  }, monitor_trace), silent = TRUE)
   monitor_registry <- register_v021_preflight_worker(
     as.integer(monitor_job$pid), parent_pid, "resource_monitor", batch_id,
     paste0(batch_id, "-monitor"))
@@ -322,9 +362,15 @@ run_batch <- function(indices) {
                                             paste0(batch_id, ".rds")))
   file.create(monitor_start_file)
   file.create(start_file)
+  set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
   results <- unname(parallel::mccollect(fit_jobs))
+  set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
   file.create(stop_file)
-  parallel::mccollect(monitor_job)
+  set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
+  monitor_result <- unname(parallel::mccollect(monitor_job))[[1L]]
+  if (inherits(monitor_result, "v021_traced_child_error"))
+    stop(monitor_result$condition_message)
+  set_v021_failure_trace_phase(parent_trace, "monitor_shutdown", completed = TRUE)
   payload <- readRDS(final_file)
   if (!is.null(payload$error)) stop("Live process monitor failed: ", payload$error)
   batch_monitor <- monitor_v021_process_snapshots(
@@ -343,7 +389,7 @@ on.exit(options(old_options), add = TRUE)
 update_status("running")
 
 execution_error <- NULL
-tryCatch(with_v021_single_thread_environment(function() {
+withCallingHandlers(tryCatch(with_v021_single_thread_environment(function() {
   repeat {
     restart <- validate_v021_full_restart_states(manifest)
     manifest <<- restart$manifest
@@ -352,16 +398,26 @@ tryCatch(with_v021_single_thread_environment(function() {
     run_batch(head(restart$resume_indices, config$maximum_simultaneous_fits))
   }
 }), error = function(e) execution_error <<- e,
-interrupt = function(e) execution_error <<- e)
+interrupt = function(e) execution_error <<- e), error = function(e) {
+  if (is.null(parent_trace$last_trace)) capture_v021_failure_trace(e, parent_trace)
+})
 
 if (!is.null(execution_error)) {
+  set_v021_failure_trace_phase(parent_trace, "summary_failure_persistence")
   update_status("failed", conditionMessage(execution_error))
-  .v021_atomic_save_rds(list(
+  trace_paths <- list.files(trace_root, pattern = "^v021_full_failure_trace_v1-.*\\.rds$",
+                            full.names = TRUE)
+  failure_persistence <- persist_v021_failure_payload(list(
     failure_schema = "v021_full_100_species_failure_v1",
     timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
     reason = conditionMessage(execution_error), manifest_path = paths$manifest,
-    monitor_path = file.path(paths$monitor_root, "latest.rds")),
-    file.path(paths$output_root, "failure_payload.rds"))
+    monitor_path = file.path(paths$monitor_root, "latest.rds"),
+    parent_trace = parent_trace$last_trace,
+    child_trace_paths = trace_paths),
+    file.path(paths$output_root, "failure_payload.rds"), trace_root)
+  if (!isTRUE(failure_persistence$persisted))
+    message("V021 failure-payload persistence failure: ",
+            failure_persistence$persistence_error)
   stop(conditionMessage(execution_error))
 }
 
@@ -379,6 +435,7 @@ summary <- list(
   truth_absent = TRUE,
   manifest_path = paths$manifest,
   checkpoint_root = paths$checkpoint_root)
+set_v021_failure_trace_phase(parent_trace, "summary_failure_persistence")
 .v021_atomic_save_rds(summary, paths$summary)
 update_status("completed")
 cat("V021-06 completed.\n")

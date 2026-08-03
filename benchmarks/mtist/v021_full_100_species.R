@@ -2,6 +2,7 @@
 
 v021_full_schema <- "v021_full_100_species_v1"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
+v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
 v021_full_selection_rule <- paste(
   "MTIST 100-species metadata; noise=0.01; even sampling; at least 10 series;",
   "at least 15 timepoints; lowest dataset ID; no truth fields inspected"
@@ -126,4 +127,186 @@ validate_v021_full_restart_states <- function(manifest) {
   if (any(plan$resume_indices %in% which(terminal)))
     stop("Terminal tasks cannot enter the V021-06 resume plan.")
   plan
+}
+
+.v021_trace_sensitive_name <- function(x) {
+  grepl("truth|study|draw|posterior|sample_matrix|coefficient_matrix",
+        x, ignore.case = TRUE)
+}
+
+.v021_safe_object_metadata <- function(frame) {
+  object_names <- ls(frame, all.names = TRUE)
+  object_names <- object_names[!.v021_trace_sensitive_name(object_names)]
+  if (length(object_names)) {
+    lazy <- tryCatch(rlang::env_binding_are_lazy(frame, object_names),
+                     error = function(e) rep(TRUE, length(object_names)))
+    active <- tryCatch(rlang::env_binding_are_active(frame, object_names),
+                       error = function(e) rep(TRUE, length(object_names)))
+    object_names <- object_names[!lazy & !active]
+  }
+  rows <- lapply(object_names, function(object_name) {
+    value <- tryCatch(get(object_name, envir = frame, inherits = FALSE),
+                      error = identity)
+    if (inherits(value, "error") || is.environment(value) || is.function(value) ||
+        typeof(value) == "externalptr") return(NULL)
+    value_names <- attr(value, "names", exact = TRUE)
+    if (!is.null(value_names))
+      value_names <- value_names[!.v021_trace_sensitive_name(value_names)]
+    list(
+      object_name = object_name,
+      typeof = typeof(value),
+      class = as.character(attr(value, "class", exact = TRUE) %||% typeof(value)),
+      length = as.integer(length(value)),
+      dimensions = as.integer(attr(value, "dim", exact = TRUE) %||% integer()),
+      names = head(as.character(value_names %||% character()), 100L)
+    )
+  })
+  Filter(Negate(is.null), rows)
+}
+
+new_v021_failure_trace_context <- function(trace_root, origin,
+                                            batch_id = NA_character_,
+                                            task_ids = integer(),
+                                            direction_ids = character()) {
+  if (!is.character(trace_root) || length(trace_root) != 1L || is.na(trace_root) ||
+      !nzchar(trace_root)) stop("trace_root must be one path.")
+  if (!origin %in% c("parent", "outer_worker", "monitor_child"))
+    stop("Invalid failure-trace origin.")
+  context <- new.env(parent = emptyenv())
+  context$trace_root <- trace_root
+  context$origin <- origin
+  context$batch_id <- as.character(batch_id)
+  context$task_ids <- as.integer(task_ids)
+  context$direction_ids <- as.character(direction_ids)
+  context$phase <- "initialization"
+  context$last_completed_phase <- NA_character_
+  context$last_trace <- NULL
+  context
+}
+
+set_v021_failure_trace_phase <- function(context, phase, completed = FALSE) {
+  if (!is.environment(context) || !is.character(phase) || length(phase) != 1L ||
+      is.na(phase) || !nzchar(phase)) stop("Invalid failure-trace phase.")
+  context$phase <- phase
+  if (isTRUE(completed)) context$last_completed_phase <- phase
+  invisible(context)
+}
+
+.v021_current_ppid <- function() {
+  stat <- tryCatch(readLines("/proc/self/stat", warn = FALSE, n = 1L),
+                   error = function(e) character())
+  if (!length(stat)) return(NA_integer_)
+  parsed <- regexec("^[0-9]+ \\((.*)\\) [^ ] ([0-9]+) ", stat)
+  fields <- regmatches(stat, parsed)[[1L]]
+  if (length(fields) != 3L) NA_integer_ else as.integer(fields[[3L]])
+}
+
+capture_v021_failure_trace <- function(condition, context,
+                                        writer = .v021_atomic_save_rds,
+                                        calls = sys.calls(), frames = sys.frames(),
+                                        timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)) {
+  if (!inherits(condition, "condition") || !is.environment(context))
+    stop("Invalid failure-trace capture input.")
+  call_text <- vapply(calls, function(x) paste(deparse(x, width.cutoff = 500L),
+                                                collapse = " "), character(1))
+  frame_metadata <- lapply(seq_along(frames), function(i) list(
+    frame_index = as.integer(i),
+    call = if (i <= length(call_text)) call_text[[i]] else NA_character_,
+    objects = .v021_safe_object_metadata(frames[[i]])
+  ))
+  condition_call <- conditionCall(condition)
+  trace <- list(
+    trace_schema = v021_full_failure_trace_schema,
+    timestamp = as.character(timestamp),
+    origin = context$origin,
+    pid = as.integer(Sys.getpid()),
+    ppid = .v021_current_ppid(),
+    execution_phase = context$phase,
+    last_completed_phase = context$last_completed_phase,
+    batch_id = context$batch_id,
+    task_ids = context$task_ids,
+    direction_ids = context$direction_ids,
+    condition_class = class(condition),
+    condition_message = conditionMessage(condition),
+    condition_call = if (is.null(condition_call)) NA_character_ else
+      paste(deparse(condition_call, width.cutoff = 500L), collapse = " "),
+    calls = call_text,
+    frame_metadata = frame_metadata
+  )
+  stamp <- gsub("[^0-9]", "", as.character(timestamp))
+  path <- file.path(context$trace_root, sprintf(
+    "%s-%s-pid-%d-%s.rds", v021_full_failure_trace_schema, context$origin,
+    Sys.getpid(), stamp))
+  persistence_error <- tryCatch({
+    writer(trace, path)
+    NA_character_
+  }, error = conditionMessage)
+  result <- list(trace = trace,
+                 trace_path = if (is.na(persistence_error)) path else NA_character_,
+                 trace_persistence_error = persistence_error)
+  context$last_trace <- result
+  result
+}
+
+with_v021_failure_tracing <- function(code, context,
+                                       writer = .v021_atomic_save_rds) {
+  if (!is.function(code)) stop("code must be a function.")
+  withCallingHandlers(code(), error = function(condition) {
+    if (is.null(context$last_trace)) {
+      capture_error <- tryCatch({
+        capture_v021_failure_trace(condition, context, writer = writer)
+        NA_character_
+      }, error = conditionMessage)
+      if (!is.na(capture_error)) context$last_trace <- list(
+        trace = list(
+          trace_schema = v021_full_failure_trace_schema,
+          timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
+          origin = context$origin,
+          condition_class = class(condition),
+          condition_message = conditionMessage(condition),
+          condition_call = if (is.null(conditionCall(condition))) NA_character_ else
+            paste(deparse(conditionCall(condition)), collapse = " ")
+        ),
+        trace_path = NA_character_,
+        trace_persistence_error = paste("trace_capture_failed", capture_error, sep = ": ")
+      )
+    }
+  })
+}
+
+run_v021_traced_child <- function(code, context,
+                                   writer = .v021_atomic_save_rds) {
+  tryCatch(
+    with_v021_failure_tracing(code, context, writer),
+    error = function(condition) structure(list(
+      condition_class = class(condition),
+      condition_message = conditionMessage(condition),
+      condition_call = if (is.null(conditionCall(condition))) NA_character_ else
+        paste(deparse(conditionCall(condition), width.cutoff = 500L), collapse = " "),
+      trace = context$last_trace
+    ), class = c("v021_traced_child_error", "list"))
+  )
+}
+
+persist_v021_failure_payload <- function(payload, path, trace_root,
+                                          writer = .v021_atomic_save_rds) {
+  if (file.exists(path)) {
+    archive_error <- tryCatch({
+      prior <- readRDS(path)
+      archive <- file.path(trace_root, sprintf(
+        "prior-failure-payload-%s.rds",
+        format(Sys.time(), "%Y%m%dT%H%M%OS6", tz = "UTC")))
+      writer(prior, archive)
+      NA_character_
+    }, error = conditionMessage)
+    if (!is.na(archive_error)) return(list(
+      persisted = FALSE,
+      persistence_error = paste("prior_failure_archive_failed", archive_error, sep = ": ")
+    ))
+  }
+  persistence_error <- tryCatch({
+    writer(payload, path)
+    NA_character_
+  }, error = conditionMessage)
+  list(persisted = is.na(persistence_error), persistence_error = persistence_error)
 }

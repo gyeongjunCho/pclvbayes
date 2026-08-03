@@ -115,3 +115,100 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl("worker_compilation_count = 0L", runner, fixed = TRUE)))
   expect_false(any(grepl("cmdstan_model|compile\\(", runner)))
 })
+
+test_that("parent failures retain exact calls, phases, identities, and safe metadata", {
+  root <- tempfile("v021-traces-")
+  context <- new_v021_failure_trace_context(
+    root, "parent", "batch-00042", 42L, "direction-000084")
+  set_v021_failure_trace_phase(context, "artifact_finalization")
+  set_v021_failure_trace_phase(context, "checkpoint_write", completed = TRUE)
+  set_v021_failure_trace_phase(context, "feature_generation")
+
+  trigger <- function() {
+    offending_object <- 7L
+    harmless_label <- "kept"
+    truth_matrix <- matrix(1, 2, 2)
+    posterior_draws <- matrix(2, 2, 2)
+    complete_study <- list(secret = 1)
+    hidden_environment <- new.env()
+    hidden_closure <- function() NULL
+    (offending_object)()
+  }
+  expect_error(with_v021_failure_tracing(trigger, context),
+               "attempt to apply non-function")
+  captured <- context$last_trace
+  expect_true(file.exists(captured$trace_path))
+  trace <- readRDS(captured$trace_path)
+  expect_identical(trace$trace_schema, "v021_full_failure_trace_v1")
+  expect_identical(trace$origin, "parent")
+  expect_identical(trace$execution_phase, "feature_generation")
+  expect_identical(trace$last_completed_phase, "checkpoint_write")
+  expect_identical(trace$batch_id, "batch-00042")
+  expect_identical(trace$task_ids, 42L)
+  expect_identical(trace$direction_ids, "direction-000084")
+  expect_true(any(grepl("offending_object", trace$calls, fixed = TRUE)))
+  metadata <- unlist(lapply(trace$frame_metadata, function(x)
+    vapply(x$objects, `[[`, character(1), "object_name")), use.names = FALSE)
+  expect_true("offending_object" %in% metadata)
+  expect_false(any(grepl("truth|study|draw|environment|closure", metadata,
+                         ignore.case = TRUE)))
+  expect_false(any(grepl("\\.tmp-", list.files(root, all.files = TRUE))))
+})
+
+test_that("outer-worker and monitor-child failures retain their own traces", {
+  root <- tempfile("v021-child-traces-")
+  run_failure <- function(origin) {
+    context <- new_v021_failure_trace_context(
+      root, origin, "batch-00007", 7L, "direction-000014")
+    set_v021_failure_trace_phase(context,
+      if (origin == "outer_worker") "worker_execution" else "monitor_polling")
+    run_v021_traced_child(function() {
+      offending_callback <- 1L
+      (offending_callback)()
+    }, context)
+  }
+  if (.Platform$OS.type == "windows") skip("forked worker tracing requires Unix")
+  worker_job <- parallel::mcparallel(run_failure("outer_worker"), silent = TRUE)
+  worker <- unname(parallel::mccollect(worker_job))[[1L]]
+  monitor <- run_failure("monitor_child")
+  for (result in list(worker, monitor)) {
+    expect_s3_class(result, "v021_traced_child_error")
+    expect_match(result$condition_message, "attempt to apply non-function")
+    expect_true(file.exists(result$trace$trace_path))
+    persisted <- readRDS(result$trace$trace_path)
+    expect_true(any(grepl("offending_callback", persisted$calls, fixed = TRUE)))
+    expect_identical(persisted$task_ids, 7L)
+    expect_identical(persisted$direction_ids, "direction-000014")
+  }
+  expect_identical(readRDS(worker$trace$trace_path)$origin, "outer_worker")
+  expect_identical(readRDS(monitor$trace$trace_path)$origin, "monitor_child")
+})
+
+test_that("trace-write failure preserves the original condition", {
+  context <- new_v021_failure_trace_context(
+    tempfile("v021-trace-failure-"), "parent", "batch-1", 1L, "direction-1")
+  bad_writer <- function(object, path) stop("injected trace writer failure")
+  result <- tryCatch(with_v021_failure_tracing(function() {
+    offending_value <- 2L
+    (offending_value)()
+  }, context, writer = bad_writer), error = identity)
+  expect_s3_class(result, "error")
+  expect_match(conditionMessage(result), "attempt to apply non-function")
+  expect_match(context$last_trace$trace_persistence_error,
+               "injected trace writer failure")
+  expect_true(is.na(context$last_trace$trace_path))
+  expect_true(any(grepl("offending_value", context$last_trace$trace$calls,
+                         fixed = TRUE)))
+})
+
+test_that("runner marks and traces every V021-06 execution boundary", {
+  runner <- readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE)
+  phases <- c("batch_launch", "worker_execution", "fit_return_handling",
+    "scientific_state_classification", "artifact_finalization",
+    "feature_generation", "checkpoint_write", "manifest_update",
+    "summary_failure_persistence", "monitor_polling", "monitor_shutdown")
+  for (phase in phases) expect_true(any(grepl(phase, runner, fixed = TRUE)))
+  expect_true(any(grepl("run_v021_traced_child", runner, fixed = TRUE)))
+  expect_true(any(grepl("persist_v021_failure_payload", runner, fixed = TRUE)))
+})
