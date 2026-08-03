@@ -365,10 +365,10 @@ test_that("truth joins reject non-final and invalid inference states", {
 test_that("truth-derived fields cannot become diagnostic features", {
   artifact <- make_v021_artifact()
   artifact$inference_results$feature_inputs$truth_sign <- -1
-  expect_error(finalize_v021_inference_artifact(artifact), "Truth-bearing")
+  expect_error(finalize_v021_inference_artifact(artifact), "truth_sign")
   artifact <- make_v021_artifact()
   artifact$inference_results$feature_inputs$benchmark_outcome <- "opposite"
-  expect_error(finalize_v021_inference_artifact(artifact), "Truth-bearing")
+  expect_error(finalize_v021_inference_artifact(artifact), "benchmark_outcome")
 })
 
 test_that("pair manifests preserve both directions and caller assignments", {
@@ -530,4 +530,184 @@ test_that("truth joining cannot flip coefficients or posterior signs", {
   )
   expect_identical(joined$inference_results$posterior_coefficients, coefficient)
   expect_identical(joined$inference_results$posterior_sign_probabilities, signs)
+})
+
+make_v021_analysis_specification <- function(truth_payload = NULL) {
+  tasks <- make_v021_tasks()[1:4, c(
+    "task_id", "direction_index", "target", "source", "seed")]
+  # truth_payload is deliberately external to every constructor argument.
+  force(truth_payload)
+  build_v021_truth_free_analysis_specification(
+    dataset_id = "d1", observed_data_id = "observed-dataset-1",
+    taxa_order = c("a", "b", "c"), task_manifest = tasks,
+    subject_universe = c("subject-b", "subject-a"),
+    time_metadata = data.frame(
+      subject = c("subject-a", "subject-a", "subject-b", "subject-b"),
+      time = c(0, 1, 0, 1), stringsAsFactors = FALSE),
+    preprocessing_config = list(schema = "closure-v1", min_pairs = 4L),
+    posterior_config = list(chains = 4L, retry_limit = 0L),
+    kfold_config = list(K = 2L, R = 1L), public_seed = 101L,
+    kfold_seed = 808L, scorer_name = "student-t-scale-mixture-kalman-ou-q16",
+    provenance = list(git_commit = "fixture", config_id = "fixture-v1")
+  )
+}
+
+make_v021_final_record <- function(spec, row = 1L, status = "completed") {
+  build_v021_finalized_inference_record(
+    spec, spec$task_manifest[row, , drop = FALSE], status,
+    posterior_summaries = list(mean = -0.2, interval = c(-0.4, -0.1)),
+    psp_lfsr = list(posterior_sign = -1L, PSP = 0.99, LFSR = 0.01),
+    diagnostics = list(class = "converged", rhat = 1.001),
+    predictive_eligibility = TRUE,
+    pair_specific_elpd = list(value = -12, method = "student-t-scale-mixture-kalman-ou-q16"),
+    failure_information = list(reason = NA_character_),
+    seed_split_provenance = list(direction_seed = spec$direction_seeds[[row]],
+                                 kfold_seed = spec$kfold_seed),
+    finalized_timestamp = "2026-08-03 UTC"
+  )
+}
+
+test_that("formal analysis specification is truth-free and truth perturbation invariant", {
+  first <- make_v021_analysis_specification(matrix(c(0, 1, -1, 0), 2))
+  second <- make_v021_analysis_specification(matrix(c(99, -8, 4, 2), 2))
+  expect_identical(first, second)
+  expect_silent(validate_v021_truth_free_analysis_specification(first))
+  expect_identical(first$task_manifest, second$task_manifest)
+  expect_identical(first$task_manifest$direction_index,
+                   second$task_manifest$direction_index)
+  expect_identical(first$direction_seeds, second$direction_seeds)
+  expect_identical(first$kfold_seed, second$kfold_seed)
+  expect_identical(first$preprocessing_config, second$preprocessing_config)
+  expect_identical(first$posterior_config, second$posterior_config)
+  expect_identical(first$kfold_config, second$kfold_config)
+  expect_identical(first$subject_universe, c("subject-a", "subject-b"))
+})
+
+test_that("recursive prohibited fields identify exact offending paths", {
+  allowed <- list(
+    truth_free_note = "prose is not scanned by substring",
+    filename = "oracle-report-is-not-a-field-name.tsv",
+    metadata = data.frame(subject = "s1", coverage_note = "descriptive"),
+    nested = list(predictive_eligibility = TRUE, PSP = .99, LFSR = .01)
+  )
+  expect_silent(assert_v021_truth_free_schema(allowed, "allowed"))
+
+  attacks <- list(
+    top = list(absolute_A = 1),
+    nested = list(metadata = list(corrected_oracle = -.2)),
+    list_column = data.frame(id = 1, payload = I(list(list(truth_sign = -1))))
+  )
+  expect_error(assert_v021_truth_free_schema(attacks$top, "spec"),
+               "spec\\$absolute_A")
+  expect_error(assert_v021_truth_free_schema(attacks$nested, "spec"),
+               "spec\\$metadata\\$corrected_oracle")
+  expect_error(assert_v021_truth_free_schema(attacks$list_column, "manifest"),
+               "manifest\\$payload\\[\\[1\\]\\]\\$truth_sign")
+
+  spec <- make_v021_analysis_specification()
+  spec$posterior_config$withholding_truth_label <- "bad"
+  expect_error(validate_v021_truth_free_analysis_specification(spec),
+               "posterior_config\\$withholding_truth_label")
+})
+
+test_that("finalized inference records enforce terminal identity and exclude truth", {
+  spec <- make_v021_analysis_specification()
+  record <- make_v021_final_record(spec)
+  expect_silent(validate_v021_finalized_inference_record(record))
+  expect_identical(record$record_schema, v021_finalized_inference_schema)
+  expect_true(record$finalized)
+
+  unfinished <- record
+  unfinished$finalized <- FALSE
+  expect_error(validate_v021_finalized_inference_record(unfinished), "finalized state")
+  running <- record
+  running$terminal_status <- "running"
+  expect_error(validate_v021_finalized_inference_record(running), "terminal status")
+  missing <- record
+  missing$posterior_summaries <- NULL
+  expect_error(validate_v021_finalized_inference_record(missing), "lacks required")
+  leaked <- record
+  leaked$diagnostics$empirical_false_sign <- TRUE
+  expect_error(validate_v021_finalized_inference_record(leaked),
+               "diagnostics\\$empirical_false_sign")
+  wrong_task <- spec$task_manifest[1, , drop = FALSE]
+  wrong_task$source <- "c"
+  expect_error(build_v021_finalized_inference_record(spec, wrong_task, "completed"),
+               "disagrees")
+})
+
+test_that("post-inference truth table is separate, immutable, and uses A target source", {
+  spec <- make_v021_analysis_specification()
+  records <- list(make_v021_final_record(spec, 1L), make_v021_final_record(spec, 2L))
+  records[[2L]]$psp_lfsr$posterior_sign <- 1L
+  frozen <- serialize(records, NULL, version = 3)
+  A <- matrix(c(0, 2, -4, -3, 0, 5, 7, -8, 0), 3, 3, byrow = TRUE,
+              dimnames = list(spec$taxa_order, spec$taxa_order))
+  oracle <- data.frame(
+    dataset_id = "d1", task_id = c(1L, 1L), direction_index = c(1L, 2L),
+    target = c("a", "b"), source = c("b", "a"),
+    corrected_oracle = c(-.5, .4), stringsAsFactors = FALSE)
+  truth <- build_v021_post_inference_truth_table(records, A, oracle)
+  expect_identical(serialize(records, NULL, version = 3), frozen)
+  expect_identical(truth$absolute_A, c(A["a", "b"], A["b", "a"]))
+  expect_identical(truth$source, c("b", "a"))
+  expect_identical(truth$target, c("a", "b"))
+  expect_false(identical(truth$absolute_A[[1L]], truth$absolute_A[[2L]]))
+  expect_identical(truth$posterior_vs_oracle, c("agree", "agree"))
+  expect_false(any(c("absolute_A", "structural_zero", "corrected_oracle",
+                     "glv_to_oracle_class", "posterior_vs_oracle") %in%
+                   names(records[[1L]])))
+
+  duplicated <- c(records, records[1L])
+  expect_error(build_v021_post_inference_truth_table(duplicated, A, oracle),
+               "duplicated or ambiguous")
+  wrong_taxa <- A[c("b", "a", "c"), , drop = FALSE]
+  expect_error(build_v021_post_inference_truth_table(records, wrong_taxa, oracle),
+               "taxa order")
+  incomplete <- records
+  incomplete[[1L]]$terminal_status <- "incomplete"
+  expect_error(build_v021_post_inference_truth_table(incomplete, A, oracle),
+               "terminal status")
+})
+
+test_that("post-inference projection classes keep structural zero distinct", {
+  expect_identical(classify_v021_glv_to_oracle(1, 2), "same_sign")
+  expect_identical(classify_v021_glv_to_oracle(1, -2), "sign_reversal")
+  expect_identical(classify_v021_glv_to_oracle(0, -2),
+                   "absolute_zero_to_projected_nonzero")
+  expect_identical(classify_v021_glv_to_oracle(2, 0),
+                   "absolute_nonzero_to_projected_zero")
+  expect_identical(classify_v021_glv_to_oracle(0, 0), "both_zero")
+})
+
+test_that("truth-free scientific decisions depend only on their declared inputs", {
+  external_truth <- list(A = matrix(c(0, 1, -1, 0), 2), oracle_sign = -1L)
+  draws <- c(-.4, -.2, -.1, .1)
+  diagnostics <- list(worst_rhat = 1.001, min_ess_bulk = 800,
+                      min_ess_tail = 700, ebfmi_min = .9,
+                      n_divergent = 0L, n_treedepth_hit = 0L)
+  split_one <- pclvbayes:::.make_repkfold_splits(
+    factor(c("s3", "s1", "s2", "s4"), levels = c("s4", "s3", "s2", "s1")),
+    K = 2L, R = 2L, seed = 44L)
+  lfsr_one <- pclvbayes:::.lfsr_from_two_sided(2 * min(mean(draws > 0), mean(draws < 0)))
+  external_truth$A[,] <- 999
+  external_truth$oracle_sign <- 1L
+  split_two <- pclvbayes:::.make_repkfold_splits(
+    c("s1", "s2", "s3", "s4"), K = 2L, R = 2L, seed = 44L)
+  lfsr_two <- pclvbayes:::.lfsr_from_two_sided(2 * min(mean(draws > 0), mean(draws < 0)))
+  expect_identical(split_one, split_two)
+  expect_identical(lfsr_one, lfsr_two)
+  expect_identical(diagnostics, diagnostics)
+})
+
+test_that("maintained V021 inference path loads observations without truth", {
+  full_runner <- readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE)
+  observation_block <- full_runner[
+    grep("selected_dataset <-", full_runner, fixed = TRUE):
+      grep("tasks <- build_v021_full_task_table", full_runner, fixed = TRUE)]
+  expect_true(any(grepl("load_v021_preflight_observations", observation_block,
+                        fixed = TRUE)))
+  expect_false(any(grepl("load_mtist_study|study\\$truth|truth_path", observation_block)))
+  expect_false(any(grepl("A\\[.*target.*source", full_runner)))
 })

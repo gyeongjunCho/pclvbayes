@@ -39,13 +39,53 @@ v021_inference_result_fields <- c(
 
 v021_retained_fixture_schema <- "v021_retained_inference_fixture_v1"
 
+v021_truth_free_analysis_schema <- "v021_truth_free_analysis_specification_v1"
+v021_finalized_inference_schema <- "v021_finalized_inference_record_v1"
+v021_post_inference_truth_schema <- "v021_post_inference_truth_table_v1"
+
+v021_prohibited_preinference_fields <- c(
+  "absolute_a", "glv_a", "glv_a_target_source", "truth", "truth_sign",
+  "expected_sign", "corrected_oracle", "oracle_sign", "structural_zero",
+  "sign_reversal", "glv_to_oracle_class", "posterior_vs_truth",
+  "posterior_vs_oracle", "posterior_vs_glv", "empirical_false_sign",
+  "coverage", "withholding_truth_label", "absolute_zero",
+  "absolute_zero_to_projected_nonzero", "projected_nonzero",
+  "truth_derived_susceptibility", "truth_derived_eligibility",
+  "truth_derived_priority", "truth_derived_seed"
+)
+
 .v021_copy <- function(x) unserialize(serialize(x, NULL, version = 3))
 
 .v021_truth_name <- function(x) {
-  grepl(
-    "(^|[._])(truth|ground[._]?truth|absolute[._]?a|truth[._]?(matrix|path|loader|coefficient|sign|label)|benchmark[._]?(outcome|label))($|[._])",
-    tolower(x), perl = TRUE
+  normalized <- tolower(x)
+  normalized %in% v021_prohibited_preinference_fields | grepl(
+    "(^|[._])(ground[._]?truth|absolute[._]?a|truth[._]?(matrix|path|loader|coefficient|sign|label)|benchmark[._]?(outcome|label))($|[._])",
+    normalized, perl = TRUE
   )
+}
+
+.v021_prohibited_field_paths <- function(x, path = "object") {
+  found <- character()
+  if (is.data.frame(x) || is.list(x)) {
+    nms <- names(x)
+    if (!is.null(nms)) {
+      bad <- which(.v021_truth_name(nms))
+      if (length(bad)) found <- c(found, paste0(path, "$", nms[bad]))
+    }
+    for (i in seq_along(x)) {
+      child <- if (!is.null(nms) && nzchar(nms[[i]]))
+        paste0(path, "$", nms[[i]]) else paste0(path, "[[", i, "]]")
+      found <- c(found, .v021_prohibited_field_paths(x[[i]], child))
+    }
+  }
+  unique(found)
+}
+
+assert_v021_truth_free_schema <- function(x, path = "object") {
+  offending <- .v021_prohibited_field_paths(x, path)
+  if (length(offending))
+    stop("Prohibited pre-inference truth field(s): ", paste(offending, collapse = ", "))
+  invisible(TRUE)
 }
 
 .v021_assert_names <- function(x, allowed, required = character(), path) {
@@ -66,8 +106,7 @@ v021_retained_fixture_schema <- "v021_retained_inference_fixture_v1"
       typeof(x) == "weakref" || typeof(x) == "symbol" || typeof(x) == "language")
     stop("Forbidden reference or executable object at ", path, ".")
   if (is.data.frame(x)) {
-    if (scan_truth_names && any(.v021_truth_name(names(x))))
-      stop("Truth-bearing name at ", path, ".")
+    if (scan_truth_names) assert_v021_truth_free_schema(x, path)
     if (length(setdiff(names(attributes(x)), c("names", "row.names", "class"))))
       stop("Arbitrary attributes are forbidden at ", path, ".")
     for (nm in names(x)) .v021_assert_plain_value(x[[nm]], paste0(path, "$", nm), scan_truth_names)
@@ -84,8 +123,7 @@ v021_retained_fixture_schema <- "v021_retained_inference_fixture_v1"
   if (is.list(x)) {
     if (is.null(names(x)) && length(x))
       stop("Unnamed nested lists are forbidden at ", path, ".")
-    if (scan_truth_names && length(x) && any(.v021_truth_name(names(x))))
-      stop("Truth-bearing name at ", path, ".")
+    if (scan_truth_names && length(x)) assert_v021_truth_free_schema(x, path)
     for (nm in names(x))
       .v021_assert_plain_value(x[[nm]], paste0(path, "$", nm), scan_truth_names)
   }
@@ -417,4 +455,239 @@ join_v021_truth_post_inference <- function(inference_artifact, truth_artifact) {
   out <- .v021_copy(inference_artifact)
   out$evaluation <- .v021_copy(truth_artifact)
   out
+}
+
+v021_analysis_specification_fields <- c(
+  "analysis_schema", "dataset_id", "observed_data_id", "taxa_order",
+  "task_manifest", "subject_universe", "time_metadata",
+  "preprocessing_config", "posterior_config", "kfold_config", "public_seed",
+  "kfold_seed", "direction_seeds", "scorer_name", "provenance"
+)
+
+build_v021_truth_free_analysis_specification <- function(
+    dataset_id, observed_data_id, taxa_order, task_manifest, subject_universe,
+    time_metadata, preprocessing_config, posterior_config, kfold_config,
+    public_seed, kfold_seed, scorer_name, provenance) {
+  spec <- list(
+    analysis_schema = v021_truth_free_analysis_schema,
+    dataset_id = as.character(dataset_id),
+    observed_data_id = as.character(observed_data_id),
+    taxa_order = as.character(taxa_order),
+    task_manifest = .v021_copy(task_manifest),
+    subject_universe = sort(unique(as.character(subject_universe)), method = "radix"),
+    time_metadata = .v021_copy(time_metadata),
+    preprocessing_config = .v021_copy(preprocessing_config),
+    posterior_config = .v021_copy(posterior_config),
+    kfold_config = .v021_copy(kfold_config),
+    public_seed = as.integer(public_seed),
+    kfold_seed = as.integer(kfold_seed),
+    direction_seeds = as.integer(task_manifest$seed),
+    scorer_name = as.character(scorer_name),
+    provenance = .v021_copy(provenance)
+  )
+  validate_v021_truth_free_analysis_specification(spec)
+  spec
+}
+
+validate_v021_truth_free_analysis_specification <- function(x) {
+  if (!is.list(x) || is.object(x))
+    stop("Truth-free analysis specification must be a plain list.")
+  .v021_assert_names(x, v021_analysis_specification_fields,
+                     v021_analysis_specification_fields, "analysis specification")
+  assert_v021_truth_free_schema(x, "analysis specification")
+  for (nm in names(x))
+    .v021_assert_plain_value(x[[nm]], paste0("analysis specification$", nm))
+  if (!identical(x$analysis_schema, v021_truth_free_analysis_schema))
+    stop("Unsupported truth-free analysis schema.")
+  scalar_text <- c("dataset_id", "observed_data_id", "scorer_name")
+  if (any(vapply(x[scalar_text], function(z)
+    !is.character(z) || length(z) != 1L || is.na(z) || !nzchar(z), logical(1))))
+    stop("Analysis string identities must be non-empty scalars.")
+  if (!is.character(x$taxa_order) || length(x$taxa_order) < 2L ||
+      anyNA(x$taxa_order) || any(!nzchar(x$taxa_order)) || anyDuplicated(x$taxa_order))
+    stop("Analysis taxa order must contain unique taxa.")
+  required_task <- c("task_id", "direction_index", "target", "source", "seed")
+  if (!is.data.frame(x$task_manifest) || !all(required_task %in% names(x$task_manifest)) ||
+      !nrow(x$task_manifest) || anyDuplicated(x$task_manifest$direction_index) ||
+      anyDuplicated(paste(x$task_manifest$task_id, x$task_manifest$direction_index)))
+    stop("Analysis task manifest has invalid or ambiguous identities.")
+  if (any(!x$task_manifest$target %in% x$taxa_order) ||
+      any(!x$task_manifest$source %in% x$taxa_order) ||
+      any(x$task_manifest$target == x$task_manifest$source))
+    stop("Analysis task directions disagree with taxa order.")
+  if (!identical(as.integer(x$direction_seeds), as.integer(x$task_manifest$seed)))
+    stop("Direction seeds disagree with the task manifest.")
+  if (!is.character(x$subject_universe) || !length(x$subject_universe) ||
+      anyNA(x$subject_universe) || any(!nzchar(x$subject_universe)) ||
+      anyDuplicated(x$subject_universe) ||
+      !identical(x$subject_universe, sort(x$subject_universe, method = "radix")))
+    stop("Subject universe must be canonical and non-empty.")
+  if (!is.data.frame(x$time_metadata) ||
+      !all(c("subject", "time") %in% names(x$time_metadata)))
+    stop("Time metadata must contain subject and time.")
+  for (nm in c("public_seed", "kfold_seed"))
+    if (length(x[[nm]]) != 1L || is.na(x[[nm]]) || x[[nm]] < 0L)
+      stop(nm, " must be one non-negative integer.")
+  invisible(TRUE)
+}
+
+v021_finalized_inference_record_fields <- c(
+  "record_schema", "finalized", "finalized_timestamp", "dataset_id",
+  "taxa_order", "task_id", "direction_index", "target", "source",
+  "direction_seed", "terminal_status", "posterior_summaries", "psp_lfsr",
+  "diagnostics", "predictive_eligibility", "pair_specific_elpd",
+  "failure_information", "seed_split_provenance"
+)
+
+build_v021_finalized_inference_record <- function(
+    analysis_specification, task, terminal_status, posterior_summaries = list(),
+    psp_lfsr = list(), diagnostics = list(), predictive_eligibility = NA,
+    pair_specific_elpd = list(), failure_information = list(),
+    seed_split_provenance = list(),
+    finalized_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)) {
+  validate_v021_truth_free_analysis_specification(analysis_specification)
+  if (!is.data.frame(task) || nrow(task) != 1L)
+    stop("Finalized record task must be one manifest row.")
+  index <- match(task$direction_index, analysis_specification$task_manifest$direction_index)
+  required <- c("task_id", "direction_index", "target", "source", "seed")
+  if (is.na(index) || !all(required %in% names(task)) ||
+      !identical(as.list(task[1L, required, drop = FALSE]),
+                 as.list(analysis_specification$task_manifest[index, required, drop = FALSE])))
+    stop("Finalized record task identity disagrees with the analysis manifest.")
+  record <- list(
+    record_schema = v021_finalized_inference_schema,
+    finalized = TRUE,
+    finalized_timestamp = as.character(finalized_timestamp),
+    dataset_id = analysis_specification$dataset_id,
+    taxa_order = analysis_specification$taxa_order,
+    task_id = as.integer(task$task_id),
+    direction_index = as.integer(task$direction_index),
+    target = as.character(task$target), source = as.character(task$source),
+    direction_seed = as.integer(task$seed), terminal_status = terminal_status,
+    posterior_summaries = .v021_copy(posterior_summaries),
+    psp_lfsr = .v021_copy(psp_lfsr), diagnostics = .v021_copy(diagnostics),
+    predictive_eligibility = predictive_eligibility,
+    pair_specific_elpd = .v021_copy(pair_specific_elpd),
+    failure_information = .v021_copy(failure_information),
+    seed_split_provenance = .v021_copy(seed_split_provenance)
+  )
+  validate_v021_finalized_inference_record(record)
+  record
+}
+
+validate_v021_finalized_inference_record <- function(x) {
+  if (!is.list(x) || is.object(x)) stop("Finalized inference record must be a plain list.")
+  .v021_assert_names(x, v021_finalized_inference_record_fields,
+                     v021_finalized_inference_record_fields, "finalized inference record")
+  assert_v021_truth_free_schema(x, "finalized inference record")
+  for (nm in names(x))
+    .v021_assert_plain_value(x[[nm]], paste0("finalized inference record$", nm))
+  if (!identical(x$record_schema, v021_finalized_inference_schema) ||
+      !identical(x$finalized, TRUE) || !is.character(x$finalized_timestamp) ||
+      length(x$finalized_timestamp) != 1L || is.na(x$finalized_timestamp) ||
+      !nzchar(x$finalized_timestamp))
+    stop("Inference record lacks an explicit finalized state.")
+  if (!x$terminal_status %in% c("completed", "failed", "skipped", "unavailable"))
+    stop("Inference record lacks a valid terminal status.")
+  if (!is.character(x$taxa_order) || anyDuplicated(x$taxa_order) ||
+      !all(c(x$target, x$source) %in% x$taxa_order) || identical(x$target, x$source))
+    stop("Inference record direction or taxa order is invalid.")
+  if (length(x$task_id) != 1L || length(x$direction_index) != 1L ||
+      length(x$direction_seed) != 1L || anyNA(c(x$task_id, x$direction_index,
+                                                x$direction_seed)))
+    stop("Inference record identity is incomplete.")
+  invisible(TRUE)
+}
+
+.v021_sign_with_tolerance <- function(x, tolerance) {
+  if (!is.numeric(x) || length(x) != 1L || is.na(x) || !is.finite(x)) return(NA_integer_)
+  if (abs(x) <= tolerance) 0L else as.integer(sign(x))
+}
+
+classify_v021_glv_to_oracle <- function(absolute_A, corrected_oracle,
+                                         tolerance = 1e-10) {
+  a_sign <- .v021_sign_with_tolerance(absolute_A, tolerance)
+  oracle_sign <- .v021_sign_with_tolerance(corrected_oracle, tolerance)
+  if (is.na(a_sign) || is.na(oracle_sign)) return(NA_character_)
+  if (a_sign == 0L && oracle_sign == 0L) return("both_zero")
+  if (a_sign == 0L) return("absolute_zero_to_projected_nonzero")
+  if (oracle_sign == 0L) return("absolute_nonzero_to_projected_zero")
+  if (a_sign == oracle_sign) "same_sign" else "sign_reversal"
+}
+
+build_v021_post_inference_truth_table <- function(
+    inference_records, absolute_A, oracle_table, zero_tolerance = 1e-10) {
+  if (!is.list(inference_records) || !length(inference_records))
+    stop("At least one finalized inference record is required.")
+  invisible(lapply(inference_records, validate_v021_finalized_inference_record))
+  identities <- vapply(inference_records, function(x)
+    paste(x$dataset_id, x$task_id, x$direction_index, x$target, x$source, sep = "\r"),
+    character(1))
+  if (anyDuplicated(identities)) stop("Finalized inference task identity is duplicated or ambiguous.")
+  datasets <- unique(vapply(inference_records, `[[`, character(1), "dataset_id"))
+  taxa <- lapply(inference_records, `[[`, "taxa_order")
+  if (length(datasets) != 1L || !all(vapply(taxa, identical, logical(1), taxa[[1L]])))
+    stop("Inference records have inconsistent dataset identity or taxa order.")
+  taxa <- taxa[[1L]]
+  if (!is.matrix(absolute_A) || !is.numeric(absolute_A) || any(!is.finite(absolute_A)) ||
+      !identical(rownames(absolute_A), taxa) || !identical(colnames(absolute_A), taxa))
+    stop("Absolute interaction matrix does not match the finalized taxa order.")
+  oracle_required <- c("dataset_id", "task_id", "direction_index", "target", "source",
+                       "corrected_oracle")
+  if (!is.data.frame(oracle_table) || !all(oracle_required %in% names(oracle_table)))
+    stop("Post-inference oracle table lacks required identity fields.")
+  oracle_keys <- do.call(paste, c(oracle_table[oracle_required[1:5]], sep = "\r"))
+  record_keys <- vapply(inference_records, function(x)
+    paste(x$dataset_id, x$task_id, x$direction_index, x$target, x$source, sep = "\r"),
+    character(1))
+  if (anyDuplicated(oracle_keys) || anyNA(match(record_keys, oracle_keys)))
+    stop("Post-inference oracle identity is duplicated, ambiguous, or incomplete.")
+  matched <- oracle_table[match(record_keys, oracle_keys), , drop = FALSE]
+  optional_oracle <- c(
+    state_contrast_min = NA_real_, state_contrast_max = NA_real_,
+    state_contrast_mean = NA_real_, state_contrast_median = NA_real_,
+    state_sign_crossing = NA
+  )
+  for (nm in names(optional_oracle))
+    if (!nm %in% names(matched)) matched[[nm]] <- optional_oracle[[nm]]
+  rows <- lapply(seq_along(inference_records), function(i) {
+    record <- inference_records[[i]]
+    absolute <- as.numeric(absolute_A[record$target, record$source])
+    oracle <- as.numeric(matched$corrected_oracle[[i]])
+    posterior_sign <- record$psp_lfsr$posterior_sign
+    if (is.null(posterior_sign)) posterior_sign <- NA_real_
+    oracle_sign <- .v021_sign_with_tolerance(oracle, zero_tolerance)
+    posterior_sign <- .v021_sign_with_tolerance(posterior_sign, 0)
+    absolute_outcome <- classify_absolute_truth_outcome(posterior_sign, absolute)
+    interval <- record$posterior_summaries$interval
+    coverage <- if (is.numeric(interval) && length(interval) == 2L &&
+                    all(is.finite(interval)))
+      absolute >= min(interval) && absolute <= max(interval) else NA
+    empirical_false_sign <- if (is.na(posterior_sign) || absolute == 0) NA else
+      posterior_sign != sign(absolute)
+    data.frame(
+      truth_schema = v021_post_inference_truth_schema,
+      dataset_id = record$dataset_id, task_id = record$task_id,
+      direction_index = record$direction_index, target = record$target,
+      source = record$source, absolute_A = absolute,
+      structural_zero = identical(absolute, 0), corrected_oracle = oracle,
+      oracle_sign = oracle_sign,
+      state_contrast_min = as.numeric(matched$state_contrast_min[[i]]),
+      state_contrast_max = as.numeric(matched$state_contrast_max[[i]]),
+      state_contrast_mean = as.numeric(matched$state_contrast_mean[[i]]),
+      state_contrast_median = as.numeric(matched$state_contrast_median[[i]]),
+      state_sign_crossing = as.logical(matched$state_sign_crossing[[i]]),
+      glv_to_oracle_class = classify_v021_glv_to_oracle(
+        absolute, oracle, zero_tolerance),
+      posterior_vs_oracle = if (is.na(posterior_sign) || is.na(oracle_sign))
+        "not_reportable" else if (oracle_sign == 0L) "oracle_zero" else
+        if (posterior_sign == oracle_sign) "agree" else "disagree",
+      posterior_vs_absolute_A = absolute_outcome$absolute_truth_outcome,
+      coverage = coverage, empirical_false_sign = empirical_false_sign,
+      calibration_outcome = NA_character_,
+      terminal_status = record$terminal_status,
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
 }
