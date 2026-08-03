@@ -24,14 +24,15 @@ build_v021_full_config <- function(output_root) {
     iter_warmup = 2000L,
     iter_sampling = 2000L,
     nominal_retained_draws = 8000L,
-    maximum_simultaneous_fits = 2L,
+    maximum_simultaneous_fits = 3L,
     maximum_task_attempts = 2L,
     kfold_seed = 20260802L,
     preprocessing_config_id = "pclv_smoothed_full_composition_closure_v1",
     posterior_config_id = "student_t_irregular_time_ou_4x2000_v1",
     predictive_config_id = "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1",
-    run_kfold = FALSE,
+    run_kfold = TRUE,
     use_pathfinder = FALSE,
+    cpu_affinity = "0-15",
     output_root = normalizePath(output_root, mustWork = FALSE)
   )
 }
@@ -43,7 +44,7 @@ validate_v021_full_config <- function(config) {
     "iter_warmup", "iter_sampling", "nominal_retained_draws",
     "maximum_simultaneous_fits", "maximum_task_attempts", "kfold_seed",
     "preprocessing_config_id", "posterior_config_id", "predictive_config_id",
-    "run_kfold", "use_pathfinder", "output_root"
+    "run_kfold", "use_pathfinder", "cpu_affinity", "output_root"
   )
   if (!is.list(config) || !identical(names(config), fields) ||
       !identical(config$benchmark_schema, v021_full_schema) ||
@@ -55,7 +56,7 @@ validate_v021_full_config <- function(config) {
       !identical(config$chains, 4L) || !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
-      !identical(config$maximum_simultaneous_fits, 2L) ||
+      !identical(config$maximum_simultaneous_fits, 3L) ||
       !identical(config$maximum_task_attempts, 2L) ||
       !identical(config$kfold_seed, 20260802L) ||
       !identical(config$preprocessing_config_id,
@@ -64,9 +65,18 @@ validate_v021_full_config <- function(config) {
                  "student_t_irregular_time_ou_4x2000_v1") ||
       !identical(config$predictive_config_id,
                  "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1") ||
-      !identical(config$run_kfold, FALSE) || !identical(config$use_pathfinder, FALSE))
+      !identical(config$run_kfold, TRUE) || !identical(config$use_pathfinder, FALSE) ||
+      !identical(config$cpu_affinity, "0-15"))
     stop("Invalid V021-06 full benchmark configuration.")
   invisible(TRUE)
+}
+
+v021_current_cpu_affinity <- function(path = "/proc/self/status") {
+  lines <- readLines(path, warn = FALSE)
+  value <- sub("^Cpus_allowed_list:[[:space:]]*", "",
+               grep("^Cpus_allowed_list:", lines, value = TRUE))
+  if (length(value) != 1L || !nzchar(value)) stop("CPU affinity is unavailable.")
+  value
 }
 
 select_v021_100_species_dataset <- function(metadata, dataset_exists) {
@@ -194,6 +204,108 @@ prepare_v021_resource_dry_run <- function(prepared, policy) {
     waves = if (length(ids)) plan_v021_scheduler_waves(ids, policy) else list(),
     maximum_concurrent_tasks = policy$proposed_outer_concurrency,
     maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
+    sampling_launched = FALSE)
+}
+
+build_v021_full_storage_projection <- function(
+    free_bytes, directions = 9900L, kfold_eligible_fraction = 0.5,
+    retry_fraction = 0.1, safety_factor = 1.25) {
+  if (!is.numeric(free_bytes) || length(free_bytes) != 1L ||
+      !is.finite(free_bytes) || free_bytes <= 0) stop("free_bytes must be positive.")
+  categories <- data.frame(
+    category = c("cmdstan_csv_four_chain", "profile_diagnostic_sidecars",
+      "task_logs", "process_monitor_records", "manifest_status_attempt_ledger",
+      "completion_posterior_diagnostic", "robustness_features",
+      "direction_checkpoints", "subject_level_kfold", "retry_overhead"),
+    retained = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE),
+    central_bytes_per_direction = c(16, 1, .25, 1, .02, .05, .02, .02, .10, 0) * 1024^2,
+    conservative_bytes_per_direction = c(32, 2, .5, 2, .04, .10, .04, .04, .25, 0) * 1024^2,
+    stringsAsFactors = FALSE)
+  base_central <- sum(categories$central_bytes_per_direction) * directions
+  base_conservative <- sum(categories$conservative_bytes_per_direction) * directions
+  kfold_central <- directions * kfold_eligible_fraction * 0.10 * 1024^2
+  kfold_conservative <- directions * kfold_eligible_fraction * 0.25 * 1024^2
+  retry_central <- base_central * retry_fraction
+  retry_conservative <- base_conservative * retry_fraction
+  permanent_central <- base_central + kfold_central + retry_central
+  permanent_conservative <- base_conservative + kfold_conservative + retry_conservative
+  temporary_peak <- 3 * 32 * 1024^2
+  safety_requirement <- (permanent_conservative + temporary_peak) * safety_factor
+  list(
+    projection_schema = "v021_full_storage_projection_v1",
+    categories = categories,
+    directions = as.integer(directions),
+    kfold_eligible_fraction = kfold_eligible_fraction,
+    retry_fraction = retry_fraction,
+    temporary_peak_bytes = temporary_peak,
+    permanent_central_bytes = permanent_central,
+    permanent_conservative_bytes = permanent_conservative,
+    safety_factor = safety_factor,
+    safety_adjusted_requirement_bytes = safety_requirement,
+    free_bytes = free_bytes,
+    sufficient = free_bytes >= safety_requirement)
+}
+
+run_v021_full_dry_run_audit <- function(prepared, policy, result_root,
+                                         maximum_attempts = 2L) {
+  validate_v021_execution_manifest(prepared$manifest)
+  initialize_v021_execution_root(prepared$manifest, result_root)
+  owner <- acquire_v021_controller_ownership(
+    result_root, prepared$manifest$manifest_hash,
+    prepared$manifest$configuration_hash)
+  released <- FALSE
+  on.exit(if (!released) release_v021_controller_ownership(result_root, owner), add = TRUE)
+  plan <- plan_v021_execution_resume(
+    prepared$manifest, result_root, maximum_attempts, persist_reconciliation = TRUE)
+  first <- start_v021_task_attempt(
+    plan$status, plan$attempt_ledger, prepared$manifest, 1L, "dry-t0", "dry-run")
+  failed <- finish_v021_task_attempt(
+    first$status, first$ledger, prepared$manifest, 1L, "failed", "dry-t1",
+    terminal_reason = "injected_dry_run_failure", failure_class = "dry_run")
+  write_v021_task_status_atomic(failed$status, plan$paths$status, prepared$manifest)
+  write_v021_attempt_ledger_atomic(failed$ledger, plan$paths$attempts, prepared$manifest)
+  retry_plan <- plan_v021_execution_resume(
+    prepared$manifest, result_root, maximum_attempts, persist_reconciliation = TRUE)
+  retry <- start_v021_task_attempt(
+    retry_plan$status, retry_plan$attempt_ledger, prepared$manifest, 1L,
+    "dry-t2", "dry-run-retry")
+  artifact <- build_v021_completion_artifact(
+    prepared$manifest, 1L, result_root,
+    posterior_summary = list(mean = 0), diagnostics = list(class = "dry_run"),
+    psp_lfsr = list(PSP = NA_real_, LFSR = NA_real_),
+    predictive_eligibility = FALSE,
+    subject_elpd = list(state = "not_applicable",
+                        n_successful_test_observations = 0L),
+    seed_split_provenance = list(
+      direction_seed = prepared$manifest$tasks$direction_seed[[1L]],
+      kfold_seed = prepared$manifest$configuration$kfold_seed))
+  artifact_path <- file.path(retry_plan$paths$artifact_root, "dry-run-direction-000001.rds")
+  write_v021_completion_artifact_atomic(
+    artifact, artifact_path, prepared$manifest, result_root)
+  completed <- finish_v021_task_attempt(
+    retry$status, retry$ledger, prepared$manifest, 1L, "completed", "dry-t3",
+    artifact_path = artifact_path, result_root = result_root)
+  write_v021_task_status_atomic(completed$status, plan$paths$status, prepared$manifest)
+  write_v021_attempt_ledger_atomic(completed$ledger, plan$paths$attempts, prepared$manifest)
+  final_plan <- plan_v021_execution_resume(
+    prepared$manifest, result_root, maximum_attempts, persist_reconciliation = TRUE)
+  waves <- plan_v021_scheduler_waves(
+    prepared$manifest$tasks$directed_task_id[final_plan$runnable_indices], policy)
+  release_v021_controller_ownership(result_root, owner)
+  released <- TRUE
+  list(
+    audit_schema = "v021_full_dry_run_audit_v1",
+    task_count = nrow(prepared$manifest$tasks),
+    pair_count = length(unique(prepared$manifest$tasks$pair_id)),
+    first_attempt_failed = TRUE, second_attempt_completed = TRUE,
+    completed_task_skipped = !1L %in% final_plan$runnable_indices,
+    retry_count = completed$status$tasks$attempt_count[[1L]],
+    maximum_wave_slots = max(vapply(waves, `[[`, integer(1), "reserved_chain_slots")),
+    ownership_released = !dir.exists(v021_ownership_path(result_root)),
+    kfold_planning = list(priority = "canonical completed-main direction order",
+                          parallel_chains = policy$kfold_parallel_chains,
+                          shared_budget = TRUE),
+    obsolete_weight_fields_absent = TRUE,
     sampling_launched = FALSE)
 }
 

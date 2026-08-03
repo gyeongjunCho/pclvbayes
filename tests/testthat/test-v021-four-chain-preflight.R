@@ -13,19 +13,19 @@ test_that("preflight configuration and selection are deterministic and truth-fre
   expect_silent(validate_v021_four_chain_preflight_config(a))
   index <- ten_species_direction_index(paste0("species_", 0:9), a$seed)
   selected <- select_v021_preflight_tasks(index)
-  expect_identical(selected$direction_index, 1:2)
-  expect_identical(selected$task_id, c(1L, 1L))
+  expect_identical(selected$direction_index, 1:3)
+  expect_identical(selected$task_id, c(1L, 1L, 2L))
   bad <- index; bad$truth_sign <- 1
   expect_error(select_v021_preflight_tasks(bad), "Truth")
 })
 
-test_that("four-chain concurrency is bounded at two under policy v3", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-  derivation <- validate_v021_preflight_launch_capacity(policy, 2L)
+test_that("four-chain concurrency is bounded at three under policy v3", {
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
   expect_identical(policy$policy_schema, "v021_resource_policy_v3")
-  expect_identical(derivation$projected_active_cmdstan_chains, 8L)
-  expect_identical(derivation$projected_active_cmdstan_processes, 8L)
-  expect_error(validate_v021_preflight_launch_capacity(policy, 3L), "ceiling")
+  expect_identical(derivation$projected_active_cmdstan_chains, 12L)
+  expect_identical(derivation$projected_active_cmdstan_processes, 12L)
+  expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
 })
 
 test_that("thread environment is scoped and restored", {
@@ -48,19 +48,19 @@ test_that("thread environment is scoped and restored", {
 }
 
 test_that("monitor traverses descendants and fails closed", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-  ok <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L)), policy, 1L,
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  ok <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L)), policy, 1L,
                                        known_model_executables = "/model")
-  expect_identical(ok$observed_peak_active_cmdstan_chains, 8L)
-  expect_identical(ok$observed_peak_active_cmdstan_processes, 8L)
+  expect_identical(ok$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(ok$observed_peak_active_cmdstan_processes, 12L)
   expect_silent(validate_v021_preflight_monitor(ok, policy))
-  unreadable <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L, unreadable = TRUE)),
+  unreadable <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L, unreadable = TRUE)),
                                                 policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(unreadable, policy), "not verified")
-  unknown <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L, unknown = TRUE)),
+  unknown <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L, unknown = TRUE)),
                                              policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(unknown, policy), "not verified")
-  exceeded <- monitor_v021_process_snapshots(list(.preflight_snapshot(11L)), policy, 1L, "/model")
+  exceeded <- monitor_v021_process_snapshots(list(.preflight_snapshot(13L)), policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(exceeded, policy), "exceeded")
 
   diagnose <- data.frame(
@@ -125,6 +125,17 @@ test_that("checkpoint restart preserves terminal states and immutable completion
   expect_error(plan_v021_checkpoint_restart(broken), "no checkpoint")
 })
 
+test_that("three-direction preflight permits one incomplete pair explicitly", {
+  tasks <- select_v021_preflight_tasks(
+    ten_species_direction_index(paste0("species_", 0:9), 20260802L), 3L)
+  input <- tasks[c("task_id", "direction_index", "target", "source", "seed")]
+  expect_error(build_v021_checkpoint_manifest(input, 4L, tempfile("cp-")),
+               "both directions")
+  manifest <- build_v021_checkpoint_manifest(
+    input, 4L, tempfile("cp-"), allow_incomplete_pairs = TRUE)
+  expect_identical(manifest$direction_index, 1:3)
+})
+
 test_that("feature and summary contracts remain truth-free and explicit", {
   task <- data.frame(dataset_id="37", pair_id="pair-000001", task_id=1L,
     direction_index=1L, target="a", source="b", seed=7L, stringsAsFactors=FALSE)
@@ -144,8 +155,8 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_false(feature$values$alr_cap_exposure_available)
   expect_false(any(grepl("truth|withhold|calibrat", names(feature$values), ignore.case=TRUE)))
 
-  policy <- build_v021_resource_policy(proposed_outer_concurrency=2L)
-  monitor <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L)), policy, 1L, "/model")
+  policy <- build_v021_resource_policy(proposed_outer_concurrency=3L)
+  monitor <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L)), policy, 1L, "/model")
   manifest_tasks <- rbind(
     task[c("task_id", "pair_id", "direction_index", "target", "source", "seed")],
     data.frame(task_id=1L, pair_id="pair-000001", direction_index=2L,
@@ -165,13 +176,13 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_identical(summary$state, "passed")
   expect_identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2")
   expect_identical(summary$resource_policy_schema, "v021_resource_policy_v3")
-  expect_identical(summary$logical_host_threads, 12L)
-  expect_identical(summary$reserved_host_threads, 2L)
-  expect_identical(summary$usable_execution_capacity, 10L)
+  expect_identical(summary$logical_host_threads, 16L)
+  expect_identical(summary$reserved_host_threads, 4L)
+  expect_identical(summary$usable_execution_capacity, 12L)
   expect_identical(summary$attempt_id, basename(tempdir()))
   expect_identical(summary$worker_compilation_count, 0L)
-  expect_identical(summary$projected_active_chains, 8L)
-  expect_identical(summary$projected_cmdstan_process_slots, 8L)
+  expect_identical(summary$projected_active_chains, 12L)
+  expect_identical(summary$projected_cmdstan_process_slots, 12L)
   expect_identical(summary$observed_peak_cmdstan_diagnostic_processes, 0L)
   expect_identical(summary$cmdstan_diagnostic_process_ids, integer())
   expect_identical(summary$cmdstan_diagnostic_executables, character())
@@ -190,7 +201,7 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_silent(validate_v021_preflight_summary(failed))
 })
 
-test_that("runner wires one bounded two-fit batch and eligible K-fold", {
+test_that("runner wires one bounded three-fit batch and eligible K-fold", {
   source_lines <- readLines(testthat::test_path(
     "../../benchmarks/mtist/run_v021_four_chain_preflight.R"), warn = FALSE)
   expect_true(any(grepl("run_batch(run_indices)", source_lines, fixed = TRUE)))
@@ -208,15 +219,15 @@ test_that("runner wires one bounded two-fit batch and eligible K-fold", {
 
 test_that("preflight envelope and output contracts are explicit", {
   config <- build_v021_four_chain_preflight_config(tempfile("preflight-root-"))
-  expect_identical(config$selected_direction_count, 2L)
+  expect_identical(config$selected_direction_count, 3L)
   expect_identical(config$chains, 4L)
-  expect_identical(config$maximum_simultaneous_fits, 2L)
+  expect_identical(config$maximum_simultaneous_fits, 3L)
   expect_true(config$run_kfold)
   expect_false(config$use_pathfinder)
   expect_false(grepl("v021_full_100_species_v2", config$output_root, fixed = TRUE))
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-  expect_identical(validate_v021_preflight_launch_capacity(policy, 2L)$projected_active_cmdstan_chains, 8L)
-  expect_error(validate_v021_preflight_launch_capacity(policy, 3L), "ceiling")
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  expect_identical(validate_v021_preflight_launch_capacity(policy, 3L)$projected_active_cmdstan_chains, 12L)
+  expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
   expect_true(all(v021_single_thread_environment() == "1"))
 })
 

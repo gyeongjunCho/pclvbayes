@@ -79,7 +79,8 @@ v021_chain_seeds <- function(direction_seed, chains) {
   pair_id
 }
 
-build_v021_checkpoint_manifest <- function(task_table, chains, checkpoint_dir) {
+build_v021_checkpoint_manifest <- function(task_table, chains, checkpoint_dir,
+                                            allow_incomplete_pairs = FALSE) {
   required <- c("task_id", "direction_index", "target", "source", "seed")
   allowed <- c(required, "pair_id")
   if (!is.data.frame(task_table) || !all(required %in% names(task_table)) ||
@@ -108,7 +109,8 @@ build_v021_checkpoint_manifest <- function(task_table, chains, checkpoint_dir) {
       identical(as.character(task_table$target[ix]),
                 rev(as.character(task_table$source[ix])))
   }, logical(1))
-  if (any(!complete)) stop("Every checkpoint pair must contain both directions.")
+  if (any(!complete) && !isTRUE(allow_incomplete_pairs))
+    stop("Every checkpoint pair must contain both directions.")
 
   ord <- order(as.integer(task_table$task_id), as.integer(task_table$direction_index))
   task_table <- task_table[ord, , drop = FALSE]

@@ -17,9 +17,10 @@ test_that("full benchmark configuration is exact and deterministic", {
   expect_identical(a$iter_warmup, 2000L)
   expect_identical(a$iter_sampling, 2000L)
   expect_identical(a$nominal_retained_draws, 8000L)
-  expect_identical(a$maximum_simultaneous_fits, 2L)
-  expect_false(a$run_kfold)
+  expect_identical(a$maximum_simultaneous_fits, 3L)
+  expect_true(a$run_kfold)
   expect_false(a$use_pathfinder)
+  expect_identical(a$cpu_affinity, "0-15")
 })
 
 test_that("truth-free metadata selection chooses the canonical 100-species study", {
@@ -51,16 +52,16 @@ test_that("canonical task generation yields 4950 pairs and 9900 directions", {
   expect_error(build_v021_full_task_table(taxa[-1L], 20260802L), "100")
 })
 
-test_that("policy v3 bounds the full benchmark at two fits", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-  derivation <- validate_v021_preflight_launch_capacity(policy, 2L)
+test_that("policy v3 bounds the full benchmark at three fits", {
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
   expect_identical(policy$policy_schema, "v021_resource_policy_v3")
-  expect_identical(policy$logical_host_threads, 12L)
-  expect_identical(policy$reserved_host_threads, 2L)
-  expect_identical(policy$usable_chain_slots, 10L)
-  expect_identical(derivation$projected_active_cmdstan_chains, 8L)
-  expect_identical(derivation$projected_active_cmdstan_processes, 8L)
-  expect_error(validate_v021_preflight_launch_capacity(policy, 3L), "ceiling")
+  expect_identical(policy$logical_host_threads, 16L)
+  expect_identical(policy$reserved_host_threads, 4L)
+  expect_identical(policy$usable_chain_slots, 12L)
+  expect_identical(derivation$projected_active_cmdstan_chains, 12L)
+  expect_identical(derivation$projected_active_cmdstan_processes, 12L)
+  expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
 })
 
 test_that("restart resumes incomplete work without rerunning terminal tasks", {
@@ -115,9 +116,50 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl("release_v021_capacity", runner, fixed = TRUE)))
   expect_true(any(grepl("write_v021_reservations_atomic", runner, fixed = TRUE)))
   expect_true(any(grepl("write_v021_manifest_atomic", runner, fixed = TRUE)))
+  expect_true(any(grepl("initialize_v021_execution_root", runner, fixed = TRUE)))
+  expect_true(any(grepl("write_v021_task_status_atomic", runner, fixed = TRUE)))
+  expect_true(any(grepl("write_v021_attempt_ledger_atomic", runner, fixed = TRUE)))
+  expect_true(any(grepl(".add_predictive_evaluation", runner, fixed = TRUE)))
   expect_true(any(grepl("monitor_v021_process_snapshots", runner, fixed = TRUE)))
   expect_true(any(grepl("worker_compilation_count = 0L", runner, fixed = TRUE)))
   expect_false(any(grepl("cmdstan_model|compile\\(", runner)))
+  expect_false(any(grepl("stacking_results|pseudo_BMA|elpd_pointwise", runner)))
+})
+
+test_that("full storage projection is conservative and complete", {
+  projection <- build_v021_full_storage_projection(800 * 1024^3)
+  expected <- c("cmdstan_csv_four_chain", "profile_diagnostic_sidecars",
+    "task_logs", "process_monitor_records", "manifest_status_attempt_ledger",
+    "completion_posterior_diagnostic", "robustness_features",
+    "direction_checkpoints", "subject_level_kfold", "retry_overhead")
+  expect_identical(projection$categories$category, expected)
+  expect_gt(projection$permanent_conservative_bytes, projection$permanent_central_bytes)
+  expect_gt(projection$safety_adjusted_requirement_bytes,
+            projection$permanent_conservative_bytes)
+  expect_true(projection$sufficient)
+})
+
+test_that("full dry run uses authoritative state retries and ownership without sampling", {
+  root <- tempfile("v021-full-dry-")
+  config <- build_v021_full_config(root)
+  prepared <- prepare_v021_full_execution(
+    config, paste0("species_", 0:99),
+    list(code_commit = "fixture", benchmark_schema = config$benchmark_schema),
+    initialize = FALSE)
+  audit <- run_v021_full_dry_run_audit(
+    prepared, build_v021_resource_policy(), root, 2L)
+  expect_identical(audit$task_count, 9900L)
+  expect_identical(audit$pair_count, 4950L)
+  expect_true(audit$first_attempt_failed)
+  expect_true(audit$second_attempt_completed)
+  expect_true(audit$completed_task_skipped)
+  expect_identical(audit$retry_count, 2L)
+  expect_identical(audit$maximum_wave_slots, 12L)
+  expect_true(audit$ownership_released)
+  expect_false(audit$sampling_launched)
+  expect_true(file.exists(file.path(root, "canonical_manifest.rds")))
+  expect_true(file.exists(file.path(root, "task_status.rds")))
+  expect_true(file.exists(file.path(root, "attempt_ledger.rds")))
 })
 
 test_that("parent failures retain exact calls, phases, identities, and safe metadata", {

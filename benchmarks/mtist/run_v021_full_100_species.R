@@ -14,11 +14,14 @@ source(file.path(script_dir, "v021_robustness_features.R"))
 source(file.path(script_dir, "v021_four_chain_preflight.R"))
 source(file.path(script_dir, "v021_full_100_species.R"))
 
+run_v021_full_100_species <- function() {
 config_path <- Sys.getenv(
   "PCLV_V021_FULL_CONFIG",
   file.path(script_dir, "configs", "v021_full_100_species.R"))
 config <- source(config_path)$value
 validate_v021_full_config(config)
+if (!identical(v021_current_cpu_affinity(), config$cpu_affinity))
+  stop("V021-06 controller CPU affinity must be ", config$cpu_affinity, ".")
 
 # Optional foreground-only debug mode. When enabled, both variables are required
 # and the debug output root must differ from the configured production root.
@@ -69,14 +72,14 @@ for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "cmdstan-owned")))
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
+policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
 validate_v021_resource_policy(policy)
 derivation <- derive_safe_outer_concurrency(
-  policy, build_v021_operation_spec("main_fit", 2L))
+  policy, build_v021_operation_spec("main_fit", 3L))
 if (!identical(policy$policy_schema, "v021_resource_policy_v3") ||
-    !identical(derivation$projected_active_cmdstan_chains, 8L) ||
-    !identical(derivation$projected_active_cmdstan_processes, 8L))
-  stop("V021-06 requires the verified policy-v3 10-chain/10-slot contract.")
+    !identical(derivation$projected_active_cmdstan_chains, 12L) ||
+    !identical(derivation$projected_active_cmdstan_processes, 12L))
+  stop("V021-06 requires the verified policy-v3 12-chain/12-slot contract.")
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
 
@@ -94,6 +97,7 @@ launch_record <- list(
   reserved_host_threads = policy$reserved_host_threads,
   maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
   maximum_cmdstan_process_slots = policy$maximum_cmdstan_process_slots,
+  cpu_affinity = config$cpu_affinity,
   resume_command = if (debug_mode) sprintf(
     "PCLV_V021_FULL_CONFIG=%s PCLV_V021_DEBUG_DIRECTIONS=%s PCLV_V021_DEBUG_OUTPUT_ROOT=%s Rscript %s",
     shQuote(normalizePath(config_path, mustWork = TRUE)),
@@ -136,6 +140,10 @@ prepared_execution <- prepare_v021_full_execution(
 
 if (identical(tolower(Sys.getenv("PCLV_V021_MANIFEST_DRY_RUN", "false")), "true")) {
   resource_dry_run <- prepare_v021_resource_dry_run(prepared_execution, policy)
+  integration_dry_run <- run_v021_full_dry_run_audit(
+    prepared_execution, policy, paths$output_root, config$maximum_task_attempts)
+  .v021_atomic_save_rds(
+    integration_dry_run, file.path(paths$output_root, "dry_run_audit.rds"))
   cat(sprintf(
     paste0("V021-03/V021-02 dry run: manifest=%s runnable=%d completed=%d ",
            "waves=%d maximum_chains=%d sampling_launched=false\n"),
@@ -145,6 +153,14 @@ if (identical(tolower(Sys.getenv("PCLV_V021_MANIFEST_DRY_RUN", "false")), "true"
     length(resource_dry_run$waves), resource_dry_run$maximum_active_cmdstan_chains))
   quit(save = "no", status = 0L)
 }
+
+execution_paths <- initialize_v021_execution_root(
+  prepared_execution$manifest, paths$output_root)
+execution_plan <- plan_v021_execution_resume(
+  prepared_execution$manifest, paths$output_root, config$maximum_task_attempts,
+  persist_reconciliation = TRUE)
+execution_status <- execution_plan$status
+attempt_ledger <- execution_plan$attempt_ledger
 
 controller_ownership <- acquire_v021_controller_ownership(
   paths$output_root, prepared_execution$manifest$manifest_hash,
@@ -226,7 +242,7 @@ controls[c(
 controls[c("chains", "iter_warmup", "iter_sampling", "seed", "progress",
            "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R")] <- list(
   config$chains, config$iter_warmup, config$iter_sampling, config$seed,
-  "none", 2L, 1L, 5L, 1L)
+  "none", 3L, 1L, 5L, 1L)
 preexisting_executable <- normalizePath(file.path(repo, "inst", "stan", "pclv"),
                                         mustWork = TRUE)
 preexisting_info <- unclass(file.info(preexisting_executable)[c("size", "mtime")])
@@ -269,6 +285,16 @@ update_status <- function(state = "running", reason = NA_character_) {
 
 mark_running <- function(indices) {
   for (i in indices) {
+    started_attempt <- start_v021_task_attempt(
+      execution_status, attempt_ledger, prepared_execution$manifest,
+      tasks$direction_index[[i]], format(Sys.time(), tz = "UTC", usetz = TRUE),
+      worker_provenance = "v021_full_controller")
+    execution_status <<- started_attempt$status
+    attempt_ledger <<- started_attempt$ledger
+    write_v021_task_status_atomic(
+      execution_status, execution_paths$status, prepared_execution$manifest)
+    write_v021_attempt_ledger_atomic(
+      attempt_ledger, execution_paths$attempts, prepared_execution$manifest)
     record <- .v021_record_from_row(manifest[i, , drop = FALSE], "running")
     write_v021_checkpoint_atomic(record)
     manifest <<- .v021_apply_checkpoint(manifest, i, record)
@@ -291,6 +317,11 @@ store_outcome <- function(i, result, elapsed) {
       retry_history = if (inherits(result, "pclv_failure"))
         result$details$retry_history %||% list() else list(),
       pathfinder_used = FALSE)
+    finished_attempt <- finish_v021_task_attempt(
+      execution_status, attempt_ledger, prepared_execution$manifest,
+      tasks$direction_index[[i]], "failed",
+      format(Sys.time(), tz = "UTC", usetz = TRUE),
+      terminal_reason = reason, failure_class = class(result)[[1L]])
   } else {
     result$.predictive_context <- NULL
     set_v021_failure_trace_phase(parent_trace, "scientific_state_classification")
@@ -308,17 +339,21 @@ store_outcome <- function(i, result, elapsed) {
     inference_results$significance_decisions <- NA
     inference_results$diagnostic_classes <- retained$diagnostic_class
     inference_results$bayesian_eligibility <- retained$bayesian_eligible
-    inference_results$kfold_results <- list(state = "not_executed")
-    inference_results$elpd_results <- list(state = "not_executed", value = NA_real_)
-    inference_results$stacking_results <- list(state = "not_executed", value = NA_real_)
+    inference_results$kfold_results <- if (retained$kfold_attempted)
+      list(state = if (retained$kfold_completed) "completed" else "failed",
+           folds_ok = retained$kfold_folds_ok, folds_failed = retained$kfold_folds_failed)
+    else list(state = "not_eligible", n_successful_test_observations = 0L)
+    inference_results$elpd_results <- list(
+      state = if (retained$elpd_available) "available" else retained$aggregate_elpd_missing_state,
+      value = retained$aggregate_elpd,
+      method = "student-t-scale-mixture-kalman-ou-q16")
     inference_results$matrices <- list()
     inference_results$masks <- list()
     inference_results$feature_inputs <- retained
     inference_results$stan_data <- list(N = retained$n_pairs)
     inference_results$execution <- list(state = "completed", elapsed_seconds = elapsed)
     inference_results$status <- list(original_reporting_state = retained$diagnostic_class)
-    inference_results$unavailable_values <- list(kfold = NA_real_, elpd = NA_real_,
-                                                 stacking = NA_real_)
+    inference_results$unavailable_values <- list(kfold = NA_real_, elpd = NA_real_)
     inference_results$zero_placeholders <- list()
     set_v021_failure_trace_phase(parent_trace, "artifact_finalization")
     artifact <- finalize_v021_inference_artifact(list(
@@ -366,7 +401,43 @@ store_outcome <- function(i, result, elapsed) {
       retry_history = result$retry_history[[1L]] %||% list(), pathfinder_used = FALSE,
       completion_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
       result = artifact)
+    completion <- build_v021_completion_artifact(
+      prepared_execution$manifest, tasks$direction_index[[i]], paths$output_root,
+      posterior_summary = list(mean = retained$posterior_mean,
+                               median = retained$posterior_median,
+                               sd = retained$posterior_sd,
+                               lower = retained$posterior_interval_lower,
+                               upper = retained$posterior_interval_upper),
+      diagnostics = list(class = retained$diagnostic_class,
+                         rhat = retained$rhat, bulk_ess = retained$ess_bulk,
+                         tail_ess = retained$ess_tail,
+                         divergences = retained$divergences,
+                         treedepth_hits = retained$treedepth_hits),
+      psp_lfsr = list(PSP = retained$p_sign2, LFSR = retained$lfsr),
+      predictive_eligibility = retained$bayesian_eligible,
+      subject_elpd = list(state = if (retained$kfold_attempted)
+        if (retained$kfold_completed) "completed" else "failed" else "not_applicable",
+        n_successful_test_observations =
+          v021_preflight_successful_test_observation_count(result$kfold_success_total),
+        method = "student-t-scale-mixture-kalman-ou-q16"),
+      seed_split_provenance = list(direction_seed = retained$seed,
+                                   kfold_seed = config$kfold_seed))
+    completion_path <- file.path(execution_paths$artifact_root,
+                                 paste0(manifest$direction_id[[i]], ".rds"))
+    write_v021_completion_artifact_atomic(
+      completion, completion_path, prepared_execution$manifest, paths$output_root)
+    finished_attempt <- finish_v021_task_attempt(
+      execution_status, attempt_ledger, prepared_execution$manifest,
+      tasks$direction_index[[i]], "completed",
+      format(Sys.time(), tz = "UTC", usetz = TRUE),
+      artifact_path = completion_path, result_root = paths$output_root)
   }
+  execution_status <<- finished_attempt$status
+  attempt_ledger <<- finished_attempt$ledger
+  write_v021_task_status_atomic(
+    execution_status, execution_paths$status, prepared_execution$manifest)
+  write_v021_attempt_ledger_atomic(
+    attempt_ledger, execution_paths$attempts, prepared_execution$manifest)
   set_v021_failure_trace_phase(parent_trace, "checkpoint_write")
   write_v021_checkpoint_atomic(checkpoint)
   set_v021_failure_trace_phase(parent_trace, "checkpoint_write", completed = TRUE)
@@ -567,6 +638,22 @@ run_batch <- function(indices) {
   }
   write_v021_reservations_atomic(active_reservations, reservation_path, policy)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
+  # Main fits finish as one canonical batch. Predictive evaluation then follows
+  # direction order, one eligible direction at a time, under the shared budget.
+  for (j in seq_along(indices)) {
+    if (inherits(results[[j]], c("try-error", "pclv_failure", "v021_traced_child_error")))
+      next
+    i <- indices[[j]]
+    active_reservations <<- reserve_v021_capacity(
+      active_reservations, policy, manifest$direction_id[[i]],
+      manifest$retry_count[[i]] + 1L, "kfold_fit")
+    write_v021_reservations_atomic(active_reservations, reservation_path, policy)
+    results[[j]] <- pclvbayes:::.add_predictive_evaluation(results[[j]])
+    active_reservations <<- release_v021_capacity(
+      active_reservations, policy, manifest$direction_id[[i]],
+      manifest$retry_count[[i]] + 1L, "kfold_fit", worker_terminated = TRUE)
+    write_v021_reservations_atomic(active_reservations, reservation_path, policy)
+  }
   file.create(stop_file)
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
   monitor_result <- unname(parallel::mccollect(monitor_job))[[1L]]
@@ -607,8 +694,17 @@ execution_error <- tryCatch(
         restart <- validate_v021_full_restart_states(manifest)
         manifest <<- restart$manifest
         write_v021_manifest_atomic(manifest, paths$manifest)
-        if (!length(restart$resume_indices)) break
-        run_batch(head(restart$resume_indices, config$maximum_simultaneous_fits))
+        execution_plan <- plan_v021_execution_resume(
+          prepared_execution$manifest, paths$output_root,
+          config$maximum_task_attempts, persist_reconciliation = TRUE)
+        execution_status <<- execution_plan$status
+        attempt_ledger <<- execution_plan$attempt_ledger
+        if (!length(execution_plan$runnable_indices)) break
+        runnable_ordinals <- prepared_execution$manifest$tasks$task_ordinal[
+          execution_plan$runnable_indices]
+        runnable_indices <- match(runnable_ordinals, manifest$direction_index)
+        if (anyNA(runnable_indices)) stop("V021-03 runnable task identity mismatch.")
+        run_batch(head(runnable_indices, config$maximum_simultaneous_fits))
       }
     }), error = function(condition)
          record_and_resignal_v021_condition(condition, record_execution_condition),
@@ -656,3 +752,6 @@ set_v021_failure_trace_phase(parent_trace, "summary_failure_persistence")
 .v021_atomic_save_rds(summary, paths$summary)
 update_status("completed")
 cat("V021-06 completed.\n")
+}
+
+run_v021_full_100_species()

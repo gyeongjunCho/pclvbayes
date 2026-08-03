@@ -92,8 +92,8 @@ validate_v021_worker_registry <- function(registry) {
 }
 
 build_v021_resource_policy <- function(
-    logical_host_threads = 12L, reserved_host_threads = 2L,
-    maximum_active_cmdstan_chains = 10L, maximum_cmdstan_process_slots = 10L,
+    logical_host_threads = 16L, reserved_host_threads = 4L,
+    maximum_active_cmdstan_chains = 12L, maximum_cmdstan_process_slots = 12L,
     cpu_threads_per_active_chain = 1L,
     main_chains = 4L, retry_chains = main_chains,
     pathfinder_processes = 1L, pathfinder_num_paths = 8L,
@@ -200,10 +200,10 @@ validate_v021_resource_policy <- function(policy) {
                                "scheduler_poll_interval_seconds")))
     .v021_resource_int(policy[[nm]], nm, positive = nm != "pathfinder_chain_slots" &&
                          nm != "pathfinder_processes" && nm != "reserved_host_threads")
-  if (policy$logical_host_threads != 12L || policy$reserved_host_threads != 2L ||
-      policy$usable_chain_slots != 10L || policy$maximum_active_cmdstan_chains != 10L ||
-      policy$maximum_cmdstan_process_slots != 10L)
-    stop("Policy violates the exact 12/2/10 host contract.")
+  if (policy$logical_host_threads != 16L || policy$reserved_host_threads != 4L ||
+      policy$usable_chain_slots != 12L || policy$maximum_active_cmdstan_chains != 12L ||
+      policy$maximum_cmdstan_process_slots != 12L)
+    stop("Policy violates the exact 16/4/12 host contract.")
   if (policy$logical_host_threads - policy$reserved_host_threads !=
       policy$usable_chain_slots)
     stop("Policy host-thread arithmetic is contradictory.")

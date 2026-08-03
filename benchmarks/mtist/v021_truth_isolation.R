@@ -32,7 +32,7 @@ v021_inference_result_fields <- c(
   "posterior_coefficients", "posterior_summaries", "posterior_intervals",
   "posterior_sign_probabilities", "significance_decisions",
   "diagnostic_classes", "bayesian_eligibility", "kfold_results",
-  "elpd_results", "stacking_results", "matrices", "masks",
+  "elpd_results", "matrices", "masks",
   "feature_inputs", "stan_data", "execution", "status",
   "unavailable_values", "zero_placeholders"
 )

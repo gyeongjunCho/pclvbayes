@@ -20,25 +20,27 @@ source(testthat::test_path("../../benchmarks/mtist/v021_full_100_species.R"))
   list(pid = as.integer(pid), start_time = start, hostname = host, boot_id = boot)
 }
 
-test_that("canonical policy derives the ten-chain capacity contract", {
+test_that("canonical policy derives the twelve-chain capacity contract", {
   policy <- build_v021_resource_policy()
   expect_identical(policy$policy_schema, "v021_resource_policy_v3")
   expect_identical(policy$main_chains, 4L)
   expect_identical(policy$kfold_chains, 4L)
   expect_identical(policy$kfold_parallel_chains, 1L)
-  expect_identical(policy$maximum_active_cmdstan_chains, 10L)
-  expect_identical(policy$proposed_outer_concurrency, 2L)
+  expect_identical(policy$logical_host_threads, 16L)
+  expect_identical(policy$reserved_host_threads, 4L)
+  expect_identical(policy$maximum_active_cmdstan_chains, 12L)
+  expect_identical(policy$proposed_outer_concurrency, 3L)
   expect_identical(policy$maximum_concurrent_kfold_fits, 1L)
-  expect_identical(policy$controller_worker_limit, 2L)
+  expect_identical(policy$controller_worker_limit, 3L)
   expect_true(policy$retries_share_chain_budget)
   expect_true(all(policy$environment_thread_caps == "1"))
   expect_identical(v021_job_demand(policy, "main_fit"), 4L)
   expect_identical(v021_job_demand(policy, "retry_fit"), 4L)
   expect_identical(v021_job_demand(policy, "kfold_fit"), 1L)
-  expect_error(build_v021_resource_policy(main_chains = 11L,
-                                           retry_chains = 11L,
-                                           kfold_chains = 11L,
-                                           confirmation_chains = 11L),
+  expect_error(build_v021_resource_policy(main_chains = 13L,
+                                           retry_chains = 13L,
+                                           kfold_chains = 13L,
+                                           confirmation_chains = 13L),
                "positive integer|fit within|unsafe|exceeds")
   expect_error(build_v021_resource_policy(main_chains = 4.5), "integer")
   expect_silent(assert_v021_truth_free_schema(policy, "resource policy"))
@@ -51,29 +53,26 @@ test_that("reservations share capacity across posterior retry and K-fold work", 
   reservations <- reserve_v021_capacity(reservations, policy, "d1", 1L, "main_fit")
   reservations <- reserve_v021_capacity(reservations, policy, "d2", 1L, "retry_fit")
   expect_identical(sum(reservations$reserved_chain_slots), 8L)
-  expect_error(reserve_v021_capacity(reservations, policy, "d3", 1L, "main_fit"),
-               "Insufficient")
-  reservations <- reserve_v021_capacity(reservations, policy, "d3", 1L, "kfold_fit")
-  reservations <- reserve_v021_capacity(reservations, policy, "d4", 1L, "kfold_fit")
-  expect_identical(sum(reservations$reserved_chain_slots), 10L)
-  expect_error(reserve_v021_capacity(reservations, policy, "d5", 1L, "kfold_fit"),
+  reservations <- reserve_v021_capacity(reservations, policy, "d3", 1L, "main_fit")
+  expect_identical(sum(reservations$reserved_chain_slots), 12L)
+  expect_error(reserve_v021_capacity(reservations, policy, "d4", 1L, "kfold_fit"),
                "Insufficient")
   expect_error(release_v021_capacity(reservations, policy, "d1", 1L, "main_fit", FALSE),
                "worker termination")
   reservations <- release_v021_capacity(reservations, policy, "d1", 1L,
                                          "main_fit", TRUE)
-  expect_identical(sum(reservations$reserved_chain_slots[reservations$state == "reserved"]), 6L)
+  expect_identical(sum(reservations$reserved_chain_slots[reservations$state == "reserved"]), 8L)
 })
 
-test_that("five four-chain jobs schedule deterministically as 8 8 4", {
+test_that("five four-chain jobs schedule deterministically as 12 8", {
   policy <- build_v021_resource_policy()
   ids <- sprintf("direction-%06d", c(5L, 1L, 4L, 2L, 3L))
   waves <- plan_v021_scheduler_waves(ids, policy)
-  expect_identical(vapply(waves, `[[`, integer(1), "reserved_chain_slots"), c(8L, 8L, 4L))
+  expect_identical(vapply(waves, `[[`, integer(1), "reserved_chain_slots"), c(12L, 8L))
   expect_identical(unlist(lapply(waves, `[[`, "task_identities")), sort(ids, method = "radix"))
   expect_identical(waves, plan_v021_scheduler_waves(rev(ids), policy))
   expect_identical(waves, plan_v021_scheduler_waves(factor(rev(ids), levels = ids), policy))
-  expect_true(all(vapply(waves, `[[`, integer(1), "reserved_chain_slots") <= 10L))
+  expect_true(all(vapply(waves, `[[`, integer(1), "reserved_chain_slots") <= 12L))
 })
 
 test_that("thread limits are explicit scoped and reject incompatible values", {
@@ -183,7 +182,7 @@ test_that("resource planning is truth invariant and excludes scheduler metadata 
   waves <- plan_v021_scheduler_waves(manifest$tasks$directed_task_id[1:5], policy)
   expect_identical(hash, manifest$manifest_hash)
   expect_false("worker_count" %in% names(manifest$configuration))
-  expect_identical(vapply(waves, `[[`, integer(1), "reserved_chain_slots"), c(8L, 8L, 4L))
+  expect_identical(vapply(waves, `[[`, integer(1), "reserved_chain_slots"), c(12L, 8L))
 })
 
 test_that("dry-run exposes policy without sampling", {
@@ -194,7 +193,7 @@ test_that("dry-run exposes policy without sampling", {
     initialize = FALSE)
   dry <- prepare_v021_resource_dry_run(prepared, build_v021_resource_policy())
   expect_false(dry$sampling_launched)
-  expect_identical(dry$maximum_concurrent_tasks, 2L)
-  expect_identical(dry$maximum_active_cmdstan_chains, 10L)
-  expect_identical(dry$waves[[1L]]$reserved_chain_slots, 8L)
+  expect_identical(dry$maximum_concurrent_tasks, 3L)
+  expect_identical(dry$maximum_active_cmdstan_chains, 12L)
+  expect_identical(dry$waves[[1L]]$reserved_chain_slots, 12L)
 })

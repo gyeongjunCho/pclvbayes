@@ -12,6 +12,7 @@ source(file.path(script_dir, "v021_diagnostic_features.R"))
 source(file.path(script_dir, "v021_robustness_features.R"))
 source(file.path(script_dir, "v021_four_chain_preflight.R"))
 
+run_v021_four_chain_preflight <- function() {
 config <- source(file.path(script_dir, "configs", "v021_four_chain_preflight.R"))$value
 validate_v021_four_chain_preflight_config(config)
 resume_mode <- identical(tolower(Sys.getenv("PCLV_V021_PREFLIGHT_RESUME", "false")), "true")
@@ -40,8 +41,8 @@ monitor_dir <- file.path(config$output_root, "monitor")
 dir.create(monitor_dir, showWarnings = FALSE)
 manifest_path <- file.path(config$output_root, "manifest.rds")
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-operation <- build_v021_operation_spec("main_fit", 2L)
+policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+operation <- build_v021_operation_spec("main_fit", 3L)
 derivation <- derive_safe_outer_concurrency(policy, operation)
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
@@ -63,8 +64,16 @@ execution_manifest <- build_v021_execution_manifest(
   kfold_config = list(K = 5L, R = 1L, enabled = TRUE),
   predictive_config = list(identity = "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1"),
   provenance = list(code_commit = git_commit, benchmark_schema = config$preflight_schema))
+preflight_execution_paths <- initialize_v021_execution_root(
+  execution_manifest, config$output_root)
+preflight_plan <- plan_v021_execution_resume(
+  execution_manifest, config$output_root, maximum_attempts = 2L,
+  persist_reconciliation = TRUE)
+preflight_status <- preflight_plan$status
+preflight_attempt_ledger <- preflight_plan$attempt_ledger
 manifest_input <- selected[c("task_id", "direction_index", "target", "source", "seed")]
-manifest <- build_v021_checkpoint_manifest(manifest_input, config$chains, checkpoint_dir)
+manifest <- build_v021_checkpoint_manifest(
+  manifest_input, config$chains, checkpoint_dir, allow_incomplete_pairs = TRUE)
 selected$pair_id <- manifest$pair_id
 selected <- selected[c("dataset_id", "pair_id", "task_id", "direction_index",
                        "target", "source", "seed")]
@@ -91,7 +100,7 @@ controls[c(
 controls[c("chains", "iter_warmup", "iter_sampling", "seed", "progress",
            "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R")] <- list(
   config$chains, config$iter_warmup, config$iter_sampling, config$seed,
-  "none", 2L, 1L, 5L, 1L)
+  "none", 3L, 1L, 5L, 1L)
 
 run_indices <- seq_len(nrow(manifest))
 resume_completed_hashes <- character()
@@ -226,6 +235,16 @@ if (resume_all_complete) {
 
 mark_running <- function(indices) {
   for (i in indices) {
+    started_attempt <- start_v021_task_attempt(
+      preflight_status, preflight_attempt_ledger, execution_manifest,
+      selected$direction_index[[i]], format(Sys.time(), tz = "UTC", usetz = TRUE),
+      worker_provenance = "v021_preflight_controller")
+    preflight_status <<- started_attempt$status
+    preflight_attempt_ledger <<- started_attempt$ledger
+    write_v021_task_status_atomic(
+      preflight_status, preflight_execution_paths$status, execution_manifest)
+    write_v021_attempt_ledger_atomic(
+      preflight_attempt_ledger, preflight_execution_paths$attempts, execution_manifest)
     running <- .v021_record_from_row(manifest[i, , drop = FALSE], "running")
     write_v021_checkpoint_atomic(running)
     manifest <<- .v021_apply_checkpoint(manifest, i, running)
@@ -240,6 +259,11 @@ store_outcome <- function(i, result, elapsed) {
       manifest[i, , drop = FALSE], "failed", elapsed_time = elapsed,
       failure_reason = paste(result$stage %||% "fit", result$reason %||% "unknown", sep = ":"),
       retry_history = result$details$retry_history %||% list(), pathfinder_used = FALSE)
+    finished_attempt <- finish_v021_task_attempt(
+      preflight_status, preflight_attempt_ledger, execution_manifest,
+      selected$direction_index[[i]], "failed",
+      format(Sys.time(), tz = "UTC", usetz = TRUE),
+      terminal_reason = checkpoint$failure_reason, failure_class = "pclv_failure")
   } else {
     retained <- v021_preflight_retained_record(selected[i, , drop = FALSE], result)
     inference_results <- setNames(vector("list", length(v021_inference_result_fields)),
@@ -259,14 +283,13 @@ store_outcome <- function(i, result, elapsed) {
     inference_results$elpd_results <- list(
       state = if (retained$elpd_available) "available" else retained$aggregate_elpd_missing_state,
       value = retained$aggregate_elpd)
-    inference_results$stacking_results <- list(state = "not_executed", value = NA_real_)
     inference_results$matrices <- list()
     inference_results$masks <- list()
     inference_results$feature_inputs <- retained
     inference_results$stan_data <- list(N = retained$n_pairs)
     inference_results$execution <- list(state = "completed", elapsed_seconds = elapsed)
     inference_results$status <- list(original_reporting_state = retained$diagnostic_class)
-    inference_results$unavailable_values <- list(kfold = NA_real_, elpd = NA_real_, stacking = NA_real_)
+    inference_results$unavailable_values <- list(kfold = NA_real_, elpd = NA_real_)
     inference_results$zero_placeholders <- list()
     artifact <- finalize_v021_inference_artifact(list(
       artifact_schema = v021_retained_fixture_schema, artifact_state = "retained",
@@ -319,7 +342,37 @@ store_outcome <- function(i, result, elapsed) {
       manifest[i, , drop = FALSE], "completed", elapsed_time = elapsed,
       retry_history = result$retry_history[[1L]] %||% list(), pathfinder_used = FALSE,
       completion_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE), result = artifact)
+    completion <- build_v021_completion_artifact(
+      execution_manifest, selected$direction_index[[i]], config$output_root,
+      posterior_summary = list(mean = retained$posterior_mean,
+        median = retained$posterior_median, sd = retained$posterior_sd),
+      diagnostics = list(class = retained$diagnostic_class, rhat = retained$rhat,
+        bulk_ess = retained$ess_bulk, tail_ess = retained$ess_tail,
+        divergences = retained$divergences, treedepth_hits = retained$treedepth_hits),
+      psp_lfsr = list(PSP = retained$p_sign2, LFSR = retained$lfsr),
+      predictive_eligibility = retained$bayesian_eligible,
+      subject_elpd = list(state = if (retained$kfold_attempted) "executed" else "not_applicable",
+        n_successful_test_observations =
+          v021_preflight_successful_test_observation_count(result$kfold_success_total),
+        method = "student-t-scale-mixture-kalman-ou-q16"),
+      seed_split_provenance = list(direction_seed = retained$seed,
+                                   kfold_seed = config$seed))
+    completion_path <- file.path(preflight_execution_paths$artifact_root,
+                                 paste0(manifest$direction_id[[i]], ".rds"))
+    write_v021_completion_artifact_atomic(
+      completion, completion_path, execution_manifest, config$output_root)
+    finished_attempt <- finish_v021_task_attempt(
+      preflight_status, preflight_attempt_ledger, execution_manifest,
+      selected$direction_index[[i]], "completed",
+      format(Sys.time(), tz = "UTC", usetz = TRUE),
+      artifact_path = completion_path, result_root = config$output_root)
   }
+  preflight_status <<- finished_attempt$status
+  preflight_attempt_ledger <<- finished_attempt$ledger
+  write_v021_task_status_atomic(
+    preflight_status, preflight_execution_paths$status, execution_manifest)
+  write_v021_attempt_ledger_atomic(
+    preflight_attempt_ledger, preflight_execution_paths$attempts, execution_manifest)
   write_v021_checkpoint_atomic(checkpoint)
   manifest <<- .v021_apply_checkpoint(manifest, i, checkpoint)
   write_v021_manifest_atomic(manifest, manifest_path)
@@ -537,7 +590,8 @@ run_metadata <- data.frame(
   r_version = R.version.string,
   cmdstan_version = paste(cmdstanr::cmdstan_version(), collapse = "."),
   hostname = Sys.info()[["nodename"]], logical_cpu_detected = parallel::detectCores(),
-  allocated_logical_threads = 12L, start_timestamp = summary$monitor_start,
+  allocated_logical_threads = 16L, cpu_affinity = "0-15",
+  start_timestamp = summary$monitor_start,
   end_timestamp = format(run_end, tz = "UTC", usetz = TRUE),
   manifest_hash = execution_manifest$manifest_hash,
   configuration_hash = execution_manifest$configuration_hash,
@@ -555,10 +609,10 @@ write_tsv(data.frame(
   maximum_concurrent_fits = policy$proposed_outer_concurrency), "resource_policy.tsv")
 write_tsv(data.frame(variable = names(thread_environment), value = unname(thread_environment)),
           "environment_thread_caps.tsv")
-write_tsv(data.frame(wave = c(1L, 2L), task_count = c(2L, 1L),
-                     reserved_chains = c(8L, 4L), accepted = c(TRUE, FALSE),
-                     reason = c("two canonical fits fit capacity",
-                                "third concurrent fit rejected")),
+write_tsv(data.frame(wave = c(1L, 2L), task_count = c(3L, 1L),
+                     reserved_chains = c(12L, 4L), accepted = c(TRUE, FALSE),
+                     reason = c("three canonical fits fill capacity",
+                                "fourth concurrent fit rejected")),
           "scheduler_dry_run.tsv")
 write_tsv(manifest[c("task_id", "direction_id", "direction_index", "target", "source",
                      "seed", "execution_state", "elapsed_time", "failure_reason")],
@@ -616,7 +670,7 @@ write_tsv(data.frame(
   "optional_perturbation_budget.tsv")
 elapsed <- manifest$elapsed_time
 bytes <- vapply(manifest$output_location, function(path) file.info(path)$size, numeric(1))
-central_seconds <- stats::median(elapsed) * 9900 / 2
+central_seconds <- stats::median(elapsed) * 9900 / config$maximum_simultaneous_fits
 write_tsv(data.frame(
   measured_tasks = nrow(manifest), simultaneous_task_wall_seconds = sum(elapsed),
   median_task_seconds = stats::median(elapsed), checkpoint_bytes_per_task = stats::median(bytes),
@@ -642,3 +696,6 @@ saveRDS(list(acquired = TRUE, released = TRUE,
         file.path(config$output_root, "controller_ownership_audit.rds"))
 cat("V021-05 preflight passed. Peak chains:", summary$observed_peak_active_chains,
     "peak CmdStan process slots:", summary$observed_peak_cmdstan_process_slots, "\n")
+}
+
+run_v021_four_chain_preflight()

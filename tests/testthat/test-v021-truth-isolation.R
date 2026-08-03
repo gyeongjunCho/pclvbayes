@@ -39,7 +39,6 @@ make_v021_results <- function() {
     bayesian_eligibility = c(a_to_b = TRUE),
     kfold_results = list(completed = TRUE, folds_ok = 5L),
     elpd_results = list(available = TRUE, value = -12.5),
-    stacking_results = list(available = FALSE, value = NA_real_),
     matrices = list(posterior = matrix(c(0, -0.25, 0, 0), 2)),
     masks = list(unavailable = matrix(c(FALSE, FALSE, TRUE, FALSE), 2)),
     feature_inputs = data.frame(rhat = 1.001, ess_bulk = 850),
