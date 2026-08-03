@@ -3,6 +3,7 @@
 v021_full_schema <- "v021_full_100_species_v1"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
 v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
+v021_full_cleanup_audit_schema <- "v021_full_cleanup_audit_v1"
 v021_full_selection_rule <- paste(
   "MTIST 100-species metadata; noise=0.01; even sampling; at least 10 series;",
   "at least 15 timepoints; lowest dataset ID; no truth fields inspected"
@@ -181,6 +182,8 @@ new_v021_failure_trace_context <- function(trace_root, origin,
   context$phase <- "initialization"
   context$last_completed_phase <- NA_character_
   context$last_trace <- NULL
+  context$cleanup_audit_path <- NA_character_
+  context$monitor_state <- NULL
   context
 }
 
@@ -226,6 +229,8 @@ capture_v021_failure_trace <- function(condition, context,
     batch_id = context$batch_id,
     task_ids = context$task_ids,
     direction_ids = context$direction_ids,
+    cleanup_audit_path = context$cleanup_audit_path,
+    monitor_state = context$monitor_state,
     condition_class = class(condition),
     condition_message = conditionMessage(condition),
     condition_call = if (is.null(condition_call)) NA_character_ else
@@ -251,7 +256,7 @@ capture_v021_failure_trace <- function(condition, context,
 with_v021_failure_tracing <- function(code, context,
                                        writer = .v021_atomic_save_rds) {
   if (!is.function(code)) stop("code must be a function.")
-  withCallingHandlers(code(), error = function(condition) {
+  handler <- function(condition) {
     if (is.null(context$last_trace)) {
       capture_error <- tryCatch({
         capture_v021_failure_trace(condition, context, writer = writer)
@@ -271,7 +276,8 @@ with_v021_failure_tracing <- function(code, context,
         trace_persistence_error = paste("trace_capture_failed", capture_error, sep = ": ")
       )
     }
-  })
+  }
+  withCallingHandlers(code(), error = handler, interrupt = handler)
 }
 
 run_v021_traced_child <- function(code, context,
@@ -286,6 +292,13 @@ run_v021_traced_child <- function(code, context,
       trace = context$last_trace
     ), class = c("v021_traced_child_error", "list"))
   )
+}
+
+record_and_resignal_v021_condition <- function(condition, recorder) {
+  if (!inherits(condition, "condition") || !is.function(recorder))
+    stop("Invalid condition re-signal input.")
+  recorder(condition)
+  stop(condition)
 }
 
 persist_v021_failure_payload <- function(payload, path, trace_root,
@@ -309,4 +322,133 @@ persist_v021_failure_payload <- function(payload, path, trace_root,
     NA_character_
   }, error = conditionMessage)
   list(persisted = is.na(persistence_error), persistence_error = persistence_error)
+}
+
+new_v021_batch_ownership <- function(batch_id, parent_pid, worker_registry,
+                                      known_model_executable, output_root,
+                                      cleanup_audit_path) {
+  validate_v021_worker_registry(worker_registry)
+  values <- c(batch_id, known_model_executable, output_root, cleanup_audit_path)
+  if (anyNA(values) || any(!nzchar(values))) stop("Invalid V021-06 batch ownership paths.")
+  ownership <- new.env(parent = emptyenv())
+  ownership$batch_id <- batch_id
+  ownership$parent_pid <- as.integer(parent_pid)
+  ownership$worker_registry <- worker_registry
+  ownership$known_model_executable <- normalizePath(known_model_executable, mustWork = FALSE)
+  ownership$output_root <- normalizePath(output_root, mustWork = FALSE)
+  ownership$cleanup_audit_path <- cleanup_audit_path
+  ownership$cleanup_started <- FALSE
+  ownership$cleanup_result <- NULL
+  ownership
+}
+
+.v021_owned_batch_rows <- function(records, ownership) {
+  required <- c("pid", "ppid", "start_time", "classification", "executable")
+  if (!is.data.frame(records) || !all(required %in% names(records)) ||
+      anyDuplicated(records$pid)) stop("Invalid cleanup process inventory.")
+  registry <- ownership$worker_registry
+  registry_match <- match(records$pid, registry$pid)
+  registered <- !is.na(registry_match)
+  verified_registered <- registered
+  verified_registered[registered] <-
+    records$start_time[registered] == registry$start_time[registry_match[registered]] &
+    records$ppid[registered] == registry$expected_ppid[registry_match[registered]] &
+    records$classification[registered] == "registered_outer_worker"
+  verified_worker_pids <- records$pid[verified_registered]
+  ancestry_owned <- vapply(records$pid, function(pid) {
+    ancestry <- .v021_process_ancestry(records, pid, ownership$parent_pid)
+    any(verified_worker_pids %in% ancestry)
+  }, logical(1))
+  known_descendant <- records$classification %in%
+    c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")
+  exact_model <- normalizePath(records$executable, mustWork = FALSE) ==
+    ownership$known_model_executable
+  owned <- verified_registered | (ancestry_owned & known_descendant &
+    (exact_model | records$classification %in% c("pathfinder_process", "cmdstan_diagnostic")))
+  list(
+    owned = records[owned, , drop = FALSE],
+    excluded = records[!owned & records$pid != ownership$parent_pid, , drop = FALSE],
+    registry_mismatch = records[registered & !verified_registered, , drop = FALSE]
+  )
+}
+
+cleanup_v021_owned_batch <- function(
+    ownership, trigger_condition = NULL, origin = "parent", phase = NA_character_,
+    inventory_reader, signaler, alive_reader, reaper = function() list(),
+    sleeper = Sys.sleep, wait_attempts = 5L, wait_seconds = 0.1,
+    writer = .v021_atomic_save_rds,
+    clock = function() format(Sys.time(), tz = "UTC", usetz = TRUE)) {
+  if (!is.environment(ownership)) stop("Invalid V021-06 batch ownership record.")
+  if (isTRUE(ownership$cleanup_started)) return(ownership$cleanup_result)
+  ownership$cleanup_started <- TRUE
+  original_message <- if (inherits(trigger_condition, "condition"))
+    conditionMessage(trigger_condition) else as.character(trigger_condition %||% "normal_return")
+  audit <- list(
+    cleanup_schema = v021_full_cleanup_audit_schema,
+    batch_id = ownership$batch_id,
+    trigger_condition = original_message,
+    origin = origin,
+    phase = as.character(phase),
+    parent_pid = ownership$parent_pid,
+    start_timestamp = clock(),
+    output_root = ownership$output_root,
+    owned_processes = data.frame(),
+    excluded_processes = data.frame(),
+    registry_mismatches = data.frame(),
+    signals = list(),
+    reap_result = NULL,
+    survivors = integer(),
+    sigkill_used = FALSE,
+    sigkill_limitation = "SIGKILL and uncatchable parent termination cannot guarantee R-level tracing.",
+    cleanup_error = NA_character_,
+    audit_persistence_error = NA_character_,
+    end_timestamp = NA_character_
+  )
+  cleanup_error <- tryCatch({
+    inventory <- inventory_reader()
+    selected <- .v021_owned_batch_rows(inventory, ownership)
+    audit$owned_processes <- selected$owned
+    audit$excluded_processes <- selected$excluded
+    audit$registry_mismatches <- selected$registry_mismatch
+    if (nrow(selected$registry_mismatch))
+      stop("Registered worker identity changed during cleanup.")
+    owned_identity <- selected$owned[rev(seq_len(nrow(selected$owned))), , drop = FALSE]
+    owned_pids <- owned_identity$pid
+    owned_start_times <- owned_identity$start_time
+    live <- alive_reader(owned_pids, owned_start_times)
+    if (length(live)) {
+      audit$signals[[length(audit$signals) + 1L]] <- list(
+        signal = "SIGINT", pids = as.integer(live), timestamp = clock())
+      signaler(live, "SIGINT")
+    }
+    for (attempt in seq_len(as.integer(wait_attempts))) {
+      live <- alive_reader(owned_pids, owned_start_times)
+      if (!length(live)) break
+      sleeper(wait_seconds)
+    }
+    live <- alive_reader(owned_pids, owned_start_times)
+    if (length(live)) {
+      audit$signals[[length(audit$signals) + 1L]] <- list(
+        signal = "SIGTERM", pids = as.integer(live), timestamp = clock())
+      signaler(live, "SIGTERM")
+      for (attempt in seq_len(as.integer(wait_attempts))) {
+        live <- alive_reader(owned_pids, owned_start_times)
+        if (!length(live)) break
+        sleeper(wait_seconds)
+      }
+    }
+    audit$survivors <- as.integer(alive_reader(owned_pids, owned_start_times))
+    NA_character_
+  }, error = conditionMessage)
+  audit$cleanup_error <- cleanup_error
+  audit$reap_result <- tryCatch(reaper(), error = function(e)
+    list(error = conditionMessage(e)))
+  audit$end_timestamp <- clock()
+  persistence_error <- tryCatch({
+    writer(audit, ownership$cleanup_audit_path)
+    NA_character_
+  }, error = conditionMessage)
+  audit$audit_persistence_error <- persistence_error
+  ownership$cleanup_result <- audit
+  audit
 }

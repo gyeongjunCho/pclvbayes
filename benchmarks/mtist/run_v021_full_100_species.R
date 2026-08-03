@@ -18,6 +18,35 @@ config_path <- Sys.getenv(
   file.path(script_dir, "configs", "v021_full_100_species.R"))
 config <- source(config_path)$value
 validate_v021_full_config(config)
+
+# Optional foreground-only debug mode. When enabled, both variables are required
+# and the debug output root must differ from the configured production root.
+debug_directions_raw <- trimws(Sys.getenv("PCLV_V021_DEBUG_DIRECTIONS", ""))
+debug_output_root_raw <- trimws(Sys.getenv("PCLV_V021_DEBUG_OUTPUT_ROOT", ""))
+debug_mode <- nzchar(debug_directions_raw)
+production_output_root <- normalizePath(config$output_root, mustWork = FALSE)
+
+if (debug_mode) {
+  if (!nzchar(debug_output_root_raw))
+    stop("PCLV_V021_DEBUG_OUTPUT_ROOT is required in debug mode.")
+
+  debug_output_root <- normalizePath(debug_output_root_raw, mustWork = FALSE)
+  if (identical(debug_output_root, production_output_root))
+    stop("Debug output root must differ from the production output root.")
+
+  pieces <- trimws(strsplit(debug_directions_raw, ",", fixed = TRUE)[[1L]])
+  if (!length(pieces) || any(!nzchar(pieces)) ||
+      any(!grepl("^[0-9]+$", pieces)))
+    stop("PCLV_V021_DEBUG_DIRECTIONS must contain comma-separated positive integers.")
+
+  debug_directions <- suppressWarnings(as.integer(pieces))
+  if (anyNA(debug_directions) || any(debug_directions < 1L) ||
+      anyDuplicated(debug_directions))
+    stop("Debug direction indices must be unique positive integers.")
+
+  config$output_root <- debug_output_root
+}
+
 paths <- v021_full_paths(config)
 
 existing <- if (dir.exists(paths$output_root))
@@ -32,7 +61,9 @@ for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "inference_artifacts"),
                file.path(paths$output_root, "feature_records"),
                file.path(paths$output_root, "worker_registries"),
+               file.path(paths$output_root, "batch_ownership"),
                file.path(paths$output_root, "failure_traces"),
+               file.path(paths$output_root, "cleanup_audits"),
                file.path(paths$output_root, "cmdstan-owned")))
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
 
@@ -61,7 +92,15 @@ launch_record <- list(
   reserved_host_threads = policy$reserved_host_threads,
   maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
   maximum_cmdstan_process_slots = policy$maximum_cmdstan_process_slots,
-  resume_command = sprintf("PCLV_V021_FULL_CONFIG=%s Rscript %s",
+  resume_command = if (debug_mode) sprintf(
+    "PCLV_V021_FULL_CONFIG=%s PCLV_V021_DEBUG_DIRECTIONS=%s PCLV_V021_DEBUG_OUTPUT_ROOT=%s Rscript %s",
+    shQuote(normalizePath(config_path, mustWork = TRUE)),
+    shQuote(paste(debug_directions, collapse = ",")),
+    shQuote(paths$output_root),
+    shQuote(normalizePath(file.path(script_dir, "run_v021_full_100_species.R"),
+                          mustWork = TRUE))
+  ) else sprintf(
+    "PCLV_V021_FULL_CONFIG=%s Rscript %s",
     shQuote(normalizePath(config_path, mustWork = TRUE)),
     shQuote(normalizePath(file.path(script_dir, "run_v021_full_100_species.R"),
                           mustWork = TRUE)))
@@ -84,6 +123,30 @@ observations <- load_v021_preflight_observations(root, as.integer(config$dataset
 if (length(observations$taxa) != config$taxa_count)
   stop("V021-06 observational input does not contain exactly 100 taxa.")
 tasks <- build_v021_full_task_table(observations$taxa, config$seed, config$dataset_id)
+
+if (debug_mode) {
+  missing_directions <- setdiff(debug_directions, tasks$direction_index)
+  if (length(missing_directions))
+    stop("Unknown debug direction indices: ",
+         paste(missing_directions, collapse = ", "))
+
+  # match() preserves the exact user-requested order and canonical identities.
+  tasks <- tasks[
+    match(debug_directions, tasks$direction_index),
+    ,
+    drop = FALSE
+  ]
+  if (!identical(tasks$direction_index, debug_directions))
+    stop("Debug direction selection did not preserve canonical indices.")
+
+  message(
+    "V021-06 DEBUG MODE: directions ",
+    paste(tasks$direction_index, collapse = ", "),
+    "; output root = ",
+    paths$output_root
+  )
+}
+
 manifest_input <- tasks[c("task_id", "direction_index", "target", "source", "seed")]
 expected_manifest <- build_v021_checkpoint_manifest(
   manifest_input, config$chains, paths$checkpoint_root)
@@ -297,6 +360,54 @@ run_batch <- function(indices) {
     register_v021_preflight_worker(
       fit_pids[[j]], parent_pid, "direction_fit_worker", batch_id,
       manifest$direction_id[[indices[[j]]]])))
+  cleanup_path <- file.path(paths$output_root, "cleanup_audits",
+                            paste0(batch_id, ".rds"))
+  ownership <- new_v021_batch_ownership(
+    batch_id, parent_pid, fit_registry, executable, paths$output_root, cleanup_path)
+  parent_trace$cleanup_audit_path <- cleanup_path
+  batch_exit_condition <- NULL
+  runtime_inventory_reader <- function() {
+    snapshot <- capture_v021_preflight_process_snapshot(parent_pid, executable)
+    classify_v021_process_snapshot(
+      snapshot, parent_pid, executable, worker_registry = ownership$worker_registry)
+  }
+  runtime_alive_reader <- function(pids, start_times) {
+    if (!length(pids)) return(integer())
+    keep <- vapply(seq_along(pids), function(k) {
+      stat <- tryCatch(readLines(file.path("/proc", pids[[k]], "stat"),
+                                 warn = FALSE, n = 1L),
+                       error = function(e) character())
+      if (!length(stat)) return(FALSE)
+      parsed <- tryCatch(.v021_parse_linux_stat(stat, pids[[k]]), error = identity)
+      !inherits(parsed, "error") && identical(parsed$start_time, start_times[[k]]) &&
+        !identical(parsed$process_state, "Z")
+    }, logical(1))
+    as.integer(pids[keep])
+  }
+  runtime_signaler <- function(pids, signal) {
+    option <- switch(signal, SIGINT = "-INT", SIGTERM = "-TERM",
+                     stop("Unsupported cleanup signal."))
+    invisible(lapply(as.integer(pids), function(pid)
+      system2("kill", c(option, as.character(pid)), stdout = FALSE, stderr = FALSE)))
+  }
+  runtime_reaper <- function() {
+    child_jobs <- fit_jobs
+    child_pids <- fit_pids
+    if (exists("monitor_job", inherits = FALSE)) {
+      child_jobs <- c(child_jobs, list(monitor_job))
+      child_pids <- c(child_pids, as.integer(monitor_job$pid))
+    }
+    collected <- tryCatch(parallel::mccollect(child_jobs, wait = FALSE), error = identity)
+    list(class = class(collected), child_pids = child_pids)
+  }
+  on.exit({
+    cleanup_result <- tryCatch(cleanup_v021_owned_batch(
+      ownership, batch_exit_condition, "parent", parent_trace$phase,
+      runtime_inventory_reader, runtime_signaler, runtime_alive_reader,
+      runtime_reaper), error = identity)
+    if (inherits(cleanup_result, "error"))
+      message("V021 batch cleanup failure: ", conditionMessage(cleanup_result))
+  }, add = TRUE)
   stop_owned <- function(snapshot) {
     owned <- fit_pids
     repeat {
@@ -357,11 +468,28 @@ run_batch <- function(indices) {
     paste0(batch_id, "-monitor"))
   registry <- rbind(fit_registry, monitor_registry)
   validate_v021_worker_registry(registry)
+  ownership$worker_registry <- registry
   .v021_atomic_save_rds(registry, registry_file)
   .v021_atomic_save_rds(registry, file.path(paths$output_root, "worker_registries",
                                             paste0(batch_id, ".rds")))
-  file.create(monitor_start_file)
-  file.create(start_file)
+  .v021_atomic_save_rds(list(
+    ownership_schema = "v021_full_batch_ownership_v1",
+    batch_id = batch_id,
+    parent_pid = as.integer(parent_pid),
+    known_model_executable = executable,
+    output_root = paths$output_root,
+    worker_registry = registry,
+    registration_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)),
+    file.path(paths$output_root, "batch_ownership", paste0(batch_id, ".rds")))
+  record_batch_condition <- function(condition) {
+    batch_exit_condition <<- condition
+    if (file.exists(latest_file))
+      parent_trace$monitor_state <- tryCatch(readRDS(latest_file), error = function(e)
+        list(read_error = conditionMessage(e)))
+  }
+  tryCatch({
+    file.create(monitor_start_file)
+    file.create(start_file)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
   results <- unname(parallel::mccollect(fit_jobs))
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
@@ -372,6 +500,7 @@ run_batch <- function(indices) {
     stop(monitor_result$condition_message)
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown", completed = TRUE)
   payload <- readRDS(final_file)
+  parent_trace$monitor_state <- payload$latest_monitor %||% payload$error %||% NULL
   if (!is.null(payload$error)) stop("Live process monitor failed: ", payload$error)
   batch_monitor <- monitor_v021_process_snapshots(
     payload$snapshots, policy, parent_pid, executable, worker_registry = registry)
@@ -381,6 +510,10 @@ run_batch <- function(indices) {
   elapsed <- (proc.time()[["elapsed"]] - started) / length(indices)
   for (j in seq_along(indices)) store_outcome(indices[[j]], results[[j]], elapsed)
   update_status()
+  }, error = function(condition)
+       record_and_resignal_v021_condition(condition, record_batch_condition),
+     interrupt = function(condition)
+       record_and_resignal_v021_condition(condition, record_batch_condition))
   invisible(TRUE)
 }
 
@@ -389,18 +522,27 @@ on.exit(options(old_options), add = TRUE)
 update_status("running")
 
 execution_error <- NULL
-withCallingHandlers(tryCatch(with_v021_single_thread_environment(function() {
-  repeat {
-    restart <- validate_v021_full_restart_states(manifest)
-    manifest <<- restart$manifest
-    write_v021_manifest_atomic(manifest, paths$manifest)
-    if (!length(restart$resume_indices)) break
-    run_batch(head(restart$resume_indices, config$maximum_simultaneous_fits))
-  }
-}), error = function(e) execution_error <<- e,
-interrupt = function(e) execution_error <<- e), error = function(e) {
-  if (is.null(parent_trace$last_trace)) capture_v021_failure_trace(e, parent_trace)
-})
+parent_condition_handler <- function(condition) {
+  if (is.null(parent_trace$last_trace)) capture_v021_failure_trace(condition, parent_trace)
+}
+record_execution_condition <- function(condition) execution_error <<- condition
+execution_error <- tryCatch(
+  withCallingHandlers(
+    tryCatch(with_v021_single_thread_environment(function() {
+      repeat {
+        restart <- validate_v021_full_restart_states(manifest)
+        manifest <<- restart$manifest
+        write_v021_manifest_atomic(manifest, paths$manifest)
+        if (!length(restart$resume_indices)) break
+        run_batch(head(restart$resume_indices, config$maximum_simultaneous_fits))
+      }
+    }), error = function(condition)
+         record_and_resignal_v021_condition(condition, record_execution_condition),
+       interrupt = function(condition)
+         record_and_resignal_v021_condition(condition, record_execution_condition)),
+    error = parent_condition_handler, interrupt = parent_condition_handler),
+  error = identity, interrupt = identity)
+if (!inherits(execution_error, "condition")) execution_error <- NULL
 
 if (!is.null(execution_error)) {
   set_v021_failure_trace_phase(parent_trace, "summary_failure_persistence")
@@ -412,6 +554,7 @@ if (!is.null(execution_error)) {
     timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
     reason = conditionMessage(execution_error), manifest_path = paths$manifest,
     monitor_path = file.path(paths$monitor_root, "latest.rds"),
+    cleanup_audit_path = parent_trace$cleanup_audit_path,
     parent_trace = parent_trace$last_trace,
     child_trace_paths = trace_paths),
     file.path(paths$output_root, "failure_payload.rds"), trace_root)
