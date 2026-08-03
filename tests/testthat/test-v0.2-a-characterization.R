@@ -73,11 +73,11 @@ test_that("canonical smoothed preprocessing preserves pair-to-rest ALR and delta
     min_pairs = 1, min_sd = 0, zero_mode_alr = "fixed", eps_fixed = 1e-12,
     alr_cap = 100, smooth_scale = "logra", nz_partner_min_frac = 0
   )
-  retained_alr_i <- log(c(0.20 / 0.50, 0.30 / 0.40, 0.25 / 0.40))
-  retained_alr_j <- log(c(0.30 / 0.50, 0.30 / 0.40, 0.35 / 0.40))
-  expected_xi <- retained_alr_i[1:2]
-  expected_xj <- retained_alr_j[1:2]
-  expect_equal(out$y, diff(retained_alr_i) / c(2, 3), tolerance = 1e-9)
+  retained_alr_i <- log(c(0.20 / 0.50, 0.30 / 0.40, 0.25 / 0.40, 0.35 / 0.40))
+  retained_alr_j <- log(c(0.30 / 0.50, 0.30 / 0.40, 0.35 / 0.40, 0.25 / 0.40))
+  expected_xi <- retained_alr_i[1:3]
+  expected_xj <- retained_alr_j[1:3]
+  expect_equal(out$y, diff(retained_alr_i) / c(2, 3, 4), tolerance = 1e-9)
   expect_equal(out$xi_unscaled, expected_xi, tolerance = 1e-9)
   expect_equal(out$xj_unscaled, expected_xj, tolerance = 1e-9)
 })
@@ -310,7 +310,10 @@ test_that("directed fitting uses the fixed canonical Core choices", {
   expect_true(pclvbayes:::.PCLV_CORE_USE_STUDENT_T)
   expect_false(exists(".PCLV_CORE_NU", envir = asNamespace("pclvbayes"), inherits = FALSE))
   expect_true(pclvbayes:::.PCLV_CORE_COMPUTE_ELPD)
-  expect_identical(pclvbayes:::.PCLV_CORE_ELPD_MODE, "kalman")
+  expect_identical(
+    pclvbayes:::.PCLV_CORE_ELPD_MODE,
+    "student_t_scale_mixture_kalman"
+  )
   expect_null(pclvbayes:::.PCLV_CORE_SPLINE$df)
   expect_null(pclvbayes:::.PCLV_CORE_SPLINE$spar)
   expect_true(pclvbayes:::.PCLV_CORE_SPLINE$cv)
@@ -454,7 +457,7 @@ test_that("a failed direction does not discard its opposite direction", {
   expect_identical(calls[[2]]$seed_override, 102009L)
 })
 
-test_that("NULL pointwise payloads compact to an empty result", {
+test_that("NULL subject predictive payloads compact to an empty result", {
   payload <- tibble::tibble(
     i = "a",
     j = "b",
@@ -470,41 +473,22 @@ test_that("NULL pointwise payloads compact to an empty result", {
     kfold_subject_counts_ji = list(NULL)
   )
 
-  compacted <- pclvbayes:::.expand_cross_pw(payload)
+  compacted <- pclvbayes:::.expand_cross_subject_elpd(payload)
 
   expect_s3_class(compacted, "tbl_df")
   expect_equal(nrow(compacted), 0)
-  expect_equal(ncol(compacted), 0)
+  expect_named(compacted, c("from", "to", "subject", "elpd",
+                            "elpd_per_observation", "n_successful_test_observations",
+                            "elpd_method"))
 })
 
-test_that("LFSR conversion and model weights retain normalization", {
+test_that("LFSR conversion remains bounded after weight removal", {
   expect_equal(
     pclvbayes:::.lfsr_safe(c(-1, 0, 0.2, 1, 2, 3, NA_real_)),
     c(0, 0, 0.1, 0.5, 0.5, 0.5, NA_real_)
   )
 
-  pointwise <- tibble::tibble(
-    from = rep(c("a", "b", "c", "d"), each = 2),
-    to = rep(
-      c("target_1", "target_1", "target_2", "target_2"),
-      each = 2
-    ),
-    subject = rep(c("s1", "s2"), 4),
-    elpd = c(-1, -2, -3, -4, -2, -2, -1, -1),
-    n_test = rep(1L, 8)
-  )
-
-  weights <- pclvbayes:::.compute_pseudobma_weights_cross(
-    list(elpd_pointwise_cross = pointwise),
-    plus = FALSE,
-    min_models = 2,
-    min_subjects = 2
-  )
-
-  sums <- tapply(weights$weight, weights$to, sum)
-  expect_equal(as.numeric(sums), rep(1, length(sums)), tolerance = 1e-12)
-  expect_true(all(is.finite(weights$weight)))
-  expect_true(all(weights$weight >= 0 & weights$weight <= 1))
+  expect_false(exists(".softmax", envir = asNamespace("pclvbayes"), inherits = FALSE))
 })
 
 test_that("K-fold aggregation preserves unavailable and partial evidence", {
@@ -567,7 +551,7 @@ test_that("K-fold aggregation preserves unavailable and partial evidence", {
   ) %in% names(result$failures[[1]])))
 })
 
-test_that("pointwise ELPD and weights require successful common evidence", {
+test_that("subject ELPD preserves unavailable and successful evidence", {
   pair <- tibble::tibble(
     i = "target", j = "predator",
     kfold_subject_ids_ij = list(c("A", "B")),
@@ -581,42 +565,10 @@ test_that("pointwise ELPD and weights require successful common evidence", {
     kfold_elpd_method_ji = NA_character_,
     kfold_subject_counts_ji = list(NULL)
   )
-  pointwise <- pclvbayes:::.expand_cross_pw(pair)
-  expect_true(is.na(pointwise$elpd[pointwise$subject == "A"]))
-  expect_equal(pointwise$n_test[pointwise$subject == "A"], 0L)
-  expect_equal(pointwise$n_test[pointwise$subject == "B"], 2L)
-
-  evidence <- tibble::tibble(
-    from = rep(c("p1", "p2"), each = 3), to = "target",
-    subject = rep(c("A", "B", "C"), 2),
-    elpd = c(NA, -2, -2.5, -1, -3, -3.5),
-    elpd_ppd = c(NA, -2, -2.5, -1, -3, -3.5),
-    n_test = c(0L, 2L, 2L, 1L, 2L, 2L)
-  )
-  unavailable <- pclvbayes:::.compute_pseudobma_weights_cross(
-    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 3
-  )
-  expect_equal(nrow(unavailable), 0)
-
-  weights <- pclvbayes:::.compute_pseudobma_weights_cross(
-    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 2
-  )
-  expect_equal(sum(weights$weight), 1)
-  expect_equal(sort(weights$from), c("p1", "p2"))
-
-  stacking_unavailable <- pclvbayes:::.compute_stacking_weights_cross(
-    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 3
-  )
-  expect_equal(nrow(stacking_unavailable), 0)
-  stacking <- pclvbayes:::.compute_stacking_weights_cross(
-    list(elpd_pointwise_cross = evidence), min_models = 2, min_subjects = 2
-  )
-  if (requireNamespace("loo", quietly = TRUE)) {
-    expect_equal(sum(stacking$stacking), 1, tolerance = 1e-8)
-    expect_equal(sort(stacking$from), c("p1", "p2"))
-  } else {
-    expect_equal(nrow(stacking), 0)
-  }
+  subject_elpd <- pclvbayes:::.expand_cross_subject_elpd(pair)
+  expect_true(is.na(subject_elpd$elpd[subject_elpd$subject == "A"]))
+  expect_equal(subject_elpd$n_successful_test_observations[subject_elpd$subject == "A"], 0L)
+  expect_equal(subject_elpd$n_successful_test_observations[subject_elpd$subject == "B"], 2L)
 })
 
 test_that("canonical projection scoring is Kalman OU with draw-specific Student-t nu", {
@@ -634,7 +586,7 @@ test_that("canonical projection scoring is Kalman OU with draw-specific Student-
   expect_equal(dim(scored$full), c(2, 2))
   expect_true(all(is.finite(scored$full)))
   expect_equal(scored$subjects, c("A", "B"))
-  expect_equal(scored$n_obs, c(2L, 2L))
+  expect_equal(unname(scored$n_obs), c(2L, 2L))
   expect_identical(names(formals(pclvbayes:::.proj_loglik_subject)),
                    c("draws_df", "pair_in"))
 })

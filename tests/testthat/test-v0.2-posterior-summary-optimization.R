@@ -90,17 +90,13 @@ test_that("adding retained convergence diagnostics leaves sampler decisions unch
   expect_equal(retained$min_ess_tail, min(expected$ess_tail, na.rm = TRUE))
 })
 
-test_that("posterior evidence remains immutable across downstream weight calculation", {
+test_that("posterior evidence remains immutable without cross-pair weighting", {
   d <- summary_draw_fixture()
   bundle <- pclvbayes:::.build_posterior_summary_bundle(d, summary_diag_fixture())
   evidence_before <- bundle[c("coefficients", "sign", "chain")]
-  pointwise <- data.frame(from = rep(c("a", "b"), each = 3), to = "c",
-                          subject = rep(1:3, 2), elpd = c(-1, -2, -1, -2, -1, -2),
-                          n_test = 1L)
-  invisible(pclvbayes:::.compute_pseudobma_weights_cross(
-    list(elpd_pointwise_cross = pointwise), data.frame(from = c("a", "b"), to = "c"),
-    min_models = 2L, min_subjects = 1L))
   expect_identical(bundle[c("coefficients", "sign", "chain")], evidence_before)
+  expect_false(exists(".compute_pseudobma_weights_cross",
+                      envir = asNamespace("pclvbayes"), inherits = FALSE))
 })
 
 test_that("public API remains unchanged by private posterior summary reuse", {

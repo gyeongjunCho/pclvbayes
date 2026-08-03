@@ -20,7 +20,7 @@
     "alr_spline_spar", "alr_spline_cv", "nz_partner_min_frac",
     "max_retries", "chains", "iter_warmup", "iter_sampling",
     "adapt_delta", "max_treedepth", "metric", "init", "seed",
-    "quiet", "silent_sampler", "kfold_K", "kfold_R",
+    "quiet", "silent_sampler", "kfold_K", "kfold_R", "kfold_seed",
     "use_pathfinder_init", "pf_num_paths", "pf_draws",
     "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample"
   )
@@ -67,6 +67,9 @@
 #' are scored with the irregular-time OU Kalman path using a Student-t observation
 #' likelihood with one posterior-estimated `nu > 2` per directed fit. Spline smoothing is selected by cross-validation.
 #' Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
+#' The validated \code{kfold_seed} is used only to construct subject-level
+#' split manifests and is shared across pair directions with the same subject
+#' universe. Fold sampler seeds remain direction-specific.
 #'
 #' - A diagnostics-aware retry policy and Pathfinder initialization use the fixed
 #'   canonical v0.2 settings; their implementation controls are private.
@@ -111,16 +114,15 @@
 #'
 #' @param kfold_K Number of folds K; default \code{5}.
 #' @param kfold_R Number of repetitions R; default \code{3}.
-#' @param kfold_seed Seed for K-fold split reproducibility (defaults to `seed`).
+#' @param kfold_seed Seed used only for repeated K-fold subject splits; defaults to \code{seed}. The same value is applied across all pair directions, while fold sampler seeds remain direction-specific.
 #' @param n_workers_kfold Number of parallel workers for K-fold; default \code{1}.
 #' @param n_workers_outer Number of parallel workers for the outer pair loop; default \code{1}.
 #' If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested parallelism.
 #'
 #'
 #' @return
-#' A list containing directional and self-effect summaries, pointwise repeated
-#' K-fold ELPD, and the raw bidirectional pair table. ELPD uses the
-#' `kalman-ou` method and includes fold-evidence counts.
+#' A list containing directional and self-effect summaries, directed
+#' subject-level repeated K-fold ELPD, and the raw bidirectional pair table.
 #'
 #' @section Progress & Parallel:
 #' - Set global handlers once for pretty bars: \preformatted{
@@ -294,13 +296,10 @@ fit_pclv_bayes <- function(
   res <- .assemble_pair_outcomes(out, tasks)
   rownames(res) <- NULL
 
-  cross_tbl <- .mk_cross(res)
-  self_tbl <- .mk_self(res)
-  # ---------- ③ elpd_pointwise_cross ----------
-  elpd_pointwise_cross_tbl <- .expand_cross_pw(res)
-  elpd_pointwise_self_tbl <- .expand_self_pw(res)
-  # ---------- ⑤ raw: 디버그용 와이드 테이블 ----------
+  # Assemble from the finalized raw result so that any existing attributes on
+  # the canonical result table are preserved.
   raw_tbl <- res
+  out_obj <- .assemble_public_fit_result(raw_tbl)
 
   if ("fit" %in% names(raw_tbl)) {
     try({
@@ -311,13 +310,5 @@ fit_pclv_bayes <- function(
     }, silent = TRUE)
   }
 
-  # 최종 리스트로 반환
-  out_obj <- list(
-    cross = cross_tbl,
-    self  = self_tbl,
-    elpd_pointwise_cross = elpd_pointwise_cross_tbl,
-    elpd_pointwise_self  = elpd_pointwise_self_tbl,
-    raw = raw_tbl
-  )
   return(out_obj)
 }

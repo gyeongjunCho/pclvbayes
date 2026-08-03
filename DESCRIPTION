@@ -25,12 +25,10 @@ Imports:
     phyloseq,
     tidyr,
     progressr,
-    loo,
     metafor,
     qvalue
 Suggests:
     progressr,
-    loo,
     metafor,
     qvalue,
     testthat,

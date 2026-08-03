@@ -1,12 +1,32 @@
-##### R/glv_helpers.R
-
 .PCLV_CORE_ALR_CAP <- 12
 .PCLV_CORE_TRANSFORM <- "alr"
 .PCLV_CORE_LAG <- 1L
 .PCLV_CORE_RESID_MODE <- "ou"
 .PCLV_CORE_USE_STUDENT_T <- TRUE
 .PCLV_CORE_COMPUTE_ELPD <- TRUE
-.PCLV_CORE_ELPD_MODE <- "kalman"
+.PCLV_CORE_ELPD_MODE <- "student_t_scale_mixture_kalman"
+.PCLV_CORE_T_KALMAN_QUADRATURE <- list(
+  probability = c(
+    0.005299532504175031, 0.027712488463383700,
+    0.067184398806084122, 0.122297795822498500,
+    0.191061877798678110, 0.270991611171386320,
+    0.359198224610370540, 0.452493745081181290,
+    0.547506254918818770, 0.640801775389629460,
+    0.729008388828613630, 0.808938122201321890,
+    0.877702204177501550, 0.932815601193915930,
+    0.972287511536616300, 0.994700467495824970
+  ),
+  weight = c(
+    0.013576229705877088, 0.031126761969323728,
+    0.047579255841246303, 0.062314485627767036,
+    0.074797994408288354, 0.084578259697501323,
+    0.091301707522461820, 0.094725305227534320,
+    0.094725305227534320, 0.091301707522461820,
+    0.084578259697501323, 0.074797994408288354,
+    0.062314485627767036, 0.047579255841246303,
+    0.031126761969323728, 0.013576229705877088
+  )
+)
 .PCLV_CORE_SPLINE <- list(df = NULL, spar = NULL, cv = TRUE)
 
 .pclv_failure <- function(stage, reason, details = list()) {
@@ -43,35 +63,73 @@
 
 #' Per-subject spline smoothing of relative abundances (log-scale)
 #'
-#' For each taxon and subject, fits a robust smoothing spline on
-#' \code{log(pmax(x,0)+eps)} against time, predicts back to the original
-#' time points, and returns smoothed abundances on the original scale
-#' (with \code{eps} subtraction and non-negativity guard).
+#' Every taxon in the complete input community is smoothed independently within
+#' subject on \code{log(pmax(x, 0) + eps)}. The reconstructed abundances are
+#' then reclosed sample-wise over the complete community before the requested
+#' taxa are returned. Reclosure is required because independent smoothing does
+#' not preserve compositional column sums.
 #'
 #' @param mat_rel Taxa-by-samples relative abundance matrix (rows = taxa).
 #' @param meta_df Data frame with columns \code{Sample}, \code{subject}, \code{time}.
-#' @param taxa_list Optional character vector of taxa to smooth.
+#' @param taxa_list Character vector of taxa to return after full-community smoothing.
 #' @param eps Small constant for log transform stability.
-#' @param spline_df Optional effective degrees of freedom for \code{smooth.spline}.
-#' @param spline_spar Optional \code{spar} parameter for \code{smooth.spline}.
-#' @param spline_cv Logical; use the canonical leave-one-out CV spline only.
 #' @param min_unique_times Minimum unique time points required to fit a spline.
-#' @return A taxa-by-samples numeric matrix of smoothed abundances.
+#' @return A requested-taxa-by-samples numeric matrix whose values were
+#'   normalized using the complete smoothed community.
 #' @noRd
 #' @keywords internal
 .precompute_spline_smoothed <- function(mat_rel, meta_df,
                                         taxa_list = rownames(mat_rel),
                                         eps = 1e-6,
                                         min_unique_times = 3) {
-  time_failure <- .validate_subject_times(meta_df$time, meta_df$subject, "spline_smoothing")
+  time_failure <- .validate_subject_times(
+    meta_df$time, meta_df$subject, "spline_smoothing"
+  )
   if (!is.null(time_failure)) return(time_failure)
-  sm_mat <- matrix(NA_real_, nrow = nrow(mat_rel), ncol = ncol(mat_rel),
-                   dimnames = dimnames(mat_rel))
-  col_idx_all <- match(meta_df$Sample, colnames(mat_rel))
 
-  if (!all(taxa_list %in% rownames(mat_rel)))
+  matrix_taxa <- rownames(mat_rel)
+  matrix_samples <- colnames(mat_rel)
+  metadata_samples <- as.character(meta_df$Sample)
+  taxa_list <- as.character(taxa_list)
+
+  if (is.null(matrix_taxa) || is.null(matrix_samples) ||
+      anyNA(matrix_taxa) || anyNA(matrix_samples) ||
+      anyDuplicated(matrix_taxa) || anyDuplicated(matrix_samples)) {
+    stop("Validated abundance dimname invariant violated.")
+  }
+  if (!length(taxa_list) || anyNA(taxa_list) || any(!nzchar(taxa_list)) ||
+      anyDuplicated(taxa_list) || !all(taxa_list %in% matrix_taxa)) {
     stop("Validated taxa invariant violated.")
-  taxa_use <- taxa_list
+  }
+  if (length(metadata_samples) != length(matrix_samples) ||
+      anyNA(metadata_samples) || any(!nzchar(metadata_samples)) ||
+      anyDuplicated(metadata_samples) ||
+      !setequal(metadata_samples, matrix_samples)) {
+    return(.pclv_failure(
+      "spline_smoothing", "sample_alignment_failed",
+      list(
+        metadata_n = length(metadata_samples),
+        matrix_n = length(matrix_samples)
+      )
+    ))
+  }
+
+  col_idx_all <- match(metadata_samples, matrix_samples)
+  if (anyNA(col_idx_all) || anyDuplicated(col_idx_all)) {
+    return(.pclv_failure(
+      "spline_smoothing", "sample_alignment_failed", list()
+    ))
+  }
+
+  sm_mat <- matrix(
+    NA_real_, nrow = nrow(mat_rel), ncol = ncol(mat_rel),
+    dimnames = dimnames(mat_rel)
+  )
+
+  # The denominator represents the complete remaining community. Therefore all
+  # taxa must participate in smoothing and reclosure, even when only a subset is
+  # requested for directed fitting.
+  taxa_use <- matrix_taxa
 
   for (tx in taxa_use) {
     vec_pred <- rep(NA_real_, nrow(meta_df))
@@ -83,8 +141,12 @@
       vals  <- as.numeric(mat_rel[tx, cols])
 
       ok <- is.finite(times) & is.finite(vals)
-      if (!any(ok)) return(.pclv_failure("spline_smoothing", "no_finite_abundance",
-                                                list(taxon = tx, subject = sb)))
+      if (!any(ok)) {
+        return(.pclv_failure(
+          "spline_smoothing", "no_finite_abundance",
+          list(taxon = tx, subject = sb)
+        ))
+      }
 
       df   <- data.frame(time = times[ok], val = vals[ok])
       df2  <- stats::aggregate(val ~ time, df, mean)
@@ -104,15 +166,18 @@
           default_df = 4.0
         )
         if (.is_pclv_failure(rr)) {
-          rr$details$taxon <- tx; rr$details$subject <- sb
+          rr$details$taxon <- tx
+          rr$details$subject <- sb
           return(rr)
         }
         pred_log <- rr$yhat[match(times, df2$time)]
       }
 
       if (is.null(pred_log)) {
-        return(.pclv_failure("spline_smoothing", "insufficient_unique_times",
-                             list(taxon = tx, subject = sb)))
+        return(.pclv_failure(
+          "spline_smoothing", "insufficient_unique_times",
+          list(taxon = tx, subject = sb)
+        ))
       }
 
       vec_pred[idx] <- pmax(exp(pred_log) - eps, 0)
@@ -121,8 +186,48 @@
     sm_mat[tx, col_idx_all] <- vec_pred
   }
 
-#' Safely extract common parameter draws as a data frame
-  sm_mat
+  invalid_value <- !is.finite(sm_mat) | sm_mat < 0
+  if (any(invalid_value)) {
+    bad <- which(invalid_value, arr.ind = TRUE)[1L, , drop = FALSE]
+    return(.pclv_failure(
+      "spline_smoothing", "invalid_smoothed_abundance",
+      list(
+        taxon = rownames(sm_mat)[bad[1L, "row"]],
+        sample = colnames(sm_mat)[bad[1L, "col"]]
+      )
+    ))
+  }
+
+  column_totals <- colSums(sm_mat)
+  bad_total <- !is.finite(column_totals) | column_totals <= 0
+  if (any(bad_total)) {
+    return(.pclv_failure(
+      "spline_smoothing", "invalid_smoothed_composition_total",
+      list(
+        samples = names(column_totals)[bad_total],
+        totals = unname(column_totals[bad_total])
+      )
+    ))
+  }
+
+  # Restore closure destroyed by independent taxon-wise smoothing.
+  sm_mat <- sweep(sm_mat, 2L, column_totals, "/")
+  closure_error <- abs(colSums(sm_mat) - 1)
+  closure_tolerance <- max(1e-12, 64 * .Machine$double.eps * nrow(sm_mat))
+  if (any(!is.finite(sm_mat)) || any(sm_mat < 0) ||
+      any(!is.finite(closure_error)) ||
+      max(closure_error) > closure_tolerance) {
+    return(.pclv_failure(
+      "spline_smoothing", "smoothed_composition_closure_failed",
+      list(
+        max_closure_error = suppressWarnings(max(closure_error)),
+        tolerance = closure_tolerance
+      )
+    ))
+  }
+
+  # Subsetting happens only after normalization over the complete community.
+  sm_mat[taxa_list, , drop = FALSE]
 }
 
 #'
@@ -551,9 +656,14 @@
 
   eps_t <- switch(zero_mode_alr,
                   "minpos_time" = {
-                    base_pos <- c(if (is.finite(xi) && xi > 0) xi,
-                                  if (is.finite(xj) && xj > 0) xj,
-                                  if (is.finite(xr) && xr > 0) xr)
+                    base_pos <- c(
+                      if (is.finite(xi) && xi > 0) xi,
+                      if (is.finite(xj) && xj > 0) xj
+                    )
+                    if (identical(minpos_base, "triplet") &&
+                        is.finite(xr) && xr > 0) {
+                      base_pos <- c(base_pos, xr)
+                    }
                     if (length(base_pos)) minpos_alpha * min(base_pos) else eps_fixed
                   },
                   "minpos_subject" = {
@@ -594,28 +704,70 @@
 .select_smoothed_pair_rows <- function(sm_mat, meta_df, j, i,
                                        min_pairs = 4, min_dt = 1e-8, min_sd = 1e-12) {
   stopifnot(all(c("Sample", "subject", "time") %in% names(meta_df)))
-  sample_idx <- match(meta_df$Sample, colnames(sm_mat))
+  if (!all(c(i, j) %in% rownames(sm_mat))) {
+    stop("Validated pair taxon invariant violated.")
+  }
+
+  metadata_samples <- as.character(meta_df$Sample)
+  matrix_samples <- colnames(sm_mat)
+  sample_idx <- match(metadata_samples, matrix_samples)
+  if (length(sample_idx) != nrow(meta_df) || anyNA(sample_idx) ||
+      anyDuplicated(sample_idx) || anyDuplicated(metadata_samples)) {
+    return(.pclv_failure(
+      "preprocessing", "sample_alignment_failed", list()
+    ))
+  }
+
   pair_df <- data.frame(
-    subject = meta_df$subject, time = meta_df$time,
+    subject = meta_df$subject,
+    time = meta_df$time,
     xi_raw = pmax(as.numeric(sm_mat[i, sample_idx]), 0),
     xj_raw = pmax(as.numeric(sm_mat[j, sample_idx]), 0)
   )
   pair_df <- pair_df[order(pair_df$subject, pair_df$time), , drop = FALSE]
+
+  if (any(!is.finite(pair_df$xi_raw)) || any(!is.finite(pair_df$xj_raw))) {
+    return(.pclv_failure(
+      "preprocessing", "non_finite_pair_abundance", list()
+    ))
+  }
+
   time_failure <- .validate_subject_times(pair_df$time, pair_df$subject)
   if (!is.null(time_failure)) return(time_failure)
+
   by_subject <- split(seq_len(nrow(pair_df)), pair_df$subject)
-  keep <- unlist(lapply(by_subject, function(ix) {
-    if (length(ix) < 2L) return(integer())
-    current <- ix[-length(ix)]; next_ix <- ix[-1L]
-    dt <- as.numeric(pair_df$time[next_ix] - pair_df$time[current])
-    current[is.finite(pair_df$time[current]) & is.finite(pair_df$time[next_ix]) &
-              is.finite(pair_df$xi_raw[current]) & is.finite(pair_df$xj_raw[current]) &
-              is.finite(pair_df$xi_raw[next_ix]) & is.finite(pair_df$xj_raw[next_ix]) &
-              is.finite(dt) & dt > min_dt]
-  }), use.names = FALSE)
-  pair_df <- pair_df[keep, , drop = FALSE]
-  if (nrow(pair_df) < min_pairs) return(.pclv_failure("preprocessing", "insufficient_rows", list(observed_rows = nrow(pair_df), required_rows = min_pairs)))
-  if (stats::sd(pair_df$xi_raw) < min_sd || stats::sd(pair_df$xj_raw) < min_sd) return(.pclv_failure("preprocessing", "insufficient_raw_variation", list(required_sd = min_sd)))
+  transition_counts <- vapply(by_subject, function(ix) {
+    if (length(ix) < 2L) return(0L)
+    dt <- diff(as.numeric(pair_df$time[ix]))
+    if (any(!is.finite(dt)) || any(dt <= min_dt)) return(NA_integer_)
+    length(dt)
+  }, integer(1))
+  if (anyNA(transition_counts)) {
+    return(.pclv_failure(
+      "preprocessing", "dt_below_minimum", list(min_dt = min_dt)
+    ))
+  }
+
+  # Preserve every raw observation. Lagging below removes only the first row per
+  # subject. Keeping only predecessor rows here would systematically discard the
+  # final valid transition of every subject.
+  n_transitions <- sum(transition_counts)
+  if (n_transitions < min_pairs) {
+    return(.pclv_failure(
+      "preprocessing", "insufficient_rows",
+      list(observed_rows = n_transitions, required_rows = min_pairs)
+    ))
+  }
+
+  sd_i <- stats::sd(pair_df$xi_raw)
+  sd_j <- stats::sd(pair_df$xj_raw)
+  if (!is.finite(sd_i) || !is.finite(sd_j) || sd_i < min_sd || sd_j < min_sd) {
+    return(.pclv_failure(
+      "preprocessing", "insufficient_raw_variation",
+      list(observed_sd_i = sd_i, observed_sd_j = sd_j, required_sd = min_sd)
+    ))
+  }
+
   pair_df
 }
 
@@ -713,8 +865,17 @@
   time_failure <- .validate_subject_times(df$time, df$subject)
   if (!is.null(time_failure)) return(time_failure)
 
-  df$xi_raw   <- pmax(as.numeric(df$xi_raw), 0)
-  df$xj_raw   <- pmax(as.numeric(df$xj_raw), 0)
+  df$xi_raw <- pmax(as.numeric(df$xi_raw), 0)
+  df$xj_raw <- pmax(as.numeric(df$xj_raw), 0)
+  pair_total <- df$xi_raw + df$xj_raw
+  composition_tolerance <- max(1e-12, 64 * .Machine$double.eps)
+  if (any(!is.finite(pair_total)) ||
+      any(pair_total > 1 + composition_tolerance)) {
+    return(.pclv_failure(
+      "preprocessing", "invalid_pair_composition",
+      list(max_pair_total = suppressWarnings(max(pair_total)))
+    ))
+  }
   df$rest_raw <- .pair_to_rest_abundance(df$xi_raw, df$xj_raw)
 
   by_s <- split(seq_len(nrow(df)), df$subject)
@@ -797,7 +958,10 @@
     keep_mask <- rep(TRUE, nrow(df))
     for (sname in names(by_s2)) {
       ix <- by_s2[[sname]]
-      frac_nz <- mean(is.finite(xj[ix]) & xj[ix] != 0, na.rm = TRUE)
+      # Sparsity is a property of the raw partner abundance, not of its ALR.
+      # A zero-replaced ALR is almost never exactly zero and therefore cannot be
+      # used to detect an absent partner.
+      frac_nz <- mean(is.finite(df$xj_raw[ix]) & df$xj_raw[ix] > 0)
       if (is.finite(frac_nz) && frac_nz < nz_partner_min_frac) {
         keep_mask[ix] <- FALSE
       }
@@ -1360,7 +1524,7 @@
     chain_residual_summary = list(data.frame()), residual_median_ranges = list(numeric()),
     residual_regime_disagreement = NA, indeterminate_reason = list(failure$reason),
     diag = na_diag, retry_history = list(NULL), initialization_provenance = list(NULL),
-    diag = na_diag, kfold_mean = NA_real_, kfold_method = NA_character_,
+    kfold_mean = NA_real_, kfold_method = NA_character_,
     kfold_subject = list(NULL), kfold_subject_ppd = list(NULL),
     kfold_subject_ids = list(NULL), kfold_subject_counts = list(NULL),
     kfold_subject_success = list(NULL), kfold_subject_fail = list(NULL),
@@ -1649,184 +1813,396 @@
        nu_q95 = unname(stats::quantile(nu, 0.95)))
 }
 
-#' Subject-level Kalman-OU projection log-likelihood
+#' Subject-level Student-t scale-mixture Kalman-OU log-likelihood
 #'
-#' Computes per-subject log-likelihood of held-out data given posterior draws,
-#' under the Core irregular-time OU process.
+#' Computes held-out subject log predictive densities under the canonical
+#' irregular-time OU state process and Student-t observation likelihood. The
+#' Student-t residual is represented as a Gamma-normal scale mixture. At each
+#' observation, deterministic importance quadrature integrates the local
+#' precision and the resulting Gaussian state mixture is collapsed by matching
+#' its first two moments before the next OU prediction.
 #'
-#' @param draws_df Posterior draws data frame (at least \code{r0,a_ii,a_ij} and noise params).
+#' This preserves the fitted Student-t tails and reduces exactly to the
+#' Student-t density when latent-state uncertainty is zero. The moment collapse
+#' is the only approximation; the previous variance-matched Gaussian scoring is
+#' not used.
+#'
+#' @param draws_df Posterior draws data frame containing regression, Student-t,
+#'   and OU parameters.
 #' @param pair_in Test data with columns \code{y,xi,xj,subject,time}.
-#' @return A list with matrix \code{full} (draws × subjects), \code{subjects}, and \code{n_obs}.
+#' @return A list with matrix \code{full} (draws x subjects), subject IDs,
+#'   observation counts, and scoring metadata.
 #' @noRd
 #' @keywords internal
 .proj_loglik_subject <- function(draws_df, pair_in) {
-  stopifnot(all(c("y", "xi", "xj", "subject") %in% names(pair_in)))
-  time_failure <- .validate_subject_times(pair_in$time, pair_in$subject, "elpd_scoring")
-  if (!is.null(time_failure)) return(time_failure)
-  subs <- unique(pair_in$subject)
-  D    <- nrow(draws_df)
-  Ssub <- length(subs)
-
-  # 불규칙 간격 dt/subject-wise 인덱스 구성
-  mk_prev_dt <- function(df) {
-    df <- df[order(df$subject, df$time), , drop = FALSE]
-    by_s <- split(seq_len(nrow(df)), df$subject)
-    dtv <- numeric(nrow(df)); dtv[] <- NA_real_
-    for (sb in names(by_s)) {
-      ix <- by_s[[sb]]; dtv[ix[1]] <- NA_real_
-      if (length(ix) >= 2L) for (k in 2:length(ix)) {
-        dtv[ix[k]] <- as.numeric(df$time[ix[k]] - df$time[ix[k-1]])
-      }
-    }
-    dtv
+  required_pair <- c("y", "xi", "xj", "subject", "time")
+  if (!all(required_pair %in% names(pair_in))) {
+    stop("pair_in lacks canonical predictive-scoring fields.")
   }
-  dt_all <- mk_prev_dt(pair_in)
+  if (!is.data.frame(draws_df) || !nrow(draws_df)) {
+    return(.pclv_failure("elpd_scoring", "missing_posterior_draws", list()))
+  }
 
+  pair_in <- pair_in[order(pair_in$subject, pair_in$time), , drop = FALSE]
+  time_failure <- .validate_subject_times(
+    pair_in$time, pair_in$subject, "elpd_scoring"
+  )
+  if (!is.null(time_failure)) return(time_failure)
+
+  required_draws <- c("r0", "a_ii", "a_ij", "sigma")
+  if (!all(required_draws %in% names(draws_df))) {
+    return(.pclv_failure(
+      "elpd_scoring", "missing_predictive_draws",
+      list(missing = setdiff(required_draws, names(draws_df)))
+    ))
+  }
   nu_failure <- .validate_nu_draws(draws_df, "elpd_scoring")
   if (!is.null(nu_failure)) return(nu_failure)
-  nu_vec <- as.numeric(draws_df$nu)
+  core_draw_values <- unlist(draws_df[required_draws], use.names = FALSE)
+  if (any(!is.finite(core_draw_values)) || any(draws_df$sigma <= 0)) {
+    return(.pclv_failure("elpd_scoring", "invalid_predictive_draws", list()))
+  }
 
   have_sdou <- "sd_ou" %in% names(draws_df)
   have_sigma_ou <- all(c("sigma_ou", "lambda") %in% names(draws_df))
   have_lambda <- "lambda" %in% names(draws_df)
   have_phi <- "phi" %in% names(draws_df)
-  if (!have_sdou && !have_sigma_ou) stop("OU scoring requires sd_ou or sigma_ou with lambda.")
-  if (!have_lambda && !have_phi) stop("Canonical OU persistence parameter missing.")
-  invalid_ou <- !("sigma" %in% names(draws_df)) || any(!is.finite(draws_df$sigma) | draws_df$sigma <= 0) ||
+  have_tau_r <- "tau_r" %in% names(draws_df)
+
+  if (!have_sdou && !have_sigma_ou) {
+    return(.pclv_failure(
+      "elpd_scoring", "missing_ou_scale_draws", list()
+    ))
+  }
+  if (!have_lambda && !have_phi) {
+    return(.pclv_failure(
+      "elpd_scoring", "missing_ou_persistence_draws", list()
+    ))
+  }
+
+  invalid_ou <-
     (have_sdou && any(!is.finite(draws_df$sd_ou) | draws_df$sd_ou < 0)) ||
-    (have_sigma_ou && any(!is.finite(draws_df$sigma_ou) | draws_df$sigma_ou < 0 | !is.finite(draws_df$lambda) | draws_df$lambda <= 0)) ||
+    (have_sigma_ou && any(
+      !is.finite(draws_df$sigma_ou) | draws_df$sigma_ou < 0 |
+        !is.finite(draws_df$lambda) | draws_df$lambda <= 0
+    )) ||
     (have_lambda && any(!is.finite(draws_df$lambda) | draws_df$lambda <= 0)) ||
-    (!have_lambda && have_phi && any(!is.finite(draws_df$phi) | draws_df$phi <= 0 | draws_df$phi >= 1))
-  if (invalid_ou) return(.pclv_failure("elpd_scoring", "invalid_ou_draws", list()))
+    (!have_lambda && have_phi && any(
+      !is.finite(draws_df$phi) | draws_df$phi <= 0 | draws_df$phi >= 1
+    )) ||
+    (have_tau_r && any(!is.finite(draws_df$tau_r) | draws_df$tau_r < 0))
+  if (invalid_ou) {
+    return(.pclv_failure("elpd_scoring", "invalid_ou_draws", list()))
+  }
 
-  loglik_full <- matrix(NA_real_, nrow = D, ncol = Ssub)
-  n_obs_vec   <- integer(Ssub)
+  quadrature_probability <- .PCLV_CORE_T_KALMAN_QUADRATURE$probability
+  quadrature_weight <- .PCLV_CORE_T_KALMAN_QUADRATURE$weight
+  if (length(quadrature_probability) != length(quadrature_weight) ||
+      !length(quadrature_probability) ||
+      any(!is.finite(quadrature_probability)) ||
+      any(quadrature_probability <= 0 | quadrature_probability >= 1) ||
+      any(!is.finite(quadrature_weight)) || any(quadrature_weight <= 0) ||
+      abs(sum(quadrature_weight) - 1) > 1e-12) {
+    stop("Canonical Student-t quadrature invariant violated.")
+  }
 
-  # --- 칼만필터 기반 OU 주변우도 (canonical Core) ---
-  .ou_kf_ll_one_subject <- function(draws_df, y, xi, xj, tvec) {
+  D <- nrow(draws_df)
+  Q <- length(quadrature_probability)
+  nu_vec <- as.numeric(draws_df$nu)
+  sigma2 <- as.numeric(draws_df$sigma)^2
+  prior_shape <- nu_vec / 2
+  prior_rate <- nu_vec / 2
+  proposal_shape <- (nu_vec + 1) / 2
+
+  row_log_sum_exp <- function(x) {
+    row_max <- apply(x, 1L, max)
+    shifted <- exp(x - row_max)
+    row_max + log(rowSums(shifted))
+  }
+
+  # Deterministic importance quadrature for one observation. The proposal is
+  # the conjugate local-precision posterior when state variance is zero and a
+  # close approximation otherwise. This gives exact Student-t scoring in the
+  # zero-state-uncertainty limit while retaining OU-state uncertainty.
+  scale_mixture_weights <- function(innovation, state_variance) {
+    state_variance <- pmax(as.numeric(state_variance), 0)
+    proposal_rate <- (
+      nu_vec + innovation^2 / pmax(sigma2 + state_variance, 1e-12)
+    ) / 2
+
+    probability_matrix <- matrix(
+      rep(quadrature_probability, each = D), nrow = D, ncol = Q
+    )
+    shape_matrix <- matrix(
+      rep(proposal_shape, times = Q), nrow = D, ncol = Q
+    )
+    rate_matrix <- matrix(
+      rep(proposal_rate, times = Q), nrow = D, ncol = Q
+    )
+    precision <- stats::qgamma(
+      probability_matrix,
+      shape = shape_matrix,
+      rate = rate_matrix
+    )
+    if (any(!is.finite(precision)) || any(precision <= 0)) {
+      return(.pclv_failure(
+        "elpd_scoring", "invalid_student_t_quadrature_precision", list()
+      ))
+    }
+
+    observation_variance <- matrix(
+      rep(state_variance, times = Q), nrow = D, ncol = Q
+    ) + matrix(rep(sigma2, times = Q), nrow = D, ncol = Q) / precision
+    observation_variance <- pmax(observation_variance, 1e-12)
+
+    innovation_matrix <- matrix(
+      rep(innovation, times = Q), nrow = D, ncol = Q
+    )
+    log_normal <- -0.5 * (
+      log(2 * pi) + log(observation_variance) +
+        innovation_matrix^2 / observation_variance
+    )
+    log_prior <- stats::dgamma(
+      precision,
+      shape = matrix(rep(prior_shape, times = Q), nrow = D, ncol = Q),
+      rate = matrix(rep(prior_rate, times = Q), nrow = D, ncol = Q),
+      log = TRUE
+    )
+    log_proposal <- stats::dgamma(
+      precision,
+      shape = shape_matrix,
+      rate = rate_matrix,
+      log = TRUE
+    )
+    log_quadrature_weight <- matrix(
+      rep(log(quadrature_weight), each = D), nrow = D, ncol = Q
+    )
+    log_importance <-
+      log_quadrature_weight + log_normal + log_prior - log_proposal
+
+    log_predictive <- row_log_sum_exp(log_importance)
+    normalized <- exp(log_importance - log_predictive)
+    normalized <- normalized / rowSums(normalized)
+
+    if (any(!is.finite(log_predictive)) || any(!is.finite(normalized))) {
+      return(.pclv_failure(
+        "elpd_scoring", "student_t_quadrature_failed", list()
+      ))
+    }
+
+    list(
+      log_predictive = log_predictive,
+      weight = normalized,
+      variance = observation_variance
+    )
+  }
+
+  if (have_sdou) {
+    stationary_variance <- as.numeric(draws_df$sd_ou)^2
+  } else {
+    stationary_variance <-
+      as.numeric(draws_df$sigma_ou)^2 / (2 * as.numeric(draws_df$lambda))
+  }
+  stationary_variance <- pmax(stationary_variance, 0)
+
+  use_random_intercept <- have_tau_r && any(draws_df$tau_r > 0)
+  subjects <- unique(as.character(pair_in$subject))
+  loglik_full <- matrix(
+    NA_real_, nrow = D, ncol = length(subjects),
+    dimnames = list(NULL, subjects)
+  )
+  n_obs <- integer(length(subjects))
+  names(n_obs) <- subjects
+
+  score_one_subject <- function(y, xi, xj, time) {
     J <- length(y)
-    if (J == 0) return(rep(NA_real_, nrow(draws_df)))
-    # mean: mu = r0 + a_ii * xi + a_ij * xj
-    r0_mat <- matrix(draws_df$r0, nrow = nrow(draws_df), ncol = J)
-    aii_xi <- tcrossprod(draws_df$a_ii, xi)
-    aij_xj <- tcrossprod(draws_df$a_ij, xj)
-    mu     <- r0_mat + aii_xi + aij_xj     # (D x J)
+    if (!J) return(rep(NA_real_, D))
 
-    y_rep  <- matrix(rep(y, each = nrow(draws_df)), nrow = nrow(draws_df))
+    mu <- matrix(as.numeric(draws_df$r0), nrow = D, ncol = J) +
+      tcrossprod(as.numeric(draws_df$a_ii), xi) +
+      tcrossprod(as.numeric(draws_df$a_ij), xj)
+    y_matrix <- matrix(rep(y, each = D), nrow = D, ncol = J)
+    loglik <- rep(0, D)
 
-    # 측정잡음 분산 R (t면 ν/(ν-2) 팩터로 가우시안 근사)
-    t_fac <- nu_vec / (nu_vec - 2)
-    R <- (draws_df$sigma^2) * t_fac
-    R <- pmax(R, 1e-10)
-
-    # OU 이산화: a_t, q_t
-    have_lambda <- "lambda" %in% names(draws_df)
-    have_phi    <- "phi"    %in% names(draws_df)
-    have_sdou   <- "sd_ou"  %in% names(draws_df)
-
-    # stationary var of OU
-    if (have_sdou) {
-      sd2 <- (draws_df$sd_ou)^2
-    } else if (all(c("sigma_ou","lambda") %in% names(draws_df))) {
-      sd2 <- (draws_df$sigma_ou^2) / (2 * draws_df$lambda)
+    if (!use_random_intercept) {
+      state_mean <- rep(0, D)
+      state_variance <- stationary_variance
     } else {
-      stop("OU scoring requires sd_ou or sigma_ou with lambda.")
+      mean_ou <- rep(0, D)
+      mean_intercept <- rep(0, D)
+      var_ou <- stationary_variance
+      var_intercept <- as.numeric(draws_df$tau_r)^2
+      cov_ou_intercept <- rep(0, D)
     }
 
-    # 필터 초기화: e0 ~ N(0, sd2)
-    D <- nrow(draws_df)
-    ll <- rep(0.0, D)
+    delta_time <- c(0, diff(time))
+    for (tt in seq_len(J)) {
+      dt <- delta_time[[tt]]
+      if (tt > 1L && (!is.finite(dt) || dt <= 0)) {
+        stop("Validated OU time invariant violated.")
+      }
 
-    ll <- rep(0.0, D)
-
-    use_ri <- ("tau_r" %in% names(draws_df)) && any(is.finite(draws_df$tau_r))
-    if (!use_ri) {
-      m  <- rep(0.0, D)     # e-state mean per draw
-      P  <- sd2             # e-state var per draw
-    } else {
-      # 2D state: [e_t, r_s]^T, with r_s time-invariant
-      m_e <- rep(0.0, D); m_r <- rep(0.0, D)
-      P_ee <- sd2
-      P_rr <- pmax(draws_df$tau_r^2, 0)
-      P_er <- rep(0.0, D)
-    }
-
-    # 시간 루프
-    # The first observation has no predecessor; subsequent dt values were validated.
-    dtv <- as.numeric(c(NA, diff(tvec)))
-    l2pi <- log(2*pi)
-    for (t in seq_len(J)) {
-      dt <- dtv[t]
-      if (t == 1L) dt <- 0
-      else if (!is.finite(dt) || dt <= 0) stop("Validated OU time invariant violated.")
       if (have_lambda) {
-        lam <- draws_df$lambda
-        a_t <- exp(-lam * dt)
-      } else if (have_phi) {
-        phi <- draws_df$phi
-        lam <- -log(phi)
-        a_t <- exp(-lam * dt)
+        persistence <- exp(-as.numeric(draws_df$lambda) * dt)
       } else {
-        stop("Canonical OU persistence parameter missing.")
+        decay <- -log(as.numeric(draws_df$phi))
+        persistence <- exp(-decay * dt)
       }
-      q_t <- pmax(sd2 * (1 - a_t^2), 1e-16)
-      if (!use_ri) {
-        # ---- 1D (OU only) ----
-        # 예측
-        m_pred <- a_t * m
-        P_pred <- (a_t^2) * P + q_t
-        # 혁신
-        v_t <- y_rep[, t] - mu[, t] - m_pred
-        F_t <- pmax(P_pred + R, 1e-10)
-        # loglik
-        ll <- ll + (-0.5 * (l2pi + log(F_t) + (v_t * v_t) / F_t))
-        # 업데이트
-        K_t <- P_pred / F_t
-        m   <- m_pred + K_t * v_t
-        P   <- pmax((1 - K_t) * P_pred, 1e-12)
+      process_variance <- pmax(
+        stationary_variance * (1 - persistence^2), 0
+      )
+
+      if (!use_random_intercept) {
+        predicted_mean <- persistence * state_mean
+        predicted_variance <-
+          persistence^2 * state_variance + process_variance
+        predicted_variance <- pmax(predicted_variance, 0)
+        innovation <- y_matrix[, tt] - mu[, tt] - predicted_mean
+
+        mixture <- scale_mixture_weights(innovation, predicted_variance)
+        if (.is_pclv_failure(mixture)) return(mixture)
+        loglik <- loglik + mixture$log_predictive
+
+        predicted_variance_matrix <- matrix(
+          rep(predicted_variance, times = Q), nrow = D, ncol = Q
+        )
+        innovation_matrix <- matrix(
+          rep(innovation, times = Q), nrow = D, ncol = Q
+        )
+        gain <- predicted_variance_matrix / mixture$variance
+        component_mean <- matrix(
+          rep(predicted_mean, times = Q), nrow = D, ncol = Q
+        ) + gain * innovation_matrix
+        component_variance <- pmax(
+          predicted_variance_matrix -
+            predicted_variance_matrix^2 / mixture$variance,
+          0
+        )
+
+        state_mean <- rowSums(mixture$weight * component_mean)
+        centered <- component_mean - state_mean
+        state_variance <- rowSums(
+          mixture$weight * (component_variance + centered^2)
+        )
+        state_variance <- pmax(state_variance, 1e-12)
       } else {
-        # ---- 2D (OU + random intercept) ----
-        # 예측
-        m_e_pred <- a_t * m_e
-        m_r_pred <- m_r                   # r_s is time-invariant
-        P_ee_p <- (a_t^2) * P_ee + q_t
-        P_er_p <- a_t * P_er
-        P_rr_p <- P_rr                    # no process noise on r_s
-        # 혁신
-        v_t <- y_rep[, t] - mu[, t] - (m_e_pred + m_r_pred)
-        F_t <- pmax(P_ee_p + P_rr_p + 2*P_er_p + R, 1e-10)  # H=[1,1]
-        # loglik
-        ll <- ll + (-0.5 * (l2pi + log(F_t) + (v_t * v_t) / F_t))
-        # 칼만 이득 (2x1)
-        K_e <- (P_ee_p + P_er_p) / F_t
-        K_r <- (P_er_p + P_rr_p) / F_t
-        # 업데이트
-        m_e <- m_e_pred + K_e * v_t
-        m_r <- m_r_pred + K_r * v_t
-        # 공분산 업데이트: P = (I-KH)P_pred
-        # 요소별 전개 (H=[1,1])
-        P_ee <- pmax(P_ee_p - K_e*(P_ee_p + P_er_p), 1e-12)
-        P_rr <- pmax(P_rr_p - K_r*(P_er_p + P_rr_p), 1e-12)
-        P_er <-       P_er_p - K_e*(P_er_p + P_rr_p)
+        predicted_mean_ou <- persistence * mean_ou
+        predicted_mean_intercept <- mean_intercept
+        predicted_var_ou <- persistence^2 * var_ou + process_variance
+        predicted_cov <- persistence * cov_ou_intercept
+        predicted_var_intercept <- var_intercept
+
+        observed_state_variance <- pmax(
+          predicted_var_ou + predicted_var_intercept + 2 * predicted_cov,
+          0
+        )
+        innovation <-
+          y_matrix[, tt] - mu[, tt] -
+          predicted_mean_ou - predicted_mean_intercept
+
+        mixture <- scale_mixture_weights(
+          innovation, observed_state_variance
+        )
+        if (.is_pclv_failure(mixture)) return(mixture)
+        loglik <- loglik + mixture$log_predictive
+
+        cov_ou_observation <- predicted_var_ou + predicted_cov
+        cov_intercept_observation <-
+          predicted_var_intercept + predicted_cov
+        cov_ou_matrix <- matrix(
+          rep(cov_ou_observation, times = Q), nrow = D, ncol = Q
+        )
+        cov_intercept_matrix <- matrix(
+          rep(cov_intercept_observation, times = Q),
+          nrow = D, ncol = Q
+        )
+        innovation_matrix <- matrix(
+          rep(innovation, times = Q), nrow = D, ncol = Q
+        )
+
+        gain_ou <- cov_ou_matrix / mixture$variance
+        gain_intercept <- cov_intercept_matrix / mixture$variance
+        component_mean_ou <- matrix(
+          rep(predicted_mean_ou, times = Q), nrow = D, ncol = Q
+        ) + gain_ou * innovation_matrix
+        component_mean_intercept <- matrix(
+          rep(predicted_mean_intercept, times = Q),
+          nrow = D, ncol = Q
+        ) + gain_intercept * innovation_matrix
+
+        component_var_ou <- pmax(
+          matrix(rep(predicted_var_ou, times = Q), nrow = D, ncol = Q) -
+            cov_ou_matrix^2 / mixture$variance,
+          0
+        )
+        component_var_intercept <- pmax(
+          matrix(
+            rep(predicted_var_intercept, times = Q),
+            nrow = D, ncol = Q
+          ) - cov_intercept_matrix^2 / mixture$variance,
+          0
+        )
+        component_cov <-
+          matrix(rep(predicted_cov, times = Q), nrow = D, ncol = Q) -
+          cov_ou_matrix * cov_intercept_matrix / mixture$variance
+
+        mean_ou <- rowSums(mixture$weight * component_mean_ou)
+        mean_intercept <- rowSums(
+          mixture$weight * component_mean_intercept
+        )
+        centered_ou <- component_mean_ou - mean_ou
+        centered_intercept <- component_mean_intercept - mean_intercept
+
+        var_ou <- rowSums(
+          mixture$weight * (component_var_ou + centered_ou^2)
+        )
+        var_intercept <- rowSums(
+          mixture$weight * (
+            component_var_intercept + centered_intercept^2
+          )
+        )
+        cov_ou_intercept <- rowSums(
+          mixture$weight * (
+            component_cov + centered_ou * centered_intercept
+          )
+        )
+
+        var_ou <- pmax(var_ou, 1e-12)
+        var_intercept <- pmax(var_intercept, 1e-12)
+        covariance_bound <- sqrt(var_ou * var_intercept)
+        cov_ou_intercept <- pmin(
+          pmax(cov_ou_intercept, -covariance_bound),
+          covariance_bound
+        )
       }
     }
-    ll
+
+    loglik
   }
 
-  for (s_idx in seq_along(subs)) {
-    sb <- subs[s_idx]
-    ix <- which(pair_in$subject == sb)
-    y  <- pair_in$y[ix]
-    xi <- pair_in$xi[ix]
-    xj <- pair_in$xj[ix]
-    tvec <- pair_in$time[ix]
-    J  <- length(ix)
-    n_obs_vec[s_idx] <- J
-
-    ll_f <- .ou_kf_ll_one_subject(draws_df, y, xi, xj, tvec)
-    loglik_full[, s_idx] <- ll_f
+  for (s_idx in seq_along(subjects)) {
+    subject_id <- subjects[[s_idx]]
+    ix <- which(as.character(pair_in$subject) == subject_id)
+    ix <- ix[order(pair_in$time[ix])]
+    n_obs[[s_idx]] <- length(ix)
+    subject_score <- score_one_subject(
+      y = as.numeric(pair_in$y[ix]),
+      xi = as.numeric(pair_in$xi[ix]),
+      xj = as.numeric(pair_in$xj[ix]),
+      time = as.numeric(pair_in$time[ix])
+    )
+    if (.is_pclv_failure(subject_score)) return(subject_score)
+    loglik_full[, s_idx] <- subject_score
   }
-  list(full = loglik_full, subjects = subs, n_obs = n_obs_vec)
+
+  list(
+    full = loglik_full,
+    subjects = subjects,
+    n_obs = n_obs,
+    method = "student-t-scale-mixture-kalman-ou-q16",
+    quadrature_nodes = Q,
+    state_approximation = "gaussian-moment-collapse"
+  )
 }
 
 
@@ -1837,7 +2213,9 @@
 #' @param subject_vec Subject IDs aligned to rows of the data.
 #' @param K Number of folds.
 #' @param R Number of repetitions.
-#' @param seed RNG seed.
+#' @param seed RNG seed used only for subject partitioning. With the same
+#'   canonical subject universe, the same seed produces the same split manifest
+#'   for every pair and direction.
 #' @return A nested list \code{[[r]][[k]]} with \code{train_subjects}/\code{test_subjects}.
 #' @noRd
 #' @keywords internal
@@ -1846,7 +2224,13 @@
                                   R = 3,
                                   seed = 123) {
   set.seed(seed)
-  subs <- unique(subject_vec)
+  # Canonicalize the subject universe before shuffling so row order or factor
+  # level order cannot change the split manifest across pair directions.
+  subs <- unique(as.character(subject_vec))
+  if (anyNA(subs) || any(!nzchar(subs))) {
+    stop("Subject IDs must be finite, non-missing, and non-empty.")
+  }
+  subs <- sort(subs, method = "radix")
   S <- length(subs)
   if (K > S)
     stop("K > #subjects")
@@ -1965,15 +2349,15 @@
                                 stan_list_base,
                                 sample_args_base,
                                 pair_in,
-                                tr,
-                                te,
+                                train_subjects,
+                                test_subjects,
                                 max_retries = 3,
                                 silent_sampler = TRUE,
                                 sample_args_override = NULL,
                                 freeze_retry_hypers = FALSE,
                                 seed_override = NULL,
-                                min_pairs = min_pairs) {
-  pts <- .build_train_test(pair_in, tr, te)
+                                min_pairs = 4L) {
+  pts <- .build_train_test(pair_in, train_subjects, test_subjects)
   if (inherits(pts, "pclv_failure")) {
     return(pts)
   }
@@ -2101,6 +2485,9 @@
 #' and returns fold diagnostics and split manifests for reproducibility.
 #'
 #' @inheritParams .fold_fit_and_score
+#' @param seed Seed used only to build the repeated subject-level split manifest.
+#'   Fold sampler seeds are derived separately from
+#'   \code{sample_args_base$seed}.
 #' @param n_workers_kfold Number of workers (multisession) for fold-level parallelism.
 #' @return A list with aggregate ELPD summaries, diagnostics, splits, and counts.
 #' @noRd
@@ -2116,7 +2503,11 @@
                            max_retries = 3,
                            n_workers_kfold = 1L,
                            min_pairs = 4,
-                           freeze_retry_hypers = FALSE) { # retry computational settings remain fixed within folds
+                           freeze_retry_hypers = FALSE,
+                           progress = "none",
+                           has_progressr = requireNamespace("progressr", quietly = TRUE)) { # retry computational settings remain fixed within folds
+  # `seed` controls only the shared subject partition. Each directed model
+  # retains its own sampler seed through sample_args_base$seed below.
   splits <- .make_repkfold_splits(pair_in$subject, K, R, seed)
   # --- compact split manifest for reproducibility (r,k,test_subjects)
   splits_df <- ({
@@ -2134,7 +2525,7 @@
     do.call(rbind, rows)
   })
   # subject universe & how many times each was held out as test
-  subs_all <- sort(unique(pair_in$subject))
+  subs_all <- sort(unique(as.character(pair_in$subject)), method = "radix")
   test_counts_tab <- table(unlist(splits_df$test_subjects))
   subject_test_counts <- as.integer(test_counts_tab[subs_all])
   names(subject_test_counts) <- subs_all
@@ -2169,8 +2560,8 @@
       stan_list_base,
       sample_args_base,
       pair_in,
-      task$tr,
-      task$te,
+      train_subjects = task$tr,
+      test_subjects = task$te,
       silent_sampler = silent_sampler,
       max_retries = max_retries,
       freeze_retry_hypers = freeze_retry_hypers,
@@ -2204,7 +2595,7 @@
     op <- future::plan()
     on.exit(future::plan(op), add = TRUE)
     future::plan(future::multisession, workers = n_workers_kfold)
-    if (has_progressr && identical(progress, "bar")) {
+    if (isTRUE(has_progressr) && identical(progress, "bar")) {
       progressr::with_progress({
         p <- progressr::progressor(steps = length(tasks))
         res_list <- furrr::future_map(tasks, function(task) {
@@ -2272,10 +2663,12 @@
   names(elpd_subject_ppd) <- subs
   has_ppd <- cnt_ppd > 0L
   elpd_subject_ppd[has_ppd] <- agg_ppd[has_ppd] / cnt_ppd[has_ppd]
-  elpd_mean    <- if (length(elpd_subject)) mean(elpd_subject[is.finite(elpd_subject)], na.rm = TRUE) else NA_real_
-  elpd_mean_ppd<- if (length(elpd_subject_ppd)) mean(elpd_subject_ppd[is.finite(elpd_subject_ppd)], na.rm = TRUE) else NA_real_
+  elpd_mean_ppd <- if (length(elpd_subject_ppd)) {
+    m <- mean(elpd_subject_ppd[is.finite(elpd_subject_ppd)], na.rm = TRUE)
+    if (is.finite(m)) m else NA_real_
+  } else NA_real_
 
-  elpd_mean    <- if (length(elpd_subject)) {
+  elpd_mean <- if (length(elpd_subject)) {
     m <- mean(elpd_subject[is.finite(elpd_subject)], na.rm = TRUE)
     if (is.finite(m)) m else NA_real_
   } else NA_real_
@@ -2313,13 +2706,17 @@
     elpd_subject_ppd = elpd_subject_ppd,
     elpd_mean    = elpd_mean,
     elpd_mean_ppd= elpd_mean_ppd,
-    elpd_method = "kalman-ou",
+    elpd_method = "student-t-scale-mixture-kalman-ou-q16",
     n_folds_ok = n_ok,
     n_folds_fail = n_fail,
-    # reproducibility payload for pseudo-BMA/stacking
+    # reproducibility payload for subject-level predictive evidence
     splits_df = splits_df,
     subject_ids = subs_all,
+    # Number of successful held-out observations contributing to each subject's
+    # ELPD summary (legacy field retained for compatibility).
     subject_test_counts = successful_obs,
+    # Number of folds in which each subject was scheduled for holdout.
+    subject_holdout_counts = subject_test_counts,
     subject_success_counts = cnt,
     subject_failure_counts = fail_cnt,
     total_successful_evaluations = sum(cnt),
@@ -2380,6 +2777,7 @@
   n_workers_kfold_eff  <- ctx$n_workers_kfold_eff
   kfold_K              <- ctx$kfold_K
   kfold_R              <- ctx$kfold_R
+  kfold_seed           <- ctx$kfold_seed
 
   # PF 옵션
   use_pathfinder_init <- isTRUE(ctx$use_pathfinder_init)
@@ -2650,7 +3048,10 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   predictive_context <- list(
     mod = mod, stan_list = stan_list, pair_in = pair_in,
     sample_args = final_args_main,
-    seed = if (is.null(final_args_main$seed)) seed_main else final_args_main$seed,
+    # Split construction is shared across pair directions. The sampler seed
+    # remains direction-specific inside sample_args.
+    split_seed = as.integer(kfold_seed),
+    sampling_seed = if (is.null(final_args_main$seed)) seed_main else final_args_main$seed,
     silent_sampler = silent_sampler, n_workers_kfold = n_workers_kfold_eff,
     max_retries = max_retries, min_pairs = min_pairs, K = kfold_K, R = kfold_R,
     pair_tag = pair_tag, progress = progress_local
@@ -2717,7 +3118,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     smooth_edf_mean = sedf,
     subjects = unique(pair_in$subject),
 
-    # Repeated K-fold 결과 요약 (+ pseudo-BMA/stacking용 payload)
+    # Repeated K-fold result and reproducibility payload
     kfold = kfold,
     kfold_mean = if (is.null(kfold)) NA_real_ else kfold$elpd_mean,
     kfold_method = if (is.null(kfold)) NA_character_ else kfold$elpd_method,
@@ -2734,7 +3135,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NA_integer_
     else
       kfold$n_folds_fail,
-    # subject-level OOF elpd vector (named) for model averaging/stacking
+    # subject-level out-of-fold ELPD vector (named)
     kfold_subject       = list(if (is.null(kfold))
       NULL
       else
@@ -2829,6 +3230,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     cat(sprintf("%s pair: k-fold evaluation started (K=%d, R=%d)\n",
                 predictive$pair_tag, predictive$K, predictive$R))
   sample_args <- predictive$sample_args
+  sample_args$seed <- as.integer(predictive$sampling_seed)
   sample_args$step_size <- NULL
   sample_args$inv_metric <- NULL
   sample_args$metric_file <- NULL
@@ -2839,12 +3241,13 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     pair_in = predictive$pair_in,
     K = predictive$K,
     R = predictive$R,
-    seed = predictive$seed,
+    seed = predictive$split_seed,
     silent_sampler = predictive$silent_sampler,
     n_workers_kfold = predictive$n_workers_kfold,
     max_retries = predictive$max_retries,
     freeze_retry_hypers = TRUE,
-    min_pairs = predictive$min_pairs
+    min_pairs = predictive$min_pairs,
+    progress = predictive$progress
   )
   if (predictive$progress != "none")
     cat(sprintf("%s pair: k-fold evaluation completed\n", predictive$pair_tag))
@@ -2866,7 +3269,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   main_result$kfold_success_total <- if (is.null(kfold)) NA_integer_ else kfold$total_successful_evaluations
   main_result$kfold_failures <- list(if (is.null(kfold)) NULL else kfold$failures)
   main_result$kfold_splits <- list(if (is.null(kfold)) NULL else kfold$splits_df)
-  main_result$kfold_seed_used <- if (is.null(kfold)) NA_integer_ else predictive$seed
+  main_result$kfold_seed_used <- if (is.null(kfold)) NA_integer_ else predictive$split_seed
   main_result$kfold_K <- if (is.null(kfold)) NA_integer_ else kfold$K
   main_result$kfold_R <- if (is.null(kfold)) NA_integer_ else kfold$R
   main_result$kfold_sd <- if (is.null(kfold)) NA_real_ else stats::sd(kfold$elpd_subject, na.rm = TRUE)
@@ -2992,61 +3395,31 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   }
 }
 
-#' Expand per-pair self ELPD payloads to long format
-#'
-#' Unnests subject-level self-effect ELPD (and PPD-normalized ELPD) from
-#' pairwise results into a long tibble.
-#'
-#' @param df Tibble with nested K-fold payload columns for \code{i} and \code{j}.
-#' @return A tibble with \code{taxon,subject,elpd,elpd_ppd,n_test,elpd_method}.
+#' Construct an empty directed subject-level ELPD table
+#' @return A zero-row tibble with the stable public column schema and types.
 #' @noRd
-#' @keywords internal
-.expand_self_pw <- function(df) {
-  ii_rows <- purrr::pmap_dfr(
-    list(df$i, df$kfold_subject_ids_ij, df$kfold_subject_ij, df$kfold_subject_ppd_ij,
-         df$kfold_elpd_method_ij, df$kfold_subject_counts_ij),
-    function(i, ids, elv, elv_ppd, method, cnts) {
-      # 방어적 언래핑(리스트 한 겹만 더 들어온 경우)
-      if (is.list(ids) && length(ids) == 1)       ids <- ids[[1]]
-      if (is.list(elv) && length(elv) == 1)       elv <- elv[[1]]
-      if (is.list(elv_ppd) && length(elv_ppd) == 1) elv_ppd <- elv_ppd[[1]]
-      if (is.null(ids) || is.null(elv)) return(NULL)
-      tab <- .as_named_frame2(ids, elv, elv_ppd)
-      tab$n_test <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
-      tab$taxon <- i
-      tab$elpd_method <- if (is.null(method)) NA_character_ else method
-      tab[, c("taxon","subject","elpd","elpd_ppd","n_test","elpd_method")]
-    }
+.empty_cross_subject_elpd <- function() {
+  tibble::tibble(
+    from = character(),
+    to = character(),
+    subject = character(),
+    elpd = double(),
+    elpd_per_observation = double(),
+    n_successful_test_observations = integer(),
+    elpd_method = character()
   )
-  jj_rows <- purrr::pmap_dfr(
-    list(df$j, df$kfold_subject_ids_ji, df$kfold_subject_ji, df$kfold_subject_ppd_ji,
-         df$kfold_elpd_method_ji, df$kfold_subject_counts_ji),
-    function(j, ids, elv, elv_ppd, method, cnts) {
-      # 방어적 언래핑
-      if (is.list(ids) && length(ids) == 1)       ids <- ids[[1]]
-      if (is.list(elv) && length(elv) == 1)       elv <- elv[[1]]
-      if (is.list(elv_ppd) && length(elv_ppd) == 1) elv_ppd <- elv_ppd[[1]]
-      if (is.null(ids) || is.null(elv)) return(NULL)
-      tab <- .as_named_frame2(ids, elv, elv_ppd)
-      tab$n_test <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
-      tab$taxon <- j
-      tab$elpd_method <- if (is.null(method)) NA_character_ else method
-      tab[, c("taxon","subject","elpd","elpd_ppd","n_test","elpd_method")]
-    }
-  )
-  dplyr::bind_rows(ii_rows, jj_rows)
 }
 
-#' Expand per-pair cross ELPD payloads to long directed format
+#' Expand per-pair subject ELPD payloads to long directed format
 #'
-#' Unnests subject-level cross-edge ELPD (and PPD-normalized ELPD) for both
-#' directions into a long tibble of \code{from → to} rows.
+#' Unnests subject-level full pair-model ELPD for both directions into a long
+#' tibble of \code{from → to} rows. It is not self-only predictive evidence.
 #'
 #' @param df Tibble with nested K-fold payload columns.
-#' @return A tibble with \code{from,to,subject,elpd,elpd_ppd,n_test,elpd_method}.
+#' @return A tibble with the stable subject-level predictive schema.
 #' @noRd
 #' @keywords internal
-.expand_cross_pw <- function(df) {
+.expand_cross_subject_elpd <- function(df) {
   # ij
   ij_rows <- purrr::pmap_dfr(
     list(df$i, df$j, df$kfold_subject_ids_ij, df$kfold_subject_ij, df$kfold_subject_ppd_ij,
@@ -3054,10 +3427,12 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     function(i, j, ids, elv, elv_ppd, method, cnts) {
       if (is.null(ids) || is.null(elv)) return(NULL)
       tab <- .as_named_frame2(ids, elv, elv_ppd)
-      tab$n_test <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
+      tab$n_successful_test_observations <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
       tab$from <- j; tab$to <- i
       tab$elpd_method <- if (is.null(method)) NA_character_ else method
-      tab[, c("from","to","subject","elpd","elpd_ppd","n_test","elpd_method")]
+      tab$elpd_per_observation <- tab$elpd_ppd
+      tab[, c("from", "to", "subject", "elpd", "elpd_per_observation",
+              "n_successful_test_observations", "elpd_method")]
     }
   )
   # ji
@@ -3067,11 +3442,27 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     function(j, i, ids, elv, elv_ppd, method, cnts) {
       if (is.null(ids) || is.null(elv)) return(NULL)
       tab <- .as_named_frame2(ids, elv, elv_ppd)
-      tab$n_test <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
+      tab$n_successful_test_observations <- as.integer(if (is.null(cnts)) NA else cnts[tab$subject])
       tab$from <- i; tab$to <- j
       tab$elpd_method <- if (is.null(method)) NA_character_ else method
-      tab[, c("from","to","subject","elpd","elpd_ppd","n_test","elpd_method")]
+      tab$elpd_per_observation <- tab$elpd_ppd
+      tab[, c("from", "to", "subject", "elpd", "elpd_per_observation",
+              "n_successful_test_observations", "elpd_method")]
     }
   )
-  dplyr::bind_rows(ij_rows, ji_rows)
+  out <- dplyr::bind_rows(ij_rows, ji_rows)
+  if (!nrow(out)) .empty_cross_subject_elpd() else out
+}
+
+#' Assemble the breaking HF2 public predictive-result schema
+#' @param res Canonical bidirectional pair-result table.
+#' @return A four-element fitted result list.
+#' @noRd
+.assemble_public_fit_result <- function(res) {
+  list(
+    cross = .mk_cross(res),
+    self = .mk_self(res),
+    elpd_subject_cross = .expand_cross_subject_elpd(res),
+    raw = res
+  )
 }

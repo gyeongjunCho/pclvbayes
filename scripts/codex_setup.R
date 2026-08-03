@@ -3,8 +3,7 @@ required <- c(
   "testthat",
   "roxygen2",
   "cmdstanr",
-  "posterior",
-  "loo"
+  "posterior"
 )
 
 installed <- rownames(installed.packages())

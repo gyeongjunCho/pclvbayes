@@ -85,12 +85,10 @@ test_that("task executor passes the exact immutable model executable", {
   expect_identical(vapply(seen, `[[`, integer(1), "seed"), unname(task$direction_seeds))
 })
 
-test_that("pointwise ELPD ordering follows canonical task order", {
+test_that("subject ELPD ordering follows canonical task order", {
   tasks <- pclvbayes:::.make_pair_tasks(c("a", "b", "c", "d"), 121L)
   seq_result <- run_task_fixture(tasks)
   rev_result <- run_task_fixture(tasks, rev(seq_along(tasks)))
-  expect_identical(pclvbayes:::.expand_cross_pw(seq_result),
-                   pclvbayes:::.expand_cross_pw(rev_result))
-  expect_identical(pclvbayes:::.expand_self_pw(seq_result),
-                   pclvbayes:::.expand_self_pw(rev_result))
+  expect_identical(pclvbayes:::.expand_cross_subject_elpd(seq_result),
+                   pclvbayes:::.expand_cross_subject_elpd(rev_result))
 })

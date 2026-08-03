@@ -22,7 +22,8 @@ predictive_fixture <- function(diagnostic_failure = NULL) {
       mod = structure(list(), class = "mock_model"), stan_list = list(N = 2L),
       sample_args = list(seed = 101L, step_size = 1, inv_metric = 2, metric_file = "x"),
       pair_in = data.frame(subject = c("a", "b")), K = 2L, R = 1L,
-      seed = 101L, silent_sampler = TRUE, n_workers_kfold = 1L,
+      split_seed = 101L, sampling_seed = 101L,
+      silent_sampler = TRUE, n_workers_kfold = 1L,
       max_retries = 0L, min_pairs = 1L, pair_tag = "b->a", progress = "none"
     )
   )

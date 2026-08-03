@@ -42,10 +42,9 @@ test_that("retry exhaustion returns a structured computational failure", {
 test_that("programmer invariants still stop immediately", {
   draws <- data.frame(r0 = 0, a_ii = 0, a_ij = 0, sigma = 1, nu = 5)
   held <- data.frame(subject = "A", time = 0, y = 0, xi = 0, xj = 0)
-  expect_error(
-    pclvbayes:::.proj_loglik_subject(draws, held),
-    "OU scoring requires"
-  )
+  missing_ou <- pclvbayes:::.proj_loglik_subject(draws, held)
+  expect_s3_class(missing_ou, "pclv_failure")
+  expect_identical(missing_ou$reason, "missing_ou_scale_draws")
   expect_error(
     pclvbayes:::.make_repkfold_splits(c("A", "B"), K = 3, R = 1),
     "K > #subjects"

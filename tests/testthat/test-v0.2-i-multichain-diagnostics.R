@@ -128,7 +128,7 @@ test_that("conservative summarization excludes indeterminate directions", {
   raw <- pclvbayes:::.run_pair(1L, 2L, taxa_vec = c("a", "b"), .run_one = runner,
                                ctx = list(), progress = "none", seed_base = 1L)
   fit_result <- list(cross = pclvbayes:::.mk_cross(raw), self = pclvbayes:::.mk_self(raw), raw = raw)
-  summary <- suppressWarnings(summarize_bayes_pclv(fit_result, use_true_stacking = FALSE)$cross)
+  summary <- summarize_bayes_pclv(fit_result)$cross
   bad <- summary[summary$diagnostic_class == "interaction_indeterminate", ]
   good <- summary[summary$diagnostic_class == "converged", ]
   expect_false(bad$diag_ok)

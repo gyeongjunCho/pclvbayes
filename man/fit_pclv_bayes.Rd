@@ -69,12 +69,11 @@ If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested para
 
 \item{kfold_R}{Number of repetitions R; default \code{3}.}
 
-\item{kfold_seed}{Seed for K-fold split reproducibility (defaults to \code{seed}).}
+\item{kfold_seed}{Seed used only for repeated K-fold subject splits; defaults to \code{seed}. The same value is applied across all pair directions, while fold sampler seeds remain direction-specific.}
 }
 \value{
-A list containing directional and self-effect summaries, pointwise repeated
-K-fold ELPD, and the raw bidirectional pair table. ELPD uses the
-\code{kalman-ou} method and includes fold-evidence counts.
+A list containing directional and self-effect summaries, directed
+subject-level repeated K-fold ELPD, and the raw bidirectional pair table.
 }
 \description{
 This function belongs to the \strong{pGLVbayes} framework, which extends the
@@ -106,6 +105,9 @@ Repeated subject-level K-fold ELPD is always computed. Held-out observations
 are scored with the irregular-time OU Kalman path using a Student-t observation
 likelihood with one posterior-estimated \code{nu > 2} per directed fit. Spline smoothing is selected by cross-validation.
 Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
+The validated \code{kfold_seed} is used only to construct subject-level
+split manifests and is shared across pair directions with the same subject
+universe. Fold sampler seeds remain direction-specific.
 \itemize{
 \item A diagnostics-aware retry policy and Pathfinder initialization use the fixed
 canonical v0.2 settings; their implementation controls are private.

@@ -1,5 +1,7 @@
 test_that("Stan estimates shared Student-t nu with the specified prior", {
-  stan <- paste(readLines(test_path("..", "..", "inst", "stan", "pclv.stan"), warn = FALSE), collapse = "\n")
+  stan_path <- system.file("stan", "pclv.stan", package = "pclvbayes")
+  expect_true(nzchar(stan_path))
+  stan <- paste(readLines(stan_path, warn = FALSE), collapse = "\n")
   expect_match(stan, "real log_nu_minus_two;", fixed = TRUE)
   expect_match(stan, "real<lower=2> nu = 2 + exp(log_nu_minus_two);", fixed = TRUE)
   expect_match(stan, "log_nu_minus_two ~ normal(log(3), 0.75);", fixed = TRUE)

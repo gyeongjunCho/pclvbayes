@@ -2,69 +2,55 @@
 % Please edit documentation in R/summarize_bayes_pclv.R
 \name{summarize_bayes_pclv}
 \alias{summarize_bayes_pclv}
-\title{Summarize Bayesian pcLV results (cross/self, diagnostics, weights)}
+\title{Summarize Bayesian pcLV results}
 \usage{
 summarize_bayes_pclv(
   df,
   alpha = NULL,
   diag_mode = c("moderate", "strict"),
-  use_true_stacking = TRUE,
-  stacking_use_ppd = FALSE,
-  stacking_min_models = 2L,
-  stacking_min_subjects = 1L,
   interaction = "cross"
 )
 }
 \arguments{
-\item{df}{A list returned by \code{fit_glv_pairwise()}, which must include
-at least \code{$cross}, \code{$self}, and \code{$raw}. To compute true stacking,
-it should also include \code{$elpd_pointwise_cross}.}
+\item{df}{A list returned by \code{fit_pclv_bayes()} containing
+\code{$cross}, \code{$self}, and \code{$raw}.}
 
-\item{alpha}{(optional) Threshold for Bayes-FDR (LFSR). If provided,
-adds a \code{pass_bayes_fdr} column.}
+\item{alpha}{Optional threshold for Bayes-FDR/LFSR. When supplied, adds
+\code{pass_bayes_fdr}.}
 
 \item{diag_mode}{Either \code{"moderate"} or \code{"strict"}.}
 
-\item{use_true_stacking}{Logical; if \code{TRUE} (default) attempts to use
-\code{.compute_stacking_weights_cross()} when feasible (otherwise omitted).}
-
-\item{stacking_use_ppd}{Logical; pass-through to \code{.compute_stacking_weights_cross()}.}
-
-\item{stacking_min_models}{Integer; pass-through.}
-
-\item{stacking_min_subjects}{Integer; pass-through.}
-
-\item{interaction}{Which interaction summary to return. One of
-\code{"cross"} or \code{"self"}; default \code{"cross"}.}
+\item{interaction}{One of \code{"cross"} or \code{"self"}.}
 }
 \value{
-A list containing the requested table (\code{$cross} or \code{$self}).
-The table is sorted by \strong{bayes_FDR} (ascending; \code{NA} last).
+A list containing the requested \code{$cross} or \code{$self}
+summary table.
 }
 \description{
-Given the result list from \code{fit_glv_pairwise()}, returns separate
-summary tables for \strong{cross} (from→to) edges and \strong{self} effects.
+Given the result list from \code{fit_pclv_bayes()}, returns a summary table
+for directed cross effects or self effects.
 
-Included fields:
-\itemize{
-\item Key model-level metrics: \code{from}, \code{to}, \code{n_pairs}, \code{a_sign},
-\code{a_mean}, \code{a_q2.5}, \code{a_q97.5}
-\item Reliability metrics: \code{p_sign2}, \code{bayes_FDR} (=\code{LFSR}),
-optional \code{pass_bayes_fdr}
-\item Weight-like metrics: \code{pseudo_BMA} (no bootstrap), \code{pseudo_BMA_plus}
-(a.k.a. pseudo-BMA+; Bayesian bootstrap), and \code{stacking}
-(true stacking if available; otherwise omitted)
-\item Diagnostics: \code{rhat}, \code{essb}, \code{esst}, \code{div},
-\code{tdhit}, \code{ebfmi_min}, \code{diagnostic_class}, and \code{diag_ok}.
-The cross coefficient is a directed pair-to-rest dynamic coefficient, not
-generally an absolute direct-gLV effect. Interaction and residual identifiability
-are classified separately;
-indeterminate directions remain explicit and are never interpreted as zero.
-}
+Directed cross coefficients are pair-to-rest dynamic coefficients and are
+not generally absolute direct-gLV effects. Posterior sign support and MCMC
+diagnostics are the primary edge evidence. Pair-specific repeated K-fold
+ELPD may be retained as supporting predictive evidence in the fit object.
+
+Cross-pair model weights are not returned because distinct pair-to-rest
+models generally predict different transformed outcomes and therefore do
+not form a common-outcome stacking or pseudo-BMA model set.
 }
 \details{
-
+Diagnostic criteria depend on \code{diag_mode}:
+\itemize{
+\item \strong{strict}: \code{rhat < 1.01}, \code{essb > 1000},
+\code{esst > 1000}, \code{div == 0}, \code{tdhit == 0}, and
+\code{ebfmi_min >= 0.40}.
+\item \strong{moderate}: \code{rhat < 1.05}, \code{essb > 400},
+\code{esst > 400}, \code{div <= 8}, \code{tdhit <= 80}, and
+\code{ebfmi_min >= 0.30}.
 }
-\seealso{
-\code{fit_glv_pairwise()}
+
+Indeterminate directions remain explicit and are not interpreted as zero.
+Tables are sorted by \code{bayes_FDR} in ascending order with missing values
+last.
 }

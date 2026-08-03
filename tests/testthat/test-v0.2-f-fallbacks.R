@@ -22,8 +22,9 @@ test_that("invalid time intervals are rejected rather than repaired", {
 test_that("missing OU persistence and invalid nu cannot select another scorer", {
   held <- data.frame(subject = "A", time = c(0, 1), y = 0, xi = 0, xj = 0)
   base <- data.frame(r0 = 0, a_ii = 0, a_ij = 0, sigma = 1, sd_ou = 1, nu = 5)
-  expect_error(pclvbayes:::.proj_loglik_subject(base, held),
-               "OU persistence parameter missing")
+  missing <- pclvbayes:::.proj_loglik_subject(base, held)
+  expect_s3_class(missing, "pclv_failure")
+  expect_identical(missing$reason, "missing_ou_persistence_draws")
   base$phi <- .8
   base$nu <- NA_real_
   invalid <- pclvbayes:::.proj_loglik_subject(base, held)
