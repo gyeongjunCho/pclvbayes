@@ -1,8 +1,22 @@
-.Rproj.user
+# R session files
+.Rproj.user/
 .Rhistory
 .RData
 .Ruserdata
-inst/doc
-dev
+
+# R package build artifacts
+inst/doc/
+/dev/
+*.tar.gz
+/*.Rcheck/
+
+# Compiled Stan executables (keep .stan source tracked)
 /inst/stan/pclv
 /inst/stan/pclv.exe
+
+# Benchmark execution outputs
+/benchmarks/mtist/results/
+
+# Editor / OS
+.vscode/
+.DS_Store
