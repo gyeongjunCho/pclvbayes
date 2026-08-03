@@ -1,6 +1,6 @@
 # Benchmark-only resource and process-monitoring contract for ROADMAP V021-02.
 
-v021_resource_policy_schema <- "v021_resource_policy_v2"
+v021_resource_policy_schema <- "v021_resource_policy_v3"
 v021_preflight_states <- c(
   "passed", "failed_ceiling_exceeded", "failed_unverified_process_tree",
   "failed_thread_environment", "failed_invalid_policy", "failed_monitoring_error"
@@ -92,14 +92,14 @@ validate_v021_worker_registry <- function(registry) {
 }
 
 build_v021_resource_policy <- function(
-    logical_host_threads = 16L, reserved_host_threads = 4L,
-    maximum_active_cmdstan_chains = 12L, maximum_cmdstan_process_slots = 12L,
+    logical_host_threads = 12L, reserved_host_threads = 2L,
+    maximum_active_cmdstan_chains = 10L, maximum_cmdstan_process_slots = 10L,
     cpu_threads_per_active_chain = 1L,
     main_chains = 4L, retry_chains = main_chains,
     pathfinder_processes = 1L, pathfinder_num_paths = 8L,
     kfold_chains = main_chains, kfold_parallel_chains = 1L,
     confirmation_chains = main_chains, proposed_outer_concurrency = NULL,
-    global_slot_scheduler = FALSE) {
+    global_slot_scheduler = TRUE) {
   logical_host_threads <- .v021_resource_int(logical_host_threads, "logical_host_threads")
   reserved_host_threads <- .v021_resource_int(
     reserved_host_threads, "reserved_host_threads", positive = FALSE)
@@ -128,8 +128,8 @@ build_v021_resource_policy <- function(
     stop("kfold_parallel_chains cannot exceed kfold_chains.")
   if (!is.logical(global_slot_scheduler) || length(global_slot_scheduler) != 1L ||
       is.na(global_slot_scheduler)) stop("global_slot_scheduler must be one logical value.")
-  if (isTRUE(global_slot_scheduler))
-    stop("No verified global slot scheduler exists for V021-02.")
+  if (!isTRUE(global_slot_scheduler))
+    stop("V021-02 requires the verified global slot scheduler.")
 
   operation_slots <- .v021_operation_table(
     main_chains, retry_chains, pathfinder_processes, kfold_chains,
@@ -162,7 +162,13 @@ build_v021_resource_policy <- function(
     kfold_parallel_chains = kfold_parallel_chains,
     confirmation_chains = confirmation_chains,
     proposed_outer_concurrency = proposed_outer_concurrency,
-    global_slot_scheduler = FALSE,
+    maximum_concurrent_kfold_fits = 1L,
+    controller_worker_limit = proposed_outer_concurrency,
+    retries_share_chain_budget = TRUE,
+    environment_thread_caps = v021_single_thread_environment(),
+    result_root_ownership_policy = v021_controller_ownership_schema,
+    scheduler_poll_interval_seconds = 0.25,
+    global_slot_scheduler = TRUE,
     operation_slots = operation_slots
   )
   validate_v021_resource_policy(policy)
@@ -177,28 +183,45 @@ validate_v021_resource_policy <- function(policy) {
     "cpu_threads_per_active_chain", "numerical_library_threads", "main_chains",
     "retry_chains", "pathfinder_processes", "pathfinder_chain_slots",
     "pathfinder_num_paths", "kfold_chains", "kfold_parallel_chains",
-    "confirmation_chains", "proposed_outer_concurrency", "global_slot_scheduler",
+    "confirmation_chains", "proposed_outer_concurrency",
+    "maximum_concurrent_kfold_fits", "controller_worker_limit",
+    "retries_share_chain_budget", "environment_thread_caps",
+    "result_root_ownership_policy", "scheduler_poll_interval_seconds",
+    "global_slot_scheduler",
     "operation_slots"
   )
   if (!is.list(policy) || !identical(names(policy), fields))
     stop("Invalid V021 resource-policy schema.")
   if (!identical(policy$policy_schema, v021_resource_policy_schema))
     stop("Invalid V021 resource-policy version.")
-  for (nm in setdiff(fields, c("policy_schema", "global_slot_scheduler", "operation_slots")))
+  for (nm in setdiff(fields, c("policy_schema", "global_slot_scheduler", "operation_slots",
+                               "retries_share_chain_budget", "environment_thread_caps",
+                               "result_root_ownership_policy",
+                               "scheduler_poll_interval_seconds")))
     .v021_resource_int(policy[[nm]], nm, positive = nm != "pathfinder_chain_slots" &&
                          nm != "pathfinder_processes" && nm != "reserved_host_threads")
-  if (policy$logical_host_threads != 16L || policy$reserved_host_threads != 4L ||
-      policy$usable_chain_slots != 12L || policy$maximum_active_cmdstan_chains != 12L ||
-      policy$maximum_cmdstan_process_slots != 12L)
-    stop("Policy violates the exact 16/4/12 host contract.")
+  if (policy$logical_host_threads != 12L || policy$reserved_host_threads != 2L ||
+      policy$usable_chain_slots != 10L || policy$maximum_active_cmdstan_chains != 10L ||
+      policy$maximum_cmdstan_process_slots != 10L)
+    stop("Policy violates the exact 12/2/10 host contract.")
   if (policy$logical_host_threads - policy$reserved_host_threads !=
       policy$usable_chain_slots)
     stop("Policy host-thread arithmetic is contradictory.")
   if (policy$cpu_threads_per_active_chain != 1L ||
       policy$numerical_library_threads != 1L)
     stop("Policy requires exactly one thread per chain and numerical library.")
-  if (!identical(policy$global_slot_scheduler, FALSE))
-    stop("V021-02 has no verified global slot scheduler.")
+  if (!identical(policy$global_slot_scheduler, TRUE))
+    stop("V021-02 requires the verified global slot scheduler.")
+  if (!identical(policy$maximum_concurrent_kfold_fits, 1L) ||
+      !identical(policy$controller_worker_limit, policy$proposed_outer_concurrency) ||
+      !identical(policy$retries_share_chain_budget, TRUE) ||
+      !identical(policy$result_root_ownership_policy, v021_controller_ownership_schema) ||
+      !is.numeric(policy$scheduler_poll_interval_seconds) ||
+      length(policy$scheduler_poll_interval_seconds) != 1L ||
+      !is.finite(policy$scheduler_poll_interval_seconds) ||
+      policy$scheduler_poll_interval_seconds <= 0)
+    stop("Policy scheduler, retry, or ownership settings are invalid.")
+  validate_v021_single_thread_environment(policy$environment_thread_caps)
   expected_operations <- .v021_operation_table(
     policy$main_chains, policy$retry_chains, policy$pathfinder_processes,
     policy$kfold_chains, policy$kfold_parallel_chains, policy$confirmation_chains
@@ -266,7 +289,7 @@ derive_safe_outer_concurrency <- function(policy, operation_spec) {
     requested_outer_concurrency = requested,
     projected_active_cmdstan_chains = as.integer(projected_chains),
     projected_active_cmdstan_processes = as.integer(projected_processes),
-    global_slot_scheduler = FALSE,
+    global_slot_scheduler = TRUE,
     compliant = TRUE
   )
 }
@@ -292,6 +315,238 @@ validate_v021_operation_plan <- function(policy, operation_plan) {
     stop("Overlapping operation plan exceeds the global ceiling.")
   list(active_cmdstan_chains = as.integer(active_chains),
        active_cmdstan_processes = as.integer(active_processes), compliant = TRUE)
+}
+
+v021_controller_ownership_schema <- "v021_controller_ownership_v1"
+v021_reservation_schema <- "v021_chain_reservations_v1"
+
+v021_resource_policy_hash <- function(policy) {
+  validate_v021_resource_policy(policy)
+  if (!exists("v021_sha256", mode = "function"))
+    stop("V021-03 hashing must be loaded before policy hashing.")
+  v021_sha256(policy)
+}
+
+v021_job_demand <- function(policy, job_type) {
+  validate_v021_resource_policy(policy)
+  if (!is.character(job_type) || length(job_type) != 1L ||
+      !job_type %in% policy$operation_slots$operation)
+    stop("Unknown V021 job type.")
+  row <- policy$operation_slots[match(job_type, policy$operation_slots$operation), ]
+  as.integer(max(row$simultaneous_chain_slots, row$cmdstan_process_slots))
+}
+
+new_v021_reservations <- function() {
+  data.frame(
+    reservation_schema = character(), task_identity = character(),
+    attempt_number = integer(), job_type = character(), reserved_chain_slots = integer(),
+    worker_identity = character(), acquired_at = character(), state = character(),
+    stringsAsFactors = FALSE)
+}
+
+validate_v021_reservations <- function(reservations, policy) {
+  expected <- names(new_v021_reservations())
+  if (!is.data.frame(reservations) || !identical(names(reservations), expected))
+    stop("Invalid V021 reservation schema.")
+  if (!nrow(reservations)) return(invisible(TRUE))
+  if (anyNA(reservations) || any(reservations$reservation_schema != v021_reservation_schema) ||
+      any(!reservations$job_type %in% policy$operation_slots$operation) ||
+      any(!reservations$state %in% c("reserved", "worker_terminated")) ||
+      any(reservations$attempt_number < 1L) || any(reservations$reserved_chain_slots < 1L) ||
+      anyDuplicated(paste(reservations$task_identity, reservations$attempt_number,
+                          reservations$job_type, sep = "\r")))
+    stop("Invalid V021 reservation record.")
+  active <- reservations$state == "reserved"
+  if (sum(reservations$reserved_chain_slots[active]) > policy$maximum_active_cmdstan_chains)
+    stop("Active reservations exceed the CmdStan chain ceiling.")
+  invisible(TRUE)
+}
+
+write_v021_reservations_atomic <- function(reservations, path, policy) {
+  validate_v021_reservations(reservations, policy)
+  validator <- function(x) validate_v021_reservations(x, policy)
+  if (!exists(".v021_atomic_write_validated_rds", mode = "function"))
+    stop("V021-03 atomic persistence must be loaded before reservations are written.")
+  .v021_atomic_write_validated_rds(reservations, path, validator)
+}
+
+read_v021_reservations <- function(path, policy) {
+  value <- tryCatch(readRDS(path), error = identity)
+  if (inherits(value, "error")) stop("Reservation state is malformed or unreadable.")
+  validate_v021_reservations(value, policy)
+  value
+}
+
+reserve_v021_capacity <- function(reservations, policy, task_identity, attempt_number,
+                                  job_type, worker_identity = "not_started",
+                                  acquired_at = format(Sys.time(), tz = "UTC", usetz = TRUE)) {
+  validate_v021_reservations(reservations, policy)
+  demand <- v021_job_demand(policy, job_type)
+  used <- sum(reservations$reserved_chain_slots[reservations$state == "reserved"])
+  if (used + demand > policy$maximum_active_cmdstan_chains)
+    stop("Insufficient V021 CmdStan chain capacity.")
+  row <- data.frame(
+    reservation_schema = v021_reservation_schema,
+    task_identity = as.character(task_identity), attempt_number = as.integer(attempt_number),
+    job_type = job_type, reserved_chain_slots = demand,
+    worker_identity = as.character(worker_identity), acquired_at = as.character(acquired_at),
+    state = "reserved", stringsAsFactors = FALSE)
+  out <- rbind(reservations, row)
+  validate_v021_reservations(out, policy)
+  out
+}
+
+release_v021_capacity <- function(reservations, policy, task_identity, attempt_number,
+                                  job_type, worker_terminated) {
+  validate_v021_reservations(reservations, policy)
+  if (!isTRUE(worker_terminated))
+    stop("Capacity cannot be released before worker termination is established.")
+  hit <- which(reservations$task_identity == task_identity &
+                 reservations$attempt_number == as.integer(attempt_number) &
+                 reservations$job_type == job_type & reservations$state == "reserved")
+  if (length(hit) != 1L) stop("Reservation identity is missing or ambiguous.")
+  reservations$state[[hit]] <- "worker_terminated"
+  validate_v021_reservations(reservations, policy)
+  reservations
+}
+
+plan_v021_scheduler_waves <- function(task_identities, policy,
+                                       job_type = "main_fit") {
+  validate_v021_resource_policy(policy)
+  task_identities <- sort(unique(as.character(task_identities)), method = "radix")
+  if (!length(task_identities) || anyNA(task_identities) || any(!nzchar(task_identities)))
+    stop("Runnable task identities must be non-empty and unique.")
+  demand <- v021_job_demand(policy, job_type)
+  per_wave <- floor(policy$maximum_active_cmdstan_chains / demand)
+  if (per_wave < 1L) stop("One job exceeds the total CmdStan chain budget.")
+  groups <- split(task_identities, ceiling(seq_along(task_identities) / per_wave))
+  lapply(seq_along(groups), function(i) list(
+    wave = as.integer(i), task_identities = unname(groups[[i]]),
+    reserved_chain_slots = as.integer(length(groups[[i]]) * demand)))
+}
+
+.v021_local_process_identity <- function(pid = Sys.getpid()) {
+  stat_path <- file.path("/proc", as.character(pid), "stat")
+  stat <- if (file.exists(stat_path)) tryCatch(readLines(stat_path, warn = FALSE), error = identity)
+  else character()
+  parsed <- if (length(stat) == 1L && !inherits(stat, "error"))
+    tryCatch(.v021_parse_linux_stat(stat), error = function(e) NULL) else NULL
+  boot <- tryCatch(readLines("/proc/sys/kernel/random/boot_id", warn = FALSE),
+                   error = function(e) NA_character_)
+  list(pid = as.integer(pid),
+       start_time = if (is.null(parsed)) NA_character_ else parsed$start_time,
+       hostname = unname(Sys.info()[["nodename"]]),
+       boot_id = if (length(boot)) boot[[1L]] else NA_character_)
+}
+
+v021_ownership_path <- function(result_root) file.path(result_root, ".v021-controller-lock")
+
+acquire_v021_controller_ownership <- function(result_root, manifest_hash,
+                                               configuration_hash,
+                                               identity = .v021_local_process_identity()) {
+  lock <- v021_ownership_path(result_root)
+  if (!dir.exists(result_root) && !dir.create(result_root, recursive = TRUE))
+    stop("Could not create result root for ownership.")
+  if (!dir.create(lock, showWarnings = FALSE))
+    stop("V021 result root is already owned; reconcile explicitly.")
+  record <- list(
+    ownership_schema = v021_controller_ownership_schema,
+    result_root = normalizePath(result_root, mustWork = TRUE),
+    manifest_hash = manifest_hash, configuration_hash = configuration_hash,
+    hostname = identity$hostname, controller_pid = as.integer(identity$pid),
+    process_start = identity$start_time, boot_id = identity$boot_id,
+    acquired_at = format(Sys.time(), tz = "UTC", usetz = TRUE))
+  tryCatch({
+    temporary <- file.path(lock, ".owner.rds.tmp")
+    saveRDS(record, temporary)
+    if (!identical(readRDS(temporary), record) ||
+        !file.rename(temporary, file.path(lock, "owner.rds")))
+      stop("Atomic ownership metadata promotion failed.")
+  }, error = function(e) {
+    unlink(lock, recursive = TRUE); stop(e)
+  })
+  record
+}
+
+validate_v021_controller_ownership <- function(record, result_root,
+                                                manifest_hash, configuration_hash) {
+  required <- c("ownership_schema", "result_root", "manifest_hash", "configuration_hash",
+                "hostname", "controller_pid", "process_start", "boot_id", "acquired_at")
+  if (!is.list(record) || !identical(names(record), required) ||
+      !identical(record$ownership_schema, v021_controller_ownership_schema) ||
+      !identical(record$result_root, normalizePath(result_root, mustWork = TRUE)) ||
+      !identical(record$manifest_hash, manifest_hash) ||
+      !identical(record$configuration_hash, configuration_hash))
+    stop("Controller ownership identity or provenance mismatch.")
+  stored <- tryCatch(suppressWarnings(readRDS(
+    file.path(v021_ownership_path(result_root), "owner.rds"))),
+                     error = identity)
+  if (inherits(stored, "error") || !identical(stored, record))
+    stop("Controller does not hold the active result-root ownership record.")
+  invisible(TRUE)
+}
+
+release_v021_controller_ownership <- function(result_root, record) {
+  lock <- v021_ownership_path(result_root)
+  stored <- tryCatch(readRDS(file.path(lock, "owner.rds")), error = identity)
+  if (inherits(stored, "error") || !identical(stored, record))
+    stop("Refusing to release ownership not held by this controller.")
+  unlink(lock, recursive = TRUE)
+  invisible(TRUE)
+}
+
+reconcile_v021_stale_ownership <- function(result_root, current_identity,
+                                            administrative_override = FALSE) {
+  lock <- v021_ownership_path(result_root)
+  stored <- tryCatch(readRDS(file.path(lock, "owner.rds")), error = identity)
+  if (inherits(stored, "error")) stop("Ownership record is malformed.")
+  if (!identical(stored$hostname, current_identity$hostname) ||
+      !identical(stored$boot_id, current_identity$boot_id))
+    stop("Foreign-host or prior-boot ownership requires administrative reconciliation.")
+  live <- dir.exists(file.path("/proc", as.character(stored$controller_pid))) &&
+    identical(.v021_local_process_identity(stored$controller_pid)$start_time,
+              stored$process_start)
+  if (live) stop("Controller ownership is still live.")
+  if (!isTRUE(administrative_override))
+    stop("Stale ownership requires explicit administrative_override.")
+  unlink(lock, recursive = TRUE)
+  invisible(stored)
+}
+
+audit_v021_resource_state <- function(policy, reservations, ownership_valid,
+                                       worker_identities = character(),
+                                       actual_cmdstan_chains = NA_integer_) {
+  validate_v021_reservations(reservations, policy)
+  reserved <- sum(reservations$reserved_chain_slots[reservations$state == "reserved"])
+  if (!is.na(actual_cmdstan_chains) && actual_cmdstan_chains > reserved)
+    stop("Observed CmdStan descendants exceed registered reservations.")
+  list(controller_pid = as.integer(Sys.getpid()), worker_identities = worker_identities,
+       total_reserved_chain_slots = as.integer(reserved),
+       maximum_allowed_chain_slots = policy$maximum_active_cmdstan_chains,
+       configured_thread_limits = v021_single_thread_environment(),
+       oversubscribed = reserved > policy$maximum_active_cmdstan_chains,
+       ownership_valid = isTRUE(ownership_valid))
+}
+
+claim_v021_task_with_capacity <- function(status, ledger, manifest, task_ordinal,
+                                           ownership_record, result_root, policy,
+                                           reservations, timestamp,
+                                           job_type = "main_fit") {
+  validate_v021_controller_ownership(
+    ownership_record, result_root, manifest$manifest_hash,
+    manifest$configuration_hash)
+  i <- match(as.integer(task_ordinal), manifest$tasks$task_ordinal)
+  if (is.na(i)) stop("Unknown task ordinal.")
+  attempt_number <- status$tasks$attempt_count[[i]] + 1L
+  reserved <- reserve_v021_capacity(
+    reservations, policy, manifest$tasks$directed_task_id[[i]],
+    attempt_number, job_type)
+  started <- tryCatch(start_v021_task_attempt(
+    status, ledger, manifest, task_ordinal, timestamp,
+    worker_provenance = "controller_reserved"), error = identity)
+  if (inherits(started, "error")) stop(conditionMessage(started))
+  list(status = started$status, ledger = started$ledger,
+       reservations = reserved, attempt_id = started$attempt_id)
 }
 
 v021_single_thread_environment <- function() {
@@ -666,7 +921,6 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   records$configured_launch_chain_ceiling <- configured_launch_chain_ceiling
   records$compliance_status <- if (state != "verified") "unverified" else if (
     peak <= policy$maximum_active_cmdstan_chains &&
-      peak <= configured_launch_chain_ceiling &&
       process_peak <= policy$maximum_cmdstan_process_slots) "compliant" else "exceeded"
   list(
     monitoring_state = state, reason = reason, records = records,

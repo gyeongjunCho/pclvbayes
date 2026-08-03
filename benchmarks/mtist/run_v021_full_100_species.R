@@ -67,14 +67,14 @@ for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "cmdstan-owned")))
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
 validate_v021_resource_policy(policy)
 derivation <- derive_safe_outer_concurrency(
-  policy, build_v021_operation_spec("main_fit", 3L))
-if (!identical(policy$policy_schema, "v021_resource_policy_v2") ||
-    !identical(derivation$projected_active_cmdstan_chains, 12L) ||
-    !identical(derivation$projected_active_cmdstan_processes, 12L))
-  stop("V021-06 requires the verified policy-v2 12-chain/12-slot contract.")
+  policy, build_v021_operation_spec("main_fit", 2L))
+if (!identical(policy$policy_schema, "v021_resource_policy_v3") ||
+    !identical(derivation$projected_active_cmdstan_chains, 8L) ||
+    !identical(derivation$projected_active_cmdstan_processes, 8L))
+  stop("V021-06 requires the verified policy-v3 10-chain/10-slot contract.")
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
 
@@ -124,20 +124,34 @@ if (length(observations$taxa) != config$taxa_count)
   stop("V021-06 observational input does not contain exactly 100 taxa.")
 tasks <- build_v021_full_task_table(observations$taxa, config$seed, config$dataset_id)
 
+git_commit <- trimws(system2(
+  "git", c("-C", shQuote(repo), "rev-parse", "HEAD"), stdout = TRUE)[[1L]])
+prepared_execution <- prepare_v021_full_execution(
+  config, observations$taxa,
+  provenance = list(code_commit = git_commit,
+                    benchmark_schema = config$benchmark_schema),
+  initialize = FALSE)
+
 if (identical(tolower(Sys.getenv("PCLV_V021_MANIFEST_DRY_RUN", "false")), "true")) {
-  git_commit <- trimws(system2(
-    "git", c("-C", shQuote(repo), "rev-parse", "HEAD"), stdout = TRUE)[[1L]])
-  prepared <- prepare_v021_full_execution(
-    config, observations$taxa,
-    provenance = list(code_commit = git_commit,
-                      benchmark_schema = config$benchmark_schema),
-    initialize = FALSE)
+  resource_dry_run <- prepare_v021_resource_dry_run(prepared_execution, policy)
   cat(sprintf(
-    "V021-03 dry run: manifest=%s runnable=%d completed=%d sampling_launched=false\n",
-    prepared$manifest$manifest_hash, length(prepared$plan$runnable_indices),
-    length(prepared$plan$completed_indices)))
+    paste0("V021-03/V021-02 dry run: manifest=%s runnable=%d completed=%d ",
+           "waves=%d maximum_chains=%d sampling_launched=false\n"),
+    prepared_execution$manifest$manifest_hash,
+    length(prepared_execution$plan$runnable_indices),
+    length(prepared_execution$plan$completed_indices),
+    length(resource_dry_run$waves), resource_dry_run$maximum_active_cmdstan_chains))
   quit(save = "no", status = 0L)
 }
+
+controller_ownership <- acquire_v021_controller_ownership(
+  paths$output_root, prepared_execution$manifest$manifest_hash,
+  prepared_execution$manifest$configuration_hash)
+on.exit(release_v021_controller_ownership(paths$output_root,
+                                           controller_ownership), add = TRUE)
+reservation_path <- file.path(paths$output_root, "chain_reservations.rds")
+active_reservations <- new_v021_reservations()
+write_v021_reservations_atomic(active_reservations, reservation_path, policy)
 
 if (debug_mode) {
   missing_directions <- setdiff(debug_directions, tasks$direction_index)
@@ -210,7 +224,7 @@ controls[c(
 controls[c("chains", "iter_warmup", "iter_sampling", "seed", "progress",
            "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R")] <- list(
   config$chains, config$iter_warmup, config$iter_sampling, config$seed,
-  "none", 3L, 1L, 5L, 1L)
+  "none", 2L, 1L, 5L, 1L)
 preexisting_executable <- normalizePath(file.path(repo, "inst", "stan", "pclv"),
                                         mustWork = TRUE)
 preexisting_info <- unclass(file.info(preexisting_executable)[c("size", "mtime")])
@@ -335,12 +349,22 @@ store_outcome <- function(i, result, elapsed) {
 
 run_batch <- function(indices) {
   set_v021_failure_trace_phase(parent_trace, "batch_launch")
+  validate_v021_controller_ownership(
+    controller_ownership, paths$output_root,
+    prepared_execution$manifest$manifest_hash,
+    prepared_execution$manifest$configuration_hash)
   validate_v021_preflight_launch_capacity(policy, length(indices))
   batch_number <<- batch_number + 1L
   batch_id <- sprintf("batch-%05d", batch_number)
   parent_trace$batch_id <- batch_id
   parent_trace$task_ids <- as.integer(manifest$task_id[indices])
   parent_trace$direction_ids <- as.character(manifest$direction_id[indices])
+  for (i in indices) {
+    active_reservations <<- reserve_v021_capacity(
+      active_reservations, policy, manifest$direction_id[[i]],
+      manifest$retry_count[[i]] + 1L, "main_fit")
+  }
+  write_v021_reservations_atomic(active_reservations, reservation_path, policy)
   mark_running(indices)
   set_v021_failure_trace_phase(parent_trace, "batch_launch", completed = TRUE)
   specs <- lapply(indices, function(i)
@@ -507,6 +531,12 @@ run_batch <- function(indices) {
     file.create(start_file)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
   results <- unname(parallel::mccollect(fit_jobs))
+  for (i in indices) {
+    active_reservations <<- release_v021_capacity(
+      active_reservations, policy, manifest$direction_id[[i]],
+      manifest$retry_count[[i]] + 1L, "main_fit", worker_terminated = TRUE)
+  }
+  write_v021_reservations_atomic(active_reservations, reservation_path, policy)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
   file.create(stop_file)
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")

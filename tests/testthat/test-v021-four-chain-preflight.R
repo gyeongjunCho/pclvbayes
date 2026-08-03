@@ -19,13 +19,13 @@ test_that("preflight configuration and selection are deterministic and truth-fre
   expect_error(select_v021_preflight_tasks(bad), "Truth")
 })
 
-test_that("four-chain concurrency is bounded at three under policy v2", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
-  derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
-  expect_identical(policy$policy_schema, "v021_resource_policy_v2")
-  expect_identical(derivation$projected_active_cmdstan_chains, 12L)
-  expect_identical(derivation$projected_active_cmdstan_processes, 12L)
-  expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
+test_that("four-chain concurrency is bounded at two under policy v3", {
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
+  derivation <- validate_v021_preflight_launch_capacity(policy, 2L)
+  expect_identical(policy$policy_schema, "v021_resource_policy_v3")
+  expect_identical(derivation$projected_active_cmdstan_chains, 8L)
+  expect_identical(derivation$projected_active_cmdstan_processes, 8L)
+  expect_error(validate_v021_preflight_launch_capacity(policy, 3L), "ceiling")
 })
 
 test_that("thread environment is scoped and restored", {
@@ -35,7 +35,7 @@ test_that("thread environment is scoped and restored", {
   expect_identical(Sys.getenv(v021_thread_variables, unset = NA_character_), old)
 })
 
-.preflight_snapshot <- function(chains = 12L, unknown = FALSE, unreadable = FALSE) {
+.preflight_snapshot <- function(chains = 8L, unknown = FALSE, unreadable = FALSE) {
   n <- chains + 2L
   data.frame(
     timestamp = rep("2026-08-02 UTC", n), pid = seq_len(n),
@@ -48,19 +48,19 @@ test_that("thread environment is scoped and restored", {
 }
 
 test_that("monitor traverses descendants and fails closed", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
-  ok <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L)), policy, 1L,
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
+  ok <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L)), policy, 1L,
                                        known_model_executables = "/model")
-  expect_identical(ok$observed_peak_active_cmdstan_chains, 12L)
-  expect_identical(ok$observed_peak_active_cmdstan_processes, 12L)
+  expect_identical(ok$observed_peak_active_cmdstan_chains, 8L)
+  expect_identical(ok$observed_peak_active_cmdstan_processes, 8L)
   expect_silent(validate_v021_preflight_monitor(ok, policy))
-  unreadable <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L, unreadable = TRUE)),
+  unreadable <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L, unreadable = TRUE)),
                                                 policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(unreadable, policy), "not verified")
-  unknown <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L, unknown = TRUE)),
+  unknown <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L, unknown = TRUE)),
                                              policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(unknown, policy), "not verified")
-  exceeded <- monitor_v021_process_snapshots(list(.preflight_snapshot(13L)), policy, 1L, "/model")
+  exceeded <- monitor_v021_process_snapshots(list(.preflight_snapshot(11L)), policy, 1L, "/model")
   expect_error(validate_v021_preflight_monitor(exceeded, policy), "exceeded")
 
   diagnose <- data.frame(
@@ -143,8 +143,8 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_false(feature$values$alr_cap_exposure_available)
   expect_false(any(grepl("truth|withhold|calibrat", names(feature$values), ignore.case=TRUE)))
 
-  policy <- build_v021_resource_policy(proposed_outer_concurrency=3L)
-  monitor <- monitor_v021_process_snapshots(list(.preflight_snapshot(12L)), policy, 1L, "/model")
+  policy <- build_v021_resource_policy(proposed_outer_concurrency=2L)
+  monitor <- monitor_v021_process_snapshots(list(.preflight_snapshot(8L)), policy, 1L, "/model")
   manifest_tasks <- rbind(
     task[c("task_id", "pair_id", "direction_index", "target", "source", "seed")],
     data.frame(task_id=1L, pair_id="pair-000001", direction_index=2L,
@@ -163,14 +163,14 @@ test_that("feature and summary contracts remain truth-free and explicit", {
     list(passed=TRUE, active_preflight_cmdstan_processes=0L))
   expect_identical(summary$state, "passed")
   expect_identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2")
-  expect_identical(summary$resource_policy_schema, "v021_resource_policy_v2")
-  expect_identical(summary$logical_host_threads, 16L)
-  expect_identical(summary$reserved_host_threads, 4L)
-  expect_identical(summary$usable_execution_capacity, 12L)
+  expect_identical(summary$resource_policy_schema, "v021_resource_policy_v3")
+  expect_identical(summary$logical_host_threads, 12L)
+  expect_identical(summary$reserved_host_threads, 2L)
+  expect_identical(summary$usable_execution_capacity, 10L)
   expect_identical(summary$attempt_id, basename(tempdir()))
   expect_identical(summary$worker_compilation_count, 0L)
-  expect_identical(summary$projected_active_chains, 12L)
-  expect_identical(summary$projected_cmdstan_process_slots, 12L)
+  expect_identical(summary$projected_active_chains, 8L)
+  expect_identical(summary$projected_cmdstan_process_slots, 8L)
   expect_identical(summary$observed_peak_cmdstan_diagnostic_processes, 0L)
   expect_identical(summary$cmdstan_diagnostic_process_ids, integer())
   expect_identical(summary$cmdstan_diagnostic_executables, character())
@@ -189,10 +189,10 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_silent(validate_v021_preflight_summary(failed))
 })
 
-test_that("runner wires three-fit batches and registered monitoring exactly once", {
+test_that("runner wires two-fit batches and registered monitoring exactly once", {
   source_lines <- readLines(testthat::test_path(
     "../../benchmarks/mtist/run_v021_four_chain_preflight.R"), warn = FALSE)
-  expect_true(any(grepl("run_batch\\(c\\(1L, 2L, 3L\\)\\)", source_lines)))
+  expect_true(any(grepl("run_batch\\(c\\(1L, 2L\\)\\)", source_lines)))
   expect_true(any(grepl("worker_registry = batch_worker_registry", source_lines,
                         fixed = TRUE)))
   expect_true(any(grepl("worker_registry.rds", source_lines, fixed = TRUE)))

@@ -14,7 +14,7 @@ build_v021_four_chain_preflight_config <- function(output_root) {
     dataset_id = "37", seed = 20260802L, selected_direction_count = 4L,
     selection_rule = v021_preflight_selection_rule,
     chains = 4L, iter_warmup = 2000L, iter_sampling = 2000L,
-    nominal_retained_draws = 8000L, maximum_simultaneous_fits = 3L,
+    nominal_retained_draws = 8000L, maximum_simultaneous_fits = 2L,
     run_kfold = FALSE, use_pathfinder = FALSE, controlled_interrupt_direction = 4L,
     output_root = normalizePath(output_root, mustWork = FALSE)
   )
@@ -36,7 +36,7 @@ validate_v021_four_chain_preflight_config <- function(config) {
       !identical(config$chains, 4L) || !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
-      !identical(config$maximum_simultaneous_fits, 3L) ||
+      !identical(config$maximum_simultaneous_fits, 2L) ||
       !identical(config$run_kfold, FALSE) || !identical(config$use_pathfinder, FALSE) ||
       !identical(config$controlled_interrupt_direction, 4L))
     stop("Preflight configuration does not match the frozen V021-05 contract.")
@@ -313,12 +313,12 @@ validate_v021_preflight_summary <- function(summary) {
   )
   if (!is.list(summary) || !identical(names(summary), required) ||
       !identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2") ||
-      !identical(summary$resource_policy_schema, "v021_resource_policy_v2") ||
-      !identical(summary$logical_host_threads, 16L) ||
-      !identical(summary$reserved_host_threads, 4L) ||
-      !identical(summary$usable_execution_capacity, 12L) ||
-      !identical(summary$maximum_active_cmdstan_chains, 12L) ||
-      !identical(summary$maximum_cmdstan_process_slots, 12L) ||
+      !identical(summary$resource_policy_schema, "v021_resource_policy_v3") ||
+      !identical(summary$logical_host_threads, 12L) ||
+      !identical(summary$reserved_host_threads, 2L) ||
+      !identical(summary$usable_execution_capacity, 10L) ||
+      !identical(summary$maximum_active_cmdstan_chains, 10L) ||
+      !identical(summary$maximum_cmdstan_process_slots, 10L) ||
       !summary$state %in% c("passed", "failed")) stop("Invalid preflight summary.")
   if (identical(summary$state, "passed") && length(summary$failure_reasons))
     stop("Passed preflight cannot retain failure reasons.")

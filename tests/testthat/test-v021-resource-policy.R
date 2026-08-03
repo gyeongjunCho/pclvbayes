@@ -616,28 +616,28 @@ test_that("registered diagnose ancestry mismatches remain fail closed", {
   expect_identical(arbitrary_result$monitoring_state, "unverified_process_tree")
 })
 
-test_that("attempt10-shaped registered monitoring is verified with strict utility slots", {
+test_that("registered monitoring is verified with strict ten-slot utility accounting", {
   base <- capture_recapture_fixture("persistent")$snapshot
   base$process_state[base$pid == 200L] <- "R"
   base$initial_process_state[base$pid == 200L] <- "R"
   base$final_process_state[base$pid == 200L] <- "R"
   registry <- attempt9_worker_registry(base)
-  full_sampling <- add_extended_sampling_chains(base, 12L)
+  full_sampling <- add_extended_sampling_chains(base, 10L)
   utility_overlap <- add_extended_diagnostic(add_extended_sampling_chains(base, 8L))
   monitor <- monitor_v021_process_snapshots(
     list(full_sampling, utility_overlap), build_v021_resource_policy(), 100L,
     "/models/pclv", worker_registry = registry)
   expect_identical(monitor$monitoring_state, "verified")
   expect_identical(monitor$compliance_status, "compliant")
-  expect_identical(monitor$observed_peak_active_cmdstan_chains, 12L)
-  expect_identical(monitor$observed_peak_active_cmdstan_processes, 12L)
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 10L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 10L)
 
   exceeded <- monitor_v021_process_snapshots(
     list(add_extended_diagnostic(full_sampling)), build_v021_resource_policy(),
     100L, "/models/pclv", worker_registry = registry)
   expect_identical(exceeded$monitoring_state, "verified")
-  expect_identical(exceeded$observed_peak_active_cmdstan_chains, 12L)
-  expect_identical(exceeded$observed_peak_active_cmdstan_processes, 13L)
+  expect_identical(exceeded$observed_peak_active_cmdstan_chains, 10L)
+  expect_identical(exceeded$observed_peak_active_cmdstan_processes, 11L)
   expect_identical(exceeded$compliance_status, "exceeded")
 })
 
@@ -693,13 +693,13 @@ test_that("ambiguous registered state remains fail closed after terminal precede
   expect_match(monitor$reason, "mismatch")
 })
 
-test_that("attempt10-shaped registered exit preserves verified twelve-slot history", {
+test_that("registered exit preserves verified ten-slot history", {
   live <- capture_recapture_fixture("persistent")$snapshot
   live$process_state[live$pid == 200L] <- "R"
   live$initial_process_state[live$pid == 200L] <- "R"
   live$final_process_state[live$pid == 200L] <- "R"
   registry <- attempt9_worker_registry(live)
-  full <- add_extended_sampling_chains(live, 12L)
+  full <- add_extended_sampling_chains(live, 10L)
   vanished <- live
   row <- vanished$pid == 200L
   vanished$capture_state[row] <- "vanished_during_capture"
@@ -710,8 +710,8 @@ test_that("attempt10-shaped registered exit preserves verified twelve-slot histo
     worker_registry = registry)
   expect_identical(monitor$monitoring_state, "verified")
   expect_identical(monitor$compliance_status, "compliant")
-  expect_identical(monitor$observed_peak_active_cmdstan_chains, 12L)
-  expect_identical(monitor$observed_peak_active_cmdstan_processes, 12L)
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 10L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 10L)
   expect_identical(tail(monitor$records$classification[
     monitor$records$pid == 200L], 1L), "vanished_during_capture")
 })
@@ -877,36 +877,36 @@ test_that("diagnose recognition requires canonical identity and R-worker ancestr
   expect_identical(monitor$reason, "unknown_potential_cmdstan_descendant")
 })
 
-test_that("the policy records the exact 16-thread, 4-reserved, 12-slot contract", {
+test_that("the policy records the exact 12-thread, 2-reserved, 10-slot contract", {
   policy <- build_v021_resource_policy()
-  expect_identical(policy$policy_schema, "v021_resource_policy_v2")
-  expect_identical(policy$logical_host_threads, 16L)
-  expect_identical(policy$reserved_host_threads, 4L)
-  expect_identical(policy$usable_chain_slots, 12L)
-  expect_identical(policy$maximum_active_cmdstan_chains, 12L)
-  expect_identical(policy$maximum_cmdstan_process_slots, 12L)
+  expect_identical(policy$policy_schema, "v021_resource_policy_v3")
+  expect_identical(policy$logical_host_threads, 12L)
+  expect_identical(policy$reserved_host_threads, 2L)
+  expect_identical(policy$usable_chain_slots, 10L)
+  expect_identical(policy$maximum_active_cmdstan_chains, 10L)
+  expect_identical(policy$maximum_cmdstan_process_slots, 10L)
   expect_identical(policy$cpu_threads_per_active_chain, 1L)
   expect_identical(policy$numerical_library_threads, 1L)
   expect_identical(policy$main_chains, 4L)
-  expect_identical(policy$proposed_outer_concurrency, 3L)
-  expect_false(policy$global_slot_scheduler)
+  expect_identical(policy$proposed_outer_concurrency, 2L)
+  expect_true(policy$global_slot_scheduler)
   expect_silent(validate_v021_resource_policy(policy))
   expect_identical(policy, build_v021_resource_policy())
 })
 
 test_that("malformed and contradictory resource policies are rejected", {
-  expect_error(build_v021_resource_policy(logical_host_threads = 15L), "Usable")
-  expect_error(build_v021_resource_policy(reserved_host_threads = 5L), "Usable")
-  expect_error(build_v021_resource_policy(maximum_cmdstan_process_slots = 11L),
+  expect_error(build_v021_resource_policy(logical_host_threads = 11L), "Usable")
+  expect_error(build_v021_resource_policy(reserved_host_threads = 3L), "Usable")
+  expect_error(build_v021_resource_policy(maximum_cmdstan_process_slots = 9L),
                "ceilings")
   expect_error(build_v021_resource_policy(cpu_threads_per_active_chain = 2L), "Exactly one")
   expect_error(build_v021_resource_policy(kfold_chains = 2L,
                                           kfold_parallel_chains = 3L), "cannot exceed")
-  expect_error(build_v021_resource_policy(global_slot_scheduler = TRUE), "No verified")
-  expect_error(build_v021_resource_policy(proposed_outer_concurrency = 4L), "exceeds")
+  expect_error(build_v021_resource_policy(global_slot_scheduler = FALSE), "requires")
+  expect_error(build_v021_resource_policy(proposed_outer_concurrency = 3L), "exceeds")
   policy <- build_v021_resource_policy()
   policy$usable_chain_slots <- 11L
-  expect_error(validate_v021_resource_policy(policy), "16/4/12")
+  expect_error(validate_v021_resource_policy(policy), "12/2/10")
   policy <- build_v021_resource_policy()
   policy$operation_slots$simultaneous_chain_slots[[1L]] <- 3L
   expect_error(validate_v021_resource_policy(policy), "contradicts")
@@ -917,22 +917,22 @@ test_that("malformed and contradictory resource policies are rejected", {
   expect_error(build_v021_resource_policy(retry_chains = 2L), "canonical")
 })
 
-test_that("four-chain directions derive at most three concurrent fits", {
+test_that("four-chain directions derive at most two concurrent fits", {
   policy <- build_v021_resource_policy()
-  derivation <- derive_safe_outer_concurrency(policy, primary_operation_spec(3L))
+  derivation <- derive_safe_outer_concurrency(policy, primary_operation_spec(2L))
   expect_identical(derivation$per_fit_simultaneous_chain_slots, 4L)
-  expect_identical(derivation$safe_outer_concurrency, 3L)
-  expect_identical(derivation$projected_active_cmdstan_chains, 12L)
-  expect_identical(derivation$projected_active_cmdstan_processes, 12L)
+  expect_identical(derivation$safe_outer_concurrency, 2L)
+  expect_identical(derivation$projected_active_cmdstan_chains, 8L)
+  expect_identical(derivation$projected_active_cmdstan_processes, 8L)
   expect_true(derivation$compliant)
   expect_identical(4L * policy$main_chains, 16L)
-  expect_error(derive_safe_outer_concurrency(policy, primary_operation_spec(4L)),
+  expect_error(derive_safe_outer_concurrency(policy, primary_operation_spec(3L)),
                "exceeds")
 })
 
 test_that("valid chain configurations use floor division without rounding upward", {
-  cases <- data.frame(chains = c(1L, 2L, 3L, 4L, 5L, 6L, 12L),
-                      expected = c(12L, 6L, 4L, 3L, 2L, 2L, 1L))
+  cases <- data.frame(chains = c(1L, 2L, 3L, 4L, 5L, 10L),
+                      expected = c(10L, 5L, 3L, 2L, 2L, 1L))
   for (i in seq_len(nrow(cases))) {
     policy <- build_v021_resource_policy(
       main_chains = cases$chains[[i]], retry_chains = cases$chains[[i]],
@@ -941,7 +941,7 @@ test_that("valid chain configurations use floor division without rounding upward
     derivation <- derive_safe_outer_concurrency(
       policy, build_v021_operation_spec(c("main_fit", "retry_fit"), cases$expected[[i]]))
     expect_identical(derivation$safe_outer_concurrency, cases$expected[[i]])
-    expect_lte(derivation$projected_active_cmdstan_chains, 12L)
+    expect_lte(derivation$projected_active_cmdstan_chains, 10L)
   }
 })
 
@@ -967,24 +967,24 @@ test_that("every operation uses the same slot accounting model", {
   retry <- derive_safe_outer_concurrency(
     policy, build_v021_operation_spec("retry_fit", 2L))
   kfold <- derive_safe_outer_concurrency(
-    policy, build_v021_operation_spec("kfold_fit", 12L))
+    policy, build_v021_operation_spec("kfold_fit", 10L))
   confirmation <- derive_safe_outer_concurrency(
     policy, build_v021_operation_spec("confirmation_fit", 2L))
   expect_identical(retry$projected_active_cmdstan_chains, 8L)
-  expect_identical(kfold$projected_active_cmdstan_chains, 12L)
+  expect_identical(kfold$projected_active_cmdstan_chains, 10L)
   expect_identical(confirmation$projected_active_cmdstan_chains, 8L)
 })
 
-test_that("overlapping operation plans fail when chains or processes exceed twelve", {
+test_that("overlapping operation plans fail when chains or processes exceed ten", {
   policy <- build_v021_resource_policy()
   safe <- data.frame(operation = c("main_fit", "pathfinder", "kfold_fit"),
                      concurrent_instances = c(2L, 1L, 1L))
   expect_identical(validate_v021_operation_plan(policy, safe)$active_cmdstan_chains, 9L)
   unsafe_chains <- data.frame(operation = c("main_fit", "retry_fit"),
-                              concurrent_instances = c(3L, 1L))
+                              concurrent_instances = c(2L, 1L))
   expect_error(validate_v021_operation_plan(policy, unsafe_chains), "exceeds")
   unsafe_processes <- data.frame(operation = c("main_fit", "pathfinder"),
-                                 concurrent_instances = c(3L, 1L))
+                                 concurrent_instances = c(2L, 3L))
   expect_error(validate_v021_operation_plan(policy, unsafe_processes), "exceeds")
 })
 
@@ -1090,35 +1090,35 @@ test_that("unknown descendants retain a complete atomic post-mortem record", {
   expect_false(any(grepl("tmp-", list.files(dirname(path), basename(path)))))
 })
 
-test_that("process-tree peak twelve passes and greater than twelve fails", {
+test_that("process-tree peak ten passes and greater than ten fails", {
   policy <- build_v021_resource_policy()
   at_ceiling <- monitor_v021_process_snapshots(
-    list(make_process_snapshot(4L, "t1"), make_process_snapshot(12L, "t2")),
+    list(make_process_snapshot(4L, "t1"), make_process_snapshot(10L, "t2")),
     policy, 100L, known_model_executables = "/models/pclv")
-  expect_identical(at_ceiling$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(at_ceiling$observed_peak_active_cmdstan_chains, 10L)
   expect_identical(at_ceiling$compliance_status, "compliant")
   passed <- evaluate_v021_resource_preflight(
-    policy, primary_operation_spec(3L), v021_single_thread_environment(), at_ceiling)
+    policy, primary_operation_spec(2L), v021_single_thread_environment(), at_ceiling)
   expect_identical(passed$state, "passed")
   expect_true(passed$passed)
 
   exceeded <- monitor_v021_process_snapshots(
-    list(make_process_snapshot(13L)), policy, 100L,
+    list(make_process_snapshot(11L)), policy, 100L,
     known_model_executables = "/models/pclv")
   failed <- evaluate_v021_resource_preflight(
-    policy, primary_operation_spec(3L), v021_single_thread_environment(), exceeded)
+    policy, primary_operation_spec(2L), v021_single_thread_environment(), exceeded)
   expect_identical(exceeded$compliance_status, "exceeded")
   expect_identical(failed$state, "failed_ceiling_exceeded")
   expect_false(failed$passed)
   expect_match(failed$reasons, "exceeded")
 
   pathfinder_overlap <- monitor_v021_process_snapshots(
-    list(make_process_snapshot(12L, pathfinder = TRUE)), policy, 100L,
+    list(make_process_snapshot(10L, pathfinder = TRUE)), policy, 100L,
     known_model_executables = "/models/pclv")
-  expect_identical(pathfinder_overlap$observed_peak_active_cmdstan_chains, 12L)
-  expect_identical(pathfinder_overlap$observed_peak_active_cmdstan_processes, 13L)
+  expect_identical(pathfinder_overlap$observed_peak_active_cmdstan_chains, 10L)
+  expect_identical(pathfinder_overlap$observed_peak_active_cmdstan_processes, 11L)
   overlap_failure <- evaluate_v021_resource_preflight(
-    policy, primary_operation_spec(3L), v021_single_thread_environment(),
+    policy, primary_operation_spec(2L), v021_single_thread_environment(),
     pathfinder_overlap)
   expect_identical(overlap_failure$state, "failed_ceiling_exceeded")
 })

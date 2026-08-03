@@ -24,7 +24,7 @@ monitor_dir <- file.path(config$output_root, "monitor")
 dir.create(monitor_dir)
 manifest_path <- file.path(config$output_root, "manifest.rds")
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
 operation <- build_v021_operation_spec("main_fit", 3L)
 derivation <- derive_safe_outer_concurrency(policy, operation)
 thread_environment <- v021_single_thread_environment()
@@ -290,7 +290,8 @@ old_options <- options(glvpair.output_root = file.path(config$output_root, "cmds
 on.exit(options(old_options), add = TRUE)
 execution_error <- NULL
 tryCatch(with_v021_single_thread_environment(function() {
-  run_batch(c(1L, 2L, 3L))
+  run_batch(c(1L, 2L))
+  run_batch(3L)
 
   # Interrupt a live sampling task, then reconcile and resume only that task.
   i <- config$controlled_interrupt_direction

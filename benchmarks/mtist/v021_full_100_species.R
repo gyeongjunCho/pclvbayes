@@ -24,7 +24,7 @@ build_v021_full_config <- function(output_root) {
     iter_warmup = 2000L,
     iter_sampling = 2000L,
     nominal_retained_draws = 8000L,
-    maximum_simultaneous_fits = 3L,
+    maximum_simultaneous_fits = 2L,
     maximum_task_attempts = 2L,
     kfold_seed = 20260802L,
     preprocessing_config_id = "pclv_smoothed_full_composition_closure_v1",
@@ -55,7 +55,7 @@ validate_v021_full_config <- function(config) {
       !identical(config$chains, 4L) || !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
-      !identical(config$maximum_simultaneous_fits, 3L) ||
+      !identical(config$maximum_simultaneous_fits, 2L) ||
       !identical(config$maximum_task_attempts, 2L) ||
       !identical(config$kfold_seed, 20260802L) ||
       !identical(config$preprocessing_config_id,
@@ -180,6 +180,21 @@ prepare_v021_full_execution <- function(config, taxa, provenance,
   list(manifest = manifest, plan = plan,
        status_summary = compact_v021_execution_status(plan), paths = paths,
        dry_run = !isTRUE(initialize), sampling_launched = FALSE)
+}
+
+prepare_v021_resource_dry_run <- function(prepared, policy) {
+  if (!is.list(prepared) || is.null(prepared$manifest) || is.null(prepared$plan))
+    stop("prepared execution is malformed.")
+  validate_v021_execution_manifest(prepared$manifest)
+  validate_v021_resource_policy(policy)
+  ids <- prepared$manifest$tasks$directed_task_id[prepared$plan$runnable_indices]
+  list(
+    policy_schema = policy$policy_schema,
+    policy_hash = v021_resource_policy_hash(policy),
+    waves = if (length(ids)) plan_v021_scheduler_waves(ids, policy) else list(),
+    maximum_concurrent_tasks = policy$proposed_outer_concurrency,
+    maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
+    sampling_launched = FALSE)
 }
 
 .v021_trace_sensitive_name <- function(x) {
