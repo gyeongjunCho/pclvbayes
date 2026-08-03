@@ -1473,7 +1473,8 @@
 
     message(sprintf("%s%s | %s | E-BFMI chains=[%s]",
                     if (nzchar(tag)) paste0("[",tag,"] ") else "",
-                    if (ok) "✅ diag ok" else "⚠️ diag warn",
+                    if (ok) "sampler health ok; convergence summary pending" else
+                      "sampler health warning; convergence summary pending",
                     .fmt_diag(diag), eb_str))
 
     if (ok || attempt >= max_retries) {
@@ -2741,6 +2742,28 @@
 #' @return A list with posterior summaries, diagnostics, and K-fold payload; or \code{NULL}.
 #' @noRd
 #' @keywords internal
+.accepted_scale_audit <- function(draws, variable = "sigma") {
+  if (!is.data.frame(draws) || !variable %in% names(draws))
+    return(list(variable = variable, available = FALSE, reason = "variable_unavailable"))
+  values <- as.numeric(draws[[variable]])
+  chains <- if (".chain" %in% names(draws)) as.integer(draws$.chain) else rep(1L, length(values))
+  chain_ids <- sort(unique(chains))
+  chain_minimum <- setNames(vapply(chain_ids, function(chain) {
+    x <- values[chains == chain & is.finite(values)]
+    if (length(x)) min(x) else NA_real_
+  }, numeric(1)), as.character(chain_ids))
+  finite <- values[is.finite(values)]
+  list(
+    variable = variable,
+    available = TRUE,
+    minimum = if (length(finite)) min(finite) else NA_real_,
+    maximum = if (length(finite)) max(finite) else NA_real_,
+    zero_count = as.integer(sum(values == 0, na.rm = TRUE)),
+    nonfinite_count = as.integer(sum(!is.finite(values))),
+    chain_minimum = chain_minimum
+  )
+}
+
 .fit_direction_main_posterior <- function(target,
                                           partner,
                                           ctx,
@@ -3042,6 +3065,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   p_sign2_dir <- posterior_summary$sign$interaction_p_two
   p_sign2_self <- posterior_summary$sign$self_p_two
   nu_summary <- posterior_summary$nu
+  accepted_scale_audit <- .accepted_scale_audit(d, "sigma")
   rm(d)
 
   # Predictive evaluation is a separate downstream phase.
@@ -3215,7 +3239,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       NULL
       else
         kfold$nu_fold_means),
-    .predictive_context = predictive_context
+    .predictive_context = predictive_context,
+    .accepted_scale_audit = accepted_scale_audit
   )
 }
 

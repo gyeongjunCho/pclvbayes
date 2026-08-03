@@ -822,8 +822,10 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     registered_diagnostic_identity <- out$readable & out$capture_state == "captured" &
       !is.na(out$start_time) & grepl("^[0-9]+$", out$start_time) &
       out$process_state %in% .v021_linux_non_zombie_states
+  parent_is_controller <- valid_parent &
+    out$pid[parent_index] == root_pid & r_process[parent_index]
   diagnostic_process <- out$is_descendant & canonical_diagnose_executable &
-    canonical_diagnose_argv & (parent_is_r_worker |
+    canonical_diagnose_argv & (parent_is_controller | parent_is_r_worker |
       (parent_is_registered_worker & registered_diagnostic_identity))
   out_vanished <- if ("capture_state" %in% names(out))
     out$capture_state == "vanished_during_capture" else rep(FALSE, nrow(out))

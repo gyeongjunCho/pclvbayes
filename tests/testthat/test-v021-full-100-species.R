@@ -52,6 +52,21 @@ test_that("canonical task generation yields 4950 pairs and 9900 directions", {
   expect_error(build_v021_full_task_table(taxa[-1L], 20260802L), "100")
 })
 
+test_that("three-direction debug preflight permits one incomplete pair only explicitly", {
+  tasks <- build_v021_full_task_table(paste0("species_", 0:99), 20260802L)[1:3, ]
+  input <- tasks[c("task_id", "direction_index", "target", "source", "seed")]
+  expect_error(build_v021_checkpoint_manifest(input, 4L, tempfile("checkpoints-")),
+               "both directions")
+  manifest <- build_v021_checkpoint_manifest(
+    input, 4L, tempfile("checkpoints-"), allow_incomplete_pairs = TRUE)
+  expect_identical(manifest$direction_index, 1:3)
+  expect_identical(manifest$seed, c(20362803L, 20362804L, 20363803L))
+  runner <- readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE)
+  expect_true(any(grepl("runnable_ordinals %in% tasks$direction_index",
+                         runner, fixed = TRUE)))
+})
+
 test_that("policy v3 bounds the full benchmark at three fits", {
   policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
   derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
@@ -420,7 +435,8 @@ test_that("runner installs ownership cleanup before releasing workers", {
   ownership_line <- grep("new_v021_batch_ownership", runner, fixed = TRUE)[[1L]]
   guard_line <- grep("on.exit({", runner, fixed = TRUE)[[1L]]
   release_line <- grep("file.create(start_file)", runner, fixed = TRUE)[[1L]]
-  collect_line <- grep("mccollect(fit_jobs)", runner, fixed = TRUE)[[1L]]
+  collect_line <- grep("collect_v021_tracked_jobs(fit_job_tracker)",
+                       runner, fixed = TRUE)[[1L]]
   expect_lt(ownership_line, guard_line)
   expect_lt(guard_line, release_line)
   expect_lt(release_line, collect_line)
@@ -430,6 +446,170 @@ test_that("runner installs ownership cleanup before releasing workers", {
                         readLines(testthat::test_path(
                           "../../benchmarks/mtist/v021_full_100_species.R")),
                         fixed = TRUE)))
+})
+
+test_that("intermediate sampler health never claims NA convergence passed", {
+  helper <- paste(readLines(testthat::test_path("../../R/pclv_helpers.R"),
+                            warn = FALSE), collapse = "\n")
+  expect_match(helper, "sampler health ok; convergence summary pending", fixed = TRUE)
+  expect_false(grepl("diag ok", helper, fixed = TRUE))
+  expect_false(grepl("convergence ok", helper, fixed = TRUE))
+})
+
+test_that("outer worker preserves truth-free predictive context until controller evaluation", {
+  skip_if_not_installed("phyloseq")
+  physeq <- phyloseq::phyloseq(
+    phyloseq::otu_table(matrix(c(1, 2, 3, 4), 2, 2,
+      dimnames = list(c("a", "b"), c("s1", "s2"))), taxa_are_rows = TRUE),
+    phyloseq::sample_data(data.frame(subject = c("x", "x"), time = c(0, 1),
+      row.names = c("s1", "s2"))))
+  task <- data.frame(dataset_id = "dataset-1", task_id = 1L,
+    direction_index = 1L, target = "a", source = "b", seed = 19L)
+  fixture <- list(task = task, spec = build_v021_inference_spec(
+    list(physeq = physeq, taxa = c("a", "b")), list(chains = 1L), task))
+  ctx <- setNames(rep(list(1), length(v021_runtime_context_fields)),
+                  v021_runtime_context_fields)
+  ctx$meta_df <- data.frame(Sample = c("s1", "s2"), subject = c("x", "x"),
+                            time = c(0, 1))
+  ctx$sm_mat <- matrix(1:4, 2, 2,
+    dimnames = list(c("a", "b"), c("s1", "s2")))
+  ctx$mod_exe_file <- "/approved/canonical-model"
+  runtime <- build_v021_runtime_context(ctx)
+  context <- list(
+    pair_in = data.frame(subject = "s1", time = 1), split_seed = 20260802L,
+    sampling_seed = fixture$task$seed[[1L]], pair_tag = "fixture")
+  fit_stub <- function(target, partner, ctx, seed_override, progress_local) {
+    predictive <- list(
+      pair_in = data.frame(subject = "s1", time = 1), split_seed = 20260802L,
+      sampling_seed = seed_override, pair_tag = "fixture")
+    list(target = target, partner = partner, seed = seed_override,
+         diagnostic_failure = list(NULL), .predictive_context = predictive)
+  }
+  environment(fit_stub) <- baseenv()
+  job <- make_v021_confirmation_fit_closure(fixture$spec, runtime, fit_stub)
+  worker_result <- job()
+  expect_identical(worker_result$.predictive_context, context)
+  expect_silent(assert_v021_truth_free_schema(worker_result$.predictive_context,
+                                              "worker predictive context"))
+  evaluator <- function(x) {
+    expect_identical(x$.predictive_context, context)
+    x$.predictive_context <- NULL
+    x$kfold_success_total <- 0L
+    x
+  }
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  writes <- list()
+  evaluated <- with_v021_predictive_reservation(
+    worker_result, new_v021_reservations(), policy, "direction-000001", 1L,
+    evaluator, persist = function(x) writes[[length(writes) + 1L]] <<- x)
+  expect_false(".predictive_context" %in% names(evaluated$result))
+  expect_identical(evaluated$result$kfold_success_total, 0L)
+  expect_identical(vapply(writes, function(x) tail(x$state, 1L), character(1)),
+                   c("reserved", "worker_terminated"))
+})
+
+test_that("predictive reservations release once on success and failure", {
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  run <- function(evaluator) {
+    writes <- list()
+    value <- tryCatch(with_v021_predictive_reservation(
+      list(.predictive_context = list()), new_v021_reservations(), policy,
+      "direction-000001", 1L, evaluator,
+      persist = function(x) writes[[length(writes) + 1L]] <<- x), error = identity)
+    list(value = value, writes = writes)
+  }
+  ok <- run(function(x) x)
+  expect_false(inherits(ok$value, "error"))
+  expect_identical(length(ok$writes), 2L)
+  expect_identical(tail(ok$writes[[2L]]$state, 1L), "worker_terminated")
+  bad <- run(function(x) stop("predictive fixture failure"))
+  expect_match(conditionMessage(bad$value), "predictive fixture failure")
+  expect_identical(length(bad$writes), 2L)
+  expect_identical(tail(bad$writes[[2L]]$state, 1L), "worker_terminated")
+})
+
+test_that("collected worker handles are not reaped twice after controller failure", {
+  jobs <- lapply(1:3, function(pid) structure(list(pid = pid), class = "process"))
+  fit_tracker <- new_v021_child_job_tracker(jobs)
+  monitor_tracker <- new_v021_child_job_tracker()
+  calls <- list()
+  collector <- function(children, wait) {
+    calls[[length(calls) + 1L]] <<- vapply(children, `[[`, integer(1), "pid")
+    setNames(as.list(rep(TRUE, length(children))), calls[[length(calls)]])
+  }
+  expect_length(collect_v021_tracked_jobs(fit_tracker, collector), 3L)
+  expect_identical(reap_v021_uncollected_jobs(
+    fit_tracker, monitor_tracker, collector = collector)$class, "none")
+  expect_identical(length(calls), 1L)
+})
+
+test_that("terminal controller children receive a final blocking reap", {
+  calls <- list()
+  collector <- function(wait = TRUE) {
+    calls[[length(calls) + 1L]] <<- list(wait = wait)
+    list()
+  }
+  expect_identical(reap_v021_terminal_children(collector), list())
+  expect_identical(calls, list(list(wait = TRUE)))
+})
+
+test_that("empty durable monitor history starts with zero recovered peaks", {
+  root <- tempfile("v021-monitor-peaks-")
+  dir.create(file.path(root, "monitor"), recursive = TRUE)
+  peaks <- recover_v021_monitor_peaks(
+    root, build_v021_resource_policy(), "/models/pclv")
+  expect_identical(peaks, list(chains = 0L, processes = 0L))
+})
+
+test_that("collected monitor exit waits for transient procfs zombie removal", {
+  checks <- 0L
+  path_exists <- function(path) {
+    checks <<- checks + 1L
+    checks < 3L
+  }
+  sleeps <- numeric()
+  removed <- integer()
+  expect_true(wait_v021_collected_child_exit(
+    123L, remover = function(pid) removed <<- c(removed, pid),
+    path_exists = path_exists,
+    sleep = function(seconds) sleeps <<- c(sleeps, seconds)))
+  expect_identical(removed, c(123L, 123L))
+  expect_identical(sleeps, c(0.01, 0.01))
+  expect_error(wait_v021_collected_child_exit(NA_integer_), "positive integer")
+})
+
+test_that("dead-controller restart reconciles stale reservations without completion", {
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+  reservations <- reserve_v021_capacity(
+    new_v021_reservations(), policy, "direction-000001", 1L, "kfold_fit")
+  expect_error(reconcile_v021_dead_controller_reservations(
+    reservations, policy, TRUE), "Live-controller")
+  reconciled <- reconcile_v021_dead_controller_reservations(
+    reservations, policy, FALSE)
+  expect_identical(reconciled$state, "worker_terminated")
+  expect_false(any(reconciled$state == "reserved"))
+})
+
+test_that("reservation attempt identity follows authoritative V021-03 status", {
+  manifest <- build_v021_execution_manifest(
+    dataset_id = "d", taxa_order = c("a", "b"),
+    task_table = data.frame(task_id = c(1L, 1L), direction_index = 1:2,
+      target = c("a", "b"), source = c("b", "a"), seed = c(11L, 12L)),
+    public_seed = 1L,
+    kfold_seed = 2L, preprocessing_config = list(id = "p"),
+    posterior_config = list(id = "m"), kfold_config = list(id = "k"),
+    predictive_config = list(id = "q"), provenance = list(commit = "x"))
+  status <- new_v021_task_status(manifest)
+  status$tasks$state <- "failed"
+  status$tasks$attempt_count <- 1L
+  expect_identical(v021_task_attempt_number(status, 1L, TRUE), 2L)
+  status$tasks$state <- "running"
+  status$tasks$attempt_count <- 2L
+  expect_identical(v021_task_attempt_number(status, 1L), 2L)
+  runner <- paste(readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE),
+    collapse = "\n")
+  expect_false(grepl("manifest$retry_count[[i]] + 1L", runner, fixed = TRUE))
 })
 
 test_that("recording handlers rethrow once while trace, cleanup, and failure payload persist", {

@@ -600,8 +600,10 @@ test_that("registered diagnose ancestry mismatches remain fail closed", {
   wrong_parent <- monitor_v021_process_snapshots(
     list(wrong_ppid), build_v021_resource_policy(), 100L, "/models/pclv",
     worker_registry = registry)
-  expect_identical(wrong_parent$monitoring_state, "unverified_process_tree")
-  expect_identical(wrong_parent$reason, "unknown_potential_cmdstan_descendant")
+  expect_identical(wrong_parent$monitoring_state, "verified")
+  expect_identical(
+    wrong_parent$records$classification[wrong_parent$records$pid == 900L],
+    "cmdstan_diagnostic")
 
   duplicate <- monitor_v021_process_snapshots(
     list(diagnostic), build_v021_resource_policy(), 100L, "/models/pclv",
@@ -854,7 +856,7 @@ test_that("canonical CmdStan diagnose is a non-chain process slot", {
   expect_identical(monitor$compliance_status, "exceeded")
 })
 
-test_that("diagnose recognition requires canonical identity and R-worker ancestry", {
+test_that("diagnose recognition accepts canonical controller-owned utility", {
   base <- make_process_snapshot(0L)
   unrelated <- add_cmdstan_diagnostic(
     base, executable = "/tmp/diagnose", potential_cmdstan = FALSE)
@@ -865,8 +867,10 @@ test_that("diagnose recognition requires canonical identity and R-worker ancestr
   wrong_parent <- add_cmdstan_diagnostic(base, ppid = 100L)
   monitor <- monitor_v021_process_snapshots(
     list(wrong_parent), build_v021_resource_policy(), 100L, "/models/pclv")
-  expect_identical(monitor$monitoring_state, "unverified_process_tree")
-  expect_identical(monitor$reason, "unknown_potential_cmdstan_descendant")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(
+    monitor$records$classification[monitor$records$pid == 900L],
+    "cmdstan_diagnostic")
 
   unknown <- add_cmdstan_diagnostic(
     base, executable = "/opt/cmdstan-2.36.0/bin/stansummary",

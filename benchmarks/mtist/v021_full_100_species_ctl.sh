@@ -11,6 +11,8 @@ LOG="$LOG_DIR/v021_full_100_species_v2.nohup.log"
 PIDFILE="$LOG_DIR/v021_full_100_species_v2.controller.pid"
 LAUNCH_META="$LOG_DIR/v021_full_100_species_v2.launch.tsv"
 EXPECTED_BRANCH="v0.2.1-dev"
+REQUIRED_CONTROL_SCRIPT_COMMIT="32d983bd7282db1d5f4297576ffd612213b69338"
+REQUIRED_FULL_RUN_COMMIT="8f1571a7cfedabfaef0389ed61944ff1cc19f97e"
 EXPECTED_AFFINITY="0-15"
 PROCESS_PATTERN='run_v021_full_100_species|(^|[[:space:]])(\./|/[^[:space:]]*/)?pclv([[:space:]]|$)'
 
@@ -24,6 +26,22 @@ script_commits() {
   SCRIPT_REL="${SCRIPT_PATH#"$REPO/"}"
   SCRIPT_COMMIT="$(git -C "$REPO" log -1 --format=%H -- "$SCRIPT_REL" 2>/dev/null || true)"
   CURRENT_HEAD="$(git -C "$REPO" rev-parse HEAD)"
+}
+
+validate_reviewed_history() {
+  local repo="$1" current_head="$2" required_control="$3" required_integration="$4"
+  git -C "$repo" merge-base --is-ancestor "$required_control" "$current_head" ||
+    die "reviewed control-script commit is not an ancestor of HEAD"
+  git -C "$repo" merge-base --is-ancestor "$required_integration" "$current_head" ||
+    die "reviewed full-run integration commit is not an ancestor of HEAD"
+}
+
+validate_repository_state() {
+  local repo="$1" expected_branch="$2"
+  test "$(git -C "$repo" branch --show-current)" = "$expected_branch" ||
+    die "current branch is not $expected_branch"
+  test -z "$(git -C "$repo" status --short --untracked-files=no)" ||
+    die "tracked working tree is not clean"
 }
 
 controller_pid() {
@@ -43,9 +61,7 @@ controller_alive() {
 common_start_validation() {
   test -d "$REPO/.git" || die "repository is missing: $REPO"
   cd "$REPO"
-  test "$(git branch --show-current)" = "$EXPECTED_BRANCH" ||
-    die "current branch is not $EXPECTED_BRANCH"
-  test -z "$(git status --short)" || die "working tree is not clean"
+  validate_repository_state "$REPO" "$EXPECTED_BRANCH"
   test -f "$RUNNER" || die "runner is missing: $RUNNER"
   test -f "$CONFIG" || die "configuration is missing: $CONFIG"
   test -x "$EXECUTABLE" || die "compiled executable is missing: $EXECUTABLE"
@@ -55,8 +71,8 @@ common_start_validation() {
     die "CPU affinity $EXPECTED_AFFINITY is unavailable"
   script_commits
   test -n "$SCRIPT_COMMIT" || die "control script is uncommitted"
-  test "$CURRENT_HEAD" = "$SCRIPT_COMMIT" ||
-    die "HEAD $CURRENT_HEAD differs from script-owning commit $SCRIPT_COMMIT"
+  validate_reviewed_history "$REPO" "$CURRENT_HEAD" \
+    "$REQUIRED_CONTROL_SCRIPT_COMMIT" "$REQUIRED_FULL_RUN_COMMIT"
   if controller_alive; then
     die "controller PID $(controller_pid) is already alive"
   fi
@@ -376,6 +392,10 @@ Usage:
   v021_full_100_species_ctl.sh help
 EOF
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 case "${1:-help}" in
   launch) shift; test "$#" -eq 0 || die "launch accepts no options"; action_launch ;;

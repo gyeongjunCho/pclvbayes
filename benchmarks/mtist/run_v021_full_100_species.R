@@ -64,6 +64,7 @@ dir.create(paths$output_root, recursive = TRUE, showWarnings = FALSE)
 for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "inference_artifacts"),
                file.path(paths$output_root, "feature_records"),
+               file.path(paths$output_root, "sampler_scale_audits"),
                file.path(paths$output_root, "robustness_feature_records"),
                file.path(paths$output_root, "worker_registries"),
                file.path(paths$output_root, "batch_ownership"),
@@ -168,7 +169,10 @@ controller_ownership <- acquire_v021_controller_ownership(
 on.exit(release_v021_controller_ownership(paths$output_root,
                                            controller_ownership), add = TRUE)
 reservation_path <- file.path(paths$output_root, "chain_reservations.rds")
-active_reservations <- new_v021_reservations()
+active_reservations <- if (file.exists(reservation_path))
+  reconcile_v021_dead_controller_reservations(
+    read_v021_reservations(reservation_path, policy), policy,
+    controller_alive = FALSE) else new_v021_reservations()
 write_v021_reservations_atomic(active_reservations, reservation_path, policy)
 
 if (debug_mode) {
@@ -196,7 +200,8 @@ if (debug_mode) {
 
 manifest_input <- tasks[c("task_id", "direction_index", "target", "source", "seed")]
 expected_manifest <- build_v021_checkpoint_manifest(
-  manifest_input, config$chains, paths$checkpoint_root)
+  manifest_input, config$chains, paths$checkpoint_root,
+  allow_incomplete_pairs = debug_mode)
 tasks$pair_id <- expected_manifest$pair_id
 tasks <- tasks[c("dataset_id", "pair_id", "task_id", "direction_index",
                  "target", "source", "seed")]
@@ -265,8 +270,9 @@ approved_runtime <- build_v021_runtime_context(runtime$ctx)
 inference_config <- controls[intersect(names(controls), v021_inference_config_fields)]
 study <- list(physeq = observations$physeq, taxa = observations$taxa)
 
-peak_chains <- 0L
-peak_slots <- 0L
+durable_peaks <- recover_v021_monitor_peaks(paths$output_root, policy, executable)
+peak_chains <- durable_peaks$chains
+peak_slots <- durable_peaks$processes
 batch_number <- 0L
 trace_root <- file.path(paths$output_root, "failure_traces")
 parent_trace <- new_v021_failure_trace_context(trace_root, "parent")
@@ -368,6 +374,9 @@ store_outcome <- function(i, result, elapsed) {
       paste0(manifest$direction_id[[i]], ".rds")))
     .v021_atomic_save_rds(feature, file.path(paths$output_root, "feature_records",
       paste0(manifest$direction_id[[i]], ".rds")))
+    .v021_atomic_save_rds(result$.accepted_scale_audit,
+      file.path(paths$output_root, "sampler_scale_audits",
+                paste0(manifest$direction_id[[i]], ".rds")))
     observed_support <- calculate_v021_observed_support_features(
       v021_full_observed_support_input(approved_runtime, tasks[i, , drop = FALSE]))
     posterior_stability <- extract_v021_posterior_stability_features(list(
@@ -460,9 +469,11 @@ run_batch <- function(indices) {
   parent_trace$task_ids <- as.integer(manifest$task_id[indices])
   parent_trace$direction_ids <- as.character(manifest$direction_id[indices])
   for (i in indices) {
+    attempt_number <- v021_task_attempt_number(
+      execution_status, tasks$direction_index[[i]], next_attempt = TRUE)
     active_reservations <<- reserve_v021_capacity(
       active_reservations, policy, manifest$direction_id[[i]],
-      manifest$retry_count[[i]] + 1L, "main_fit")
+      attempt_number, "main_fit")
   }
   write_v021_reservations_atomic(active_reservations, reservation_path, policy)
   mark_running(indices)
@@ -529,16 +540,10 @@ run_batch <- function(indices) {
     invisible(lapply(as.integer(pids), function(pid)
       system2("kill", c(option, as.character(pid)), stdout = FALSE, stderr = FALSE)))
   }
-  runtime_reaper <- function() {
-    child_jobs <- fit_jobs
-    child_pids <- fit_pids
-    if (exists("monitor_job", inherits = FALSE)) {
-      child_jobs <- c(child_jobs, list(monitor_job))
-      child_pids <- c(child_pids, as.integer(monitor_job$pid))
-    }
-    collected <- tryCatch(parallel::mccollect(child_jobs, wait = FALSE), error = identity)
-    list(class = class(collected), child_pids = child_pids)
-  }
+  fit_job_tracker <- new_v021_child_job_tracker(fit_jobs)
+  monitor_job_tracker <- new_v021_child_job_tracker()
+  runtime_reaper <- function()
+    reap_v021_uncollected_jobs(fit_job_tracker, monitor_job_tracker)
   on.exit({
     cleanup_result <- tryCatch(cleanup_v021_owned_batch(
       ownership, batch_exit_condition, "parent", parent_trace$phase,
@@ -546,6 +551,16 @@ run_batch <- function(indices) {
       runtime_reaper), error = identity)
     if (inherits(cleanup_result, "error"))
       message("V021 batch cleanup failure: ", conditionMessage(cleanup_result))
+    release_result <- tryCatch({
+      owned_ids <- manifest$direction_id[indices]
+      active <- active_reservations$state == "reserved" &
+        active_reservations$task_identity %in% owned_ids
+      active_reservations$state[active] <<- "worker_terminated"
+      write_v021_reservations_atomic(active_reservations, reservation_path, policy)
+      TRUE
+    }, error = identity)
+    if (inherits(release_result, "error"))
+      message("V021 batch reservation cleanup failure: ", conditionMessage(release_result))
   }, add = TRUE)
   stop_owned <- function(snapshot) {
     owned <- fit_pids
@@ -602,6 +617,7 @@ run_batch <- function(indices) {
     }
     TRUE
   }, monitor_trace), silent = TRUE)
+  monitor_job_tracker$jobs <- list(monitor_job)
   monitor_registry <- register_v021_preflight_worker(
     as.integer(monitor_job$pid), parent_pid, "resource_monitor", batch_id,
     paste0(batch_id, "-monitor"))
@@ -630,35 +646,25 @@ run_batch <- function(indices) {
     file.create(monitor_start_file)
     file.create(start_file)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
-  results <- unname(parallel::mccollect(fit_jobs))
+  results <- unname(collect_v021_tracked_jobs(fit_job_tracker))
   for (i in indices) {
+    attempt_number <- v021_task_attempt_number(
+      execution_status, tasks$direction_index[[i]])
     active_reservations <<- release_v021_capacity(
       active_reservations, policy, manifest$direction_id[[i]],
-      manifest$retry_count[[i]] + 1L, "main_fit", worker_terminated = TRUE)
+      attempt_number, "main_fit", worker_terminated = TRUE)
   }
   write_v021_reservations_atomic(active_reservations, reservation_path, policy)
   set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
-  # Main fits finish as one canonical batch. Predictive evaluation then follows
-  # direction order, one eligible direction at a time, under the shared budget.
-  for (j in seq_along(indices)) {
-    if (inherits(results[[j]], c("try-error", "pclv_failure", "v021_traced_child_error")))
-      next
-    i <- indices[[j]]
-    active_reservations <<- reserve_v021_capacity(
-      active_reservations, policy, manifest$direction_id[[i]],
-      manifest$retry_count[[i]] + 1L, "kfold_fit")
-    write_v021_reservations_atomic(active_reservations, reservation_path, policy)
-    results[[j]] <- pclvbayes:::.add_predictive_evaluation(results[[j]])
-    active_reservations <<- release_v021_capacity(
-      active_reservations, policy, manifest$direction_id[[i]],
-      manifest$retry_count[[i]] + 1L, "kfold_fit", worker_terminated = TRUE)
-    write_v021_reservations_atomic(active_reservations, reservation_path, policy)
-  }
+  # Close the concurrent-main-fit monitor before spawning any controller-side
+  # K-fold process. Forked K-fold utilities must not inherit the monitor pipe.
   file.create(stop_file)
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
-  monitor_result <- unname(parallel::mccollect(monitor_job))[[1L]]
+  monitor_result <- unname(collect_v021_tracked_jobs(monitor_job_tracker))[[1L]]
   if (inherits(monitor_result, "v021_traced_child_error"))
     stop(monitor_result$condition_message)
+  reap_v021_terminal_children()
+  wait_v021_collected_child_exit(as.integer(monitor_job$pid))
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown", completed = TRUE)
   payload <- readRDS(final_file)
   parent_trace$monitor_state <- payload$latest_monitor %||% payload$error %||% NULL
@@ -668,6 +674,28 @@ run_batch <- function(indices) {
   validate_v021_preflight_monitor(batch_monitor, policy)
   peak_chains <<- max(peak_chains, batch_monitor$observed_peak_active_cmdstan_chains)
   peak_slots <<- max(peak_slots, batch_monitor$observed_peak_active_cmdstan_processes)
+  # Main fits finish as one canonical batch. Predictive evaluation then follows
+  # direction order, one eligible direction at a time, under the shared budget.
+  evaluate_predictive <- function(i, result) {
+    direction_id <- manifest$direction_id[[i]]
+    attempt_number <- v021_task_attempt_number(
+      execution_status, tasks$direction_index[[i]])
+    evaluated <- with_v021_predictive_reservation(
+      result, active_reservations, policy, direction_id, attempt_number,
+      evaluator = pclvbayes:::.add_predictive_evaluation,
+      persist = function(value) {
+        active_reservations <<- value
+        write_v021_reservations_atomic(value, reservation_path, policy)
+      })
+    active_reservations <<- evaluated$reservations
+    evaluated$result
+  }
+  for (j in seq_along(indices)) {
+    if (inherits(results[[j]], c("try-error", "pclv_failure", "v021_traced_child_error")))
+      next
+    i <- indices[[j]]
+    results[[j]] <- evaluate_predictive(i, results[[j]])
+  }
   elapsed <- (proc.time()[["elapsed"]] - started) / length(indices)
   for (j in seq_along(indices)) store_outcome(indices[[j]], results[[j]], elapsed)
   update_status()
@@ -702,6 +730,10 @@ execution_error <- tryCatch(
         if (!length(execution_plan$runnable_indices)) break
         runnable_ordinals <- prepared_execution$manifest$tasks$task_ordinal[
           execution_plan$runnable_indices]
+        if (debug_mode)
+          runnable_ordinals <- runnable_ordinals[
+            runnable_ordinals %in% tasks$direction_index]
+        if (!length(runnable_ordinals)) break
         runnable_indices <- match(runnable_ordinals, manifest$direction_index)
         if (anyNA(runnable_indices)) stop("V021-03 runnable task identity mismatch.")
         run_batch(head(runnable_indices, config$maximum_simultaneous_fits))

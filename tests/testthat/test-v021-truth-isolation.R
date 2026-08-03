@@ -167,6 +167,17 @@ test_that("runtime validation enforces canonical taxa-by-samples orientation", {
   expect_error(validate_v021_runtime_context(missing_taxon), "unique taxon")
 })
 
+test_that("approved runtime preserves the shared truth-free K-fold seed", {
+  runtime <- make_v021_runtime_source()
+  runtime$kfold_seed <- 1234L
+  approved <- build_v021_runtime_context(runtime)
+  expect_identical(approved$kfold_seed, 1234L)
+  changed <- runtime
+  changed$truth_matrix <- matrix(1, 2, 2)
+  expect_identical(build_v021_runtime_context(changed)$kfold_seed,
+                   approved$kfold_seed)
+})
+
 test_that("inference taxa declarations agree with runtime taxon rows", {
   skip_if_not_installed("phyloseq")
   fixture <- make_v021_spec()
@@ -285,7 +296,9 @@ test_that("confirmation targets and fitting closures are physically truth-free",
   expect_identical(names(target), c("task_id", "direction_index", "target", "source", "seed"))
   spec <- build_v021_inference_spec(fixture$study, list(chains = 1L), target)
   fit_stub <- function(target, partner, ctx, seed_override, progress_local)
-    list(target = target, partner = partner, seed = seed_override, ctx = ctx)
+    list(target = target, partner = partner, seed = seed_override, ctx = ctx,
+         .predictive_context = list(pair_in = data.frame(subject = "s1"),
+                                    split_seed = 11L, sampling_seed = seed_override))
   environment(fit_stub) <- baseenv()
   runtime <- make_v021_runtime()
   job <- make_v021_confirmation_fit_closure(spec, runtime, fit_stub)
@@ -296,6 +309,9 @@ test_that("confirmation targets and fitting closures are physically truth-free",
                      ls(environment(job), all.names = TRUE)))
   expect_identical(job()$target, "a")
   expect_identical(job()$partner, "b")
+  expect_true(is.list(job()$.predictive_context))
+  expect_false(any(c("truth", "absolute_A", "oracle_sign") %in%
+                     names(job()$.predictive_context)))
   runtime$truth_matrix <- matrix(1, 2, 2)
   expect_false("truth_matrix" %in% names(environment(job)$runtime_context))
 })

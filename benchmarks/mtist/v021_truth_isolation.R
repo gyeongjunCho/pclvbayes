@@ -23,7 +23,7 @@ v021_runtime_context_fields <- c(
   "alr_spline_df", "alr_spline_spar", "alr_spline_cv", "nz_partner_min_frac",
   "max_retries", "chains", "iter_warmup", "iter_sampling", "adapt_delta",
   "max_treedepth", "metric", "init", "seed", "quiet", "silent_sampler",
-  "n_workers_kfold_eff", "kfold_K", "kfold_R", "use_pathfinder_init",
+  "n_workers_kfold_eff", "kfold_K", "kfold_R", "kfold_seed", "use_pathfinder_init",
   "pf_num_paths", "pf_draws", "pf_history_size", "pf_max_lbfgs_iters",
   "pf_psis_resample", "mod_exe_file"
 )
@@ -281,7 +281,6 @@ make_v021_confirmation_fit_closure <- function(spec, runtime_context, fit_direct
       target = spec$target, partner = spec$source, ctx = runtime_context,
       seed_override = as.integer(spec$seed), progress_local = "none"
     )
-    if (!inherits(result, "pclv_failure")) result$.predictive_context <- NULL
     result
   }
   environment(fn) <- closure_env

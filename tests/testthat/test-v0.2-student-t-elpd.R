@@ -138,3 +138,18 @@ test_that("invalid random-intercept draws fail closed", {
   expect_identical(scored$stage, "elpd_scoring")
   expect_identical(scored$reason, "invalid_ou_draws")
 })
+test_that("accepted Student-t scale audit is chain-specific and rejects accepted zeros", {
+  draws <- data.frame(.chain = rep(1:2, each = 3),
+                      sigma = c(0.2, 0.1, 0.3, 0.4, 0.25, 0.5))
+  audit <- pclvbayes:::.accepted_scale_audit(draws)
+  expect_true(audit$available)
+  expect_identical(audit$minimum, 0.1)
+  expect_identical(audit$maximum, 0.5)
+  expect_identical(audit$zero_count, 0L)
+  expect_identical(audit$nonfinite_count, 0L)
+  expect_equal(unname(audit$chain_minimum), c(0.1, 0.25))
+  invalid <- pclvbayes:::.accepted_scale_audit(
+    data.frame(.chain = c(1L, 1L), sigma = c(0, Inf)))
+  expect_identical(invalid$zero_count, 1L)
+  expect_identical(invalid$nonfinite_count, 1L)
+})

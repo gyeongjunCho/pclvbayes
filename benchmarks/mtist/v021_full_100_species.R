@@ -9,6 +9,135 @@ v021_full_selection_rule <- paste(
   "at least 15 timepoints; lowest dataset ID; no truth fields inspected"
 )
 
+new_v021_child_job_tracker <- function(jobs = list()) {
+  tracker <- new.env(parent = emptyenv())
+  tracker$jobs <- jobs
+  tracker
+}
+
+collect_v021_tracked_jobs <- function(tracker, collector = parallel::mccollect,
+                                      wait = TRUE) {
+  if (!is.environment(tracker) || is.null(tracker$jobs))
+    stop("Invalid V021 child-job tracker.")
+  jobs <- tracker$jobs
+  if (!length(jobs)) return(list())
+  value <- collector(jobs, wait = wait)
+  tracker$jobs <- list()
+  value
+}
+
+reap_v021_uncollected_jobs <- function(..., collector = parallel::mccollect) {
+  trackers <- list(...)
+  jobs <- unlist(lapply(trackers, function(x) {
+    if (!is.environment(x) || is.null(x$jobs)) stop("Invalid V021 child-job tracker.")
+    x$jobs
+  }), recursive = FALSE)
+  if (!length(jobs)) return(list(class = "none", child_pids = integer()))
+  pids <- vapply(jobs, function(job) as.integer(job$pid), integer(1))
+  collected <- tryCatch(collector(jobs, wait = FALSE), error = identity)
+  lapply(trackers, function(x) x$jobs <- list())
+  list(class = class(collected), child_pids = pids)
+}
+
+reap_v021_terminal_children <- function(collector = parallel::mccollect) {
+  if (!is.function(collector)) stop("Child collector must be a function.")
+  collector(wait = TRUE)
+}
+
+wait_v021_collected_child_exit <- function(pid, timeout_seconds = 2,
+                                            poll_seconds = 0.01,
+                                            remover = function(pid)
+                                              parallel:::rmChild(pid),
+                                            path_exists = file.exists,
+                                            sleep = Sys.sleep) {
+  pid <- as.integer(pid)
+  if (length(pid) != 1L || is.na(pid) || pid < 1L)
+    stop("Collected child PID must be one positive integer.")
+  deadline <- proc.time()[["elapsed"]] + timeout_seconds
+  path <- file.path("/proc", as.character(pid))
+  while (path_exists(path) && proc.time()[["elapsed"]] < deadline) {
+    remover(pid)
+    sleep(poll_seconds)
+  }
+  if (path_exists(path)) stop("Collected child did not leave the process table.")
+  invisible(TRUE)
+}
+
+recover_v021_monitor_peaks <- function(output_root, policy, executable) {
+  validate_v021_resource_policy(policy)
+  monitor_root <- file.path(output_root, "monitor")
+  files <- list.files(monitor_root, pattern = "^batch-[0-9]+\\.rds$",
+                      full.names = TRUE)
+  if (!length(files)) return(list(chains = 0L, processes = 0L))
+  peaks <- lapply(files, function(path) {
+    batch_id <- sub("\\.rds$", "", basename(path))
+    payload <- readRDS(path)
+    ownership <- readRDS(file.path(output_root, "batch_ownership",
+                                   paste0(batch_id, ".rds")))
+    if (!is.list(payload) || !is.list(payload$snapshots) ||
+        !length(payload$snapshots) || !is.list(ownership) ||
+        is.null(ownership$parent_pid) || is.null(ownership$worker_registry))
+      stop("Invalid durable V021 monitor evidence.")
+    monitor <- monitor_v021_process_snapshots(
+      payload$snapshots, policy, as.integer(ownership$parent_pid), executable,
+      worker_registry = ownership$worker_registry)
+    validate_v021_preflight_monitor(monitor, policy)
+    c(chains = monitor$observed_peak_active_cmdstan_chains,
+      processes = monitor$observed_peak_active_cmdstan_processes)
+  })
+  peaks <- do.call(rbind, peaks)
+  list(chains = as.integer(max(peaks[, "chains"])),
+       processes = as.integer(max(peaks[, "processes"])))
+}
+
+reconcile_v021_dead_controller_reservations <- function(reservations, policy,
+                                                         controller_alive) {
+  validate_v021_reservations(reservations, policy)
+  if (isTRUE(controller_alive))
+    stop("Live-controller reservations cannot be administratively reconciled.")
+  reservations$state[reservations$state == "reserved"] <- "worker_terminated"
+  validate_v021_reservations(reservations, policy)
+  reservations
+}
+
+v021_task_attempt_number <- function(status, task_ordinal, next_attempt = FALSE) {
+  if (!is.list(status) || !is.data.frame(status$tasks))
+    stop("Invalid V021 task status for reservation identity.")
+  i <- match(as.integer(task_ordinal), status$tasks$task_ordinal)
+  if (is.na(i)) stop("Unknown task ordinal for reservation identity.")
+  value <- as.integer(status$tasks$attempt_count[[i]])
+  if (isTRUE(next_attempt)) value <- value + 1L
+  if (value < 1L) stop("Reservation attempt identity is not active.")
+  value
+}
+
+with_v021_predictive_reservation <- function(
+    result, reservations, policy, task_identity, attempt_number,
+    evaluator, persist = function(x) invisible(NULL)) {
+  if (!is.function(evaluator) || !is.function(persist))
+    stop("Predictive evaluator and reservation persistence must be functions.")
+  current <- reserve_v021_capacity(
+    reservations, policy, task_identity, attempt_number, "kfold_fit")
+  persist(current)
+  released <- FALSE
+  on.exit({
+    if (!released) {
+      current <- release_v021_capacity(
+        current, policy, task_identity, attempt_number, "kfold_fit",
+        worker_terminated = TRUE)
+      persist(current)
+      released <- TRUE
+    }
+  }, add = TRUE)
+  value <- evaluator(result)
+  current <- release_v021_capacity(
+    current, policy, task_identity, attempt_number, "kfold_fit",
+    worker_terminated = TRUE)
+  persist(current)
+  released <- TRUE
+  list(result = value, reservations = current)
+}
+
 build_v021_full_config <- function(output_root) {
   if (!is.character(output_root) || length(output_root) != 1L || is.na(output_root) ||
       !nzchar(output_root)) stop("output_root must be one path.")
