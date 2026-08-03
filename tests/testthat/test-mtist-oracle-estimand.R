@@ -54,6 +54,150 @@ test_that("subject boundaries produce no cross-subject predecessor", {
   expect_equal(out[[4]], 1)
 })
 
+oracle_transition_fixture <- function(subject = rep("a", 5), time = 0:4) {
+  taxa <- c("species_4", "species_7", "rest")
+  abundance <- cbind(
+    species_4 = c(2, 3, 5, 8, 13),
+    species_7 = c(3, 4, 6, 7, 9),
+    rest = c(5, 6, 7, 9, 11)
+  )
+  list(
+    abundance = abundance,
+    metadata = data.frame(subject = subject, time = time),
+    taxa = taxa
+  )
+}
+
+test_that("raw oracle retains T minus one adjacent transitions including the final interval", {
+  fixture <- oracle_transition_fixture()
+  out <- oracle_raw_design(
+    fixture$abundance, fixture$metadata,
+    target = "species_4", source = "species_7", taxa = fixture$taxa
+  )
+  relative <- fixture$abundance / rowSums(fixture$abundance)
+  zi <- log(relative[, "species_4"] / relative[, "rest"])
+  zj <- log(relative[, "species_7"] / relative[, "rest"])
+
+  expect_equal(nrow(out), 4L)
+  expect_equal(out$predecessor_row, 1:4)
+  expect_equal(out$outcome_row, 2:5)
+  expect_equal(out$predecessor_time, 0:3)
+  expect_equal(out$time, 1:4)
+  expect_equal(out$dt, rep(1, 4))
+  expect_equal(out$xi_unscaled, zi[1:4])
+  expect_equal(out$xj_unscaled, zj[1:4])
+  expect_equal(out$y, diff(zi))
+  expect_identical(out$outcome_row[[4L]], 5L)
+})
+
+test_that("outcome-aligned derivative uses outcome rows", {
+  fixture <- oracle_transition_fixture()
+  derivative <- c(10, 20, 30, 40, 50)
+  out <- oracle_raw_design(
+    fixture$abundance, fixture$metadata,
+    target = "species_4", source = "species_7", taxa = fixture$taxa,
+    derivative = derivative
+  )
+  expect_equal(out$y, derivative[2:5])
+  expect_equal(out$predecessor_row, 1:4)
+  expect_equal(out$outcome_row, 2:5)
+})
+
+test_that("invalid observations remove adjacent intervals without bridging", {
+  fixture <- oracle_transition_fixture()
+  fixture$abundance[3, "species_7"] <- NA_real_
+  out <- oracle_raw_design(
+    fixture$abundance, fixture$metadata,
+    target = "species_4", source = "species_7", taxa = fixture$taxa
+  )
+  expect_equal(out$predecessor_row, c(1L, 4L))
+  expect_equal(out$outcome_row, c(2L, 5L))
+  expect_false(any(out$predecessor_row == 2L & out$outcome_row == 4L))
+})
+
+test_that("raw oracle never bridges subjects", {
+  one <- oracle_transition_fixture()
+  abundance <- rbind(one$abundance[1:3, ], one$abundance[1:3, ])
+  metadata <- data.frame(
+    subject = c(rep("a", 3), rep("b", 3)),
+    time = rep(0:2, 2)
+  )
+  out <- oracle_raw_design(
+    abundance, metadata,
+    target = "species_4", source = "species_7", taxa = one$taxa
+  )
+  expect_equal(as.integer(table(out$subject)), c(2L, 2L))
+  expect_equal(names(table(out$subject)), c("a", "b"))
+  expect_false(any(out$predecessor_row == 3L & out$outcome_row == 4L))
+})
+
+test_that("raw oracle rejects invalid adjacent dt", {
+  fixture <- oracle_transition_fixture(time = c(0, 1, 1, 3, 4))
+  expect_error(
+    oracle_raw_design(
+      fixture$abundance, fixture$metadata,
+      target = "species_4", source = "species_7", taxa = fixture$taxa
+    ),
+    "strictly positive dt"
+  )
+  fixture$metadata$time[[3L]] <- NA_real_
+  expect_error(
+    oracle_raw_design(
+      fixture$abundance, fixture$metadata,
+      target = "species_4", source = "species_7", taxa = fixture$taxa
+    ),
+    "complete and finite"
+  )
+})
+
+test_that("projection activates subject adjustment for character and factor subjects", {
+  subject <- rep(c("a", "b"), each = 5)
+  xi <- rep(c(-2, -1, 0, 1, 2), 2)
+  xj <- c(2, -1, 1, -2, 0, -1, 2, -2, 1, 0)
+  subject_shift <- ifelse(subject == "b", 20, 0)
+  y <- 3 + subject_shift + .4 * xi - .7 * xj
+
+  character_result <- oracle_projection(y, xi, xj, subject)
+  factor_result <- oracle_projection(y, xi, xj, factor(subject))
+  expect_true(character_result$identifiable)
+  expect_equal(character_result$coefficient, -.7, tolerance = 1e-12)
+  expect_equal(character_result$columns, 4L)
+  expect_equal(factor_result, character_result)
+})
+
+test_that("single-subject projection retains the original branch", {
+  xi <- c(-2, -1, 0, 1, 2)
+  xj <- c(2, -1, 1, -2, 0)
+  y <- 3 + .4 * xi - .7 * xj
+  character_result <- oracle_projection(y, xi, xj, rep("a", 5))
+  factor_result <- oracle_projection(y, xi, xj, factor(rep("a", 5)))
+  expect_equal(character_result$coefficient, -.7, tolerance = 1e-12)
+  expect_equal(character_result$columns, 3L)
+  expect_equal(factor_result, character_result)
+})
+
+test_that("species_7 to species_4 focused path uses corrected transitions and projection", {
+  fixture <- oracle_transition_fixture(
+    subject = rep(c("a", "b"), each = 5), time = rep(0:4, 2)
+  )
+  fixture$abundance <- rbind(fixture$abundance, fixture$abundance * 1.1)
+  design <- oracle_raw_design(
+    fixture$abundance, fixture$metadata,
+    target = "species_4", source = "species_7", taxa = fixture$taxa
+  )
+  projection <- oracle_projection(
+    design$y, design$xi, design$xj, design$subject
+  )
+  expect_equal(nrow(design), 8L)
+  expect_equal(as.integer(table(design$subject)), c(4L, 4L))
+  expect_equal(names(table(design$subject)), c("a", "b"))
+  expect_equal(max(design$outcome_row[design$subject == "a"]), 5L)
+  expect_equal(max(design$outcome_row[design$subject == "b"]), 10L)
+  expect_true(is.list(projection))
+  expect_true(all(c("coefficient", "sign", "rank", "condition") %in%
+                    names(projection)))
+})
+
 test_that("oracle values are not converted to zero", {
   A <- matrix(c(0, .2, -.4, 0), 2, 2,
               dimnames = list(c("i", "j"), c("i", "j")))

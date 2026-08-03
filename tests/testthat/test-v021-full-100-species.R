@@ -12,7 +12,7 @@ test_that("full benchmark configuration is exact and deterministic", {
   b <- build_v021_full_config(tempdir())
   expect_identical(a, b)
   expect_silent(validate_v021_full_config(a))
-  expect_identical(a$benchmark_schema, "v021_full_100_species_v1")
+  expect_identical(a$benchmark_schema, "v021_full_100_species_v2")
   expect_identical(a$chains, 4L)
   expect_identical(a$iter_warmup, 2000L)
   expect_identical(a$iter_sampling, 2000L)

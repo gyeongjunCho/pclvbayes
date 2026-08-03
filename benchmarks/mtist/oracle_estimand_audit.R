@@ -25,14 +25,20 @@ oracle_contrast <- function(x, target, source, A, taxa) {
 }
 
 oracle_projection <- function(y, xi, xj, subject, tolerance = 1e-10) {
+  subject_value <- as.character(subject)
   dat <- data.frame(y = y, xi = xi, xj = xj,
-                    subject = factor(subject), stringsAsFactors = FALSE)
+                    subject = factor(subject_value), stringsAsFactors = FALSE)
   if (any(!is.finite(dat$y)) || any(!is.finite(dat$xi)) ||
-      any(!is.finite(dat$xj)))
+      any(!is.finite(dat$xj)) || anyNA(subject_value) ||
+      any(!nzchar(subject_value)))
     return(list(coefficient = NA_real_, sign = NA_integer_, rank = NA_integer_,
                 columns = NA_integer_, condition = NA_real_,
                 identifiable = FALSE, reason = "non_finite_design"))
-  X <- if (nlevels(dat) >= 2L) stats::model.matrix(~ subject + xi + xj, dat) else stats::model.matrix(~ xi + xj, dat)
+  n_subjects <- length(unique(subject_value))
+  X <- if (n_subjects >= 2L)
+    stats::model.matrix(~ subject + xi + xj, dat)
+  else
+    stats::model.matrix(~ xi + xj, dat)
   qr_x <- qr(X, tol = tolerance)
   if (qr_x$rank < ncol(X))
     return(list(coefficient = NA_real_, sign = NA_integer_, rank = qr_x$rank,
@@ -46,30 +52,67 @@ oracle_projection <- function(y, xi, xj, subject, tolerance = 1e-10) {
 
 oracle_raw_design <- function(abundance, metadata, target, source, taxa,
                               derivative = NULL) {
-  rows <- vector("list", length(unique(metadata$subject)))
-  subjects <- unique(metadata$subject)
+  if (!is.matrix(abundance) || nrow(abundance) != nrow(metadata) ||
+      !all(c("subject", "time") %in% names(metadata)) ||
+      !all(taxa %in% colnames(abundance)) ||
+      !all(c(target, source) %in% taxa) ||
+      !length(setdiff(taxa, c(target, source))))
+    stop("Malformed oracle raw-design inputs.")
+  if (!is.null(derivative) && length(derivative) != nrow(metadata))
+    stop("Oracle derivative must align with observation rows.")
+  subject_values <- as.character(metadata$subject)
+  if (anyNA(subject_values) || any(!nzchar(subject_values)) ||
+      any(!is.finite(metadata$time)))
+    stop("Oracle subject and time values must be complete and finite.")
+
+  rows <- vector("list", length(unique(subject_values)))
+  subjects <- unique(subject_values)
   for (s in seq_along(subjects)) {
     subject <- subjects[[s]]
-    ix <- which(metadata$subject == subject)
+    ix <- which(subject_values == subject)
     ix <- ix[order(metadata$time[ix])]
+    if (length(ix) < 2L) next
+    predecessor <- seq_len(length(ix) - 1L)
+    outcome <- predecessor + 1L
+    time <- as.numeric(metadata$time[ix])
+    dt <- time[outcome] - time[predecessor]
+    if (any(!is.finite(dt)) || any(dt <= 0))
+      stop("Oracle adjacent intervals require finite, strictly positive dt.")
+
     x <- abundance[ix, taxa, drop = FALSE]
-    relative <- x / rowSums(x)
+    total <- rowSums(x)
+    valid_observation <- apply(is.finite(x) & x >= 0, 1L, all) &
+      is.finite(total) & total > 0
+    relative <- matrix(NA_real_, nrow = nrow(x), ncol = ncol(x),
+                       dimnames = dimnames(x))
+    relative[valid_observation, ] <-
+      x[valid_observation, , drop = FALSE] / total[valid_observation]
     rest <- setdiff(taxa, c(target, source))
-    zi <- log(relative[, target] / rowSums(relative[, rest, drop = FALSE]))
-    zj <- log(relative[, source] / rowSums(relative[, rest, drop = FALSE]))
-    current <- seq_len(nrow(x) - 1L)
-    retained <- current[-1L]
+    rest_total <- rowSums(relative[, rest, drop = FALSE])
+    zi <- log(relative[, target] / rest_total)
+    zj <- log(relative[, source] / rest_total)
     if (is.null(derivative)) {
-      response <- diff(zi[current]) / diff(metadata$time[ix][current])
+      response <- (zi[outcome] - zi[predecessor]) / dt
     } else {
-      response <- derivative[ix[current[-length(current)]]]
+      response <- as.numeric(derivative[ix[outcome]])
     }
+    keep <- valid_observation[predecessor] & valid_observation[outcome] &
+      is.finite(zi[predecessor]) & is.finite(zi[outcome]) &
+      is.finite(zj[predecessor]) & is.finite(response)
     rows[[s]] <- data.frame(
-      subject = subject, time = metadata$time[ix][retained],
-      y = response, xi_unscaled = zi[current[-length(current)]],
-      xj_unscaled = zj[current[-length(current)]])
+      subject = subject,
+      predecessor_row = ix[predecessor][keep],
+      outcome_row = ix[outcome][keep],
+      predecessor_time = time[predecessor][keep],
+      time = time[outcome][keep],
+      dt = dt[keep],
+      y = response[keep],
+      xi_unscaled = zi[predecessor][keep],
+      xj_unscaled = zj[predecessor][keep])
   }
-  dat <- do.call(rbind, rows)
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  dat <- if (length(rows)) do.call(rbind, rows) else data.frame()
+  if (!nrow(dat)) stop("No valid adjacent oracle transitions.")
   dat$xi_scale <- stats::sd(dat$xi_unscaled)
   dat$xj_scale <- stats::sd(dat$xj_unscaled)
   dat$xi <- (dat$xi_unscaled - mean(dat$xi_unscaled)) / dat$xi_scale

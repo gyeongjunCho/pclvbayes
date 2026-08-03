@@ -1,6 +1,6 @@
 # Benchmark-only full 100-species execution contract for ROADMAP V021-06.
 
-v021_full_schema <- "v021_full_100_species_v1"
+v021_full_schema <- "v021_full_100_species_v2"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
 v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
 v021_full_cleanup_audit_schema <- "v021_full_cleanup_audit_v1"
