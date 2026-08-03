@@ -197,6 +197,28 @@ prepare_v021_resource_dry_run <- function(prepared, policy) {
     sampling_launched = FALSE)
 }
 
+v021_full_observed_support_input <- function(runtime_context, task) {
+  if (!is.list(runtime_context) ||
+      !all(c("meta_df", "sm_mat") %in% names(runtime_context)) ||
+      !is.data.frame(task) || nrow(task) != 1L)
+    stop("Invalid V021 observed-support runtime input.")
+  meta <- runtime_context$meta_df
+  sm <- runtime_context$sm_mat
+  sample_order <- match(as.character(meta$Sample), colnames(sm))
+  if (anyNA(sample_order) || anyDuplicated(sample_order) ||
+      !all(c(task$source[[1L]], task$target[[1L]]) %in% rownames(sm)))
+    stop("Observed-support sample or taxon identity mismatch.")
+  source <- as.numeric(sm[task$source[[1L]], sample_order])
+  target <- as.numeric(sm[task$target[[1L]], sample_order])
+  rest <- 1 - source - target
+  data.frame(
+    subject = as.character(meta$subject), time = as.numeric(meta$time),
+    source_abundance = source, target_abundance = target,
+    rest_abundance = rest,
+    eligible = is.finite(source) & is.finite(target) & is.finite(rest) & rest >= 0,
+    stringsAsFactors = FALSE)
+}
+
 .v021_trace_sensitive_name <- function(x) {
   grepl("truth|study|draw|posterior|sample_matrix|coefficient_matrix",
         x, ignore.case = TRUE)

@@ -51,8 +51,6 @@ v021_feature_missing_states <- c(
   c("kfold_folds_failed", "predictive_completion", "integer", "nullable", "folds", "retained inference", "copied; never recomputed"),
   c("elpd_available", "predictive_completion", "logical", "nullable", "boolean", "retained inference", "copied; never recomputed"),
   c("aggregate_elpd", "predictive_completion", "double", "nullable", "log predictive density", "retained inference", "copied; never recomputed"),
-  c("stacking_available", "predictive_completion", "logical", "nullable", "boolean", "retained inference", "copied; never recomputed"),
-  c("stacking_weight", "predictive_completion", "double", "nullable", "weight", "retained inference", "copied; never recomputed"),
 
   c("n_subjects", "design_temporal", "integer", "nullable", "subjects", "approved truth-free design fixture", "number of unique non-missing subject identifiers"),
   c("n_timepoints", "design_temporal", "integer", "nullable", "observations", "approved truth-free design fixture", "number of finite time observations"),
@@ -202,7 +200,6 @@ build_v021_diagnostic_feature_record <- function(retained_record,
     kfold_attempted = "kfold_attempted", kfold_completed = "kfold_completed",
     kfold_folds_ok = "kfold_folds_ok", kfold_folds_failed = "kfold_folds_failed",
     elpd_available = "elpd_available", aggregate_elpd = "aggregate_elpd",
-    stacking_available = "stacking_available", stacking_weight = "stacking_weight",
     pair_sample_count = "n_pairs", zero_fraction = "zero_fraction", dominance = "dominance",
     effective_sample_fraction = "effective_sample_fraction", usable_pair_fraction = "usable_pair_fraction"
   )

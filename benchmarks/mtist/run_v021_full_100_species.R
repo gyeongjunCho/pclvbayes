@@ -10,6 +10,7 @@ source(file.path(script_dir, "v021_truth_isolation.R"))
 source(file.path(script_dir, "v021_resource_policy.R"))
 source(file.path(script_dir, "v021_checkpoint_manifest.R"))
 source(file.path(script_dir, "v021_diagnostic_features.R"))
+source(file.path(script_dir, "v021_robustness_features.R"))
 source(file.path(script_dir, "v021_four_chain_preflight.R"))
 source(file.path(script_dir, "v021_full_100_species.R"))
 
@@ -60,6 +61,7 @@ dir.create(paths$output_root, recursive = TRUE, showWarnings = FALSE)
 for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "inference_artifacts"),
                file.path(paths$output_root, "feature_records"),
+               file.path(paths$output_root, "robustness_feature_records"),
                file.path(paths$output_root, "worker_registries"),
                file.path(paths$output_root, "batch_ownership"),
                file.path(paths$output_root, "failure_traces"),
@@ -327,11 +329,38 @@ store_outcome <- function(i, result, elapsed) {
     feature <- build_v021_diagnostic_feature_record(
       retained, observations$design,
       list(chains = config$chains, iter_sampling = config$iter_sampling))
-    set_v021_failure_trace_phase(parent_trace, "feature_generation", completed = TRUE)
     .v021_atomic_save_rds(artifact, file.path(paths$output_root, "inference_artifacts",
       paste0(manifest$direction_id[[i]], ".rds")))
     .v021_atomic_save_rds(feature, file.path(paths$output_root, "feature_records",
       paste0(manifest$direction_id[[i]], ".rds")))
+    observed_support <- calculate_v021_observed_support_features(
+      v021_full_observed_support_input(approved_runtime, tasks[i, , drop = FALSE]))
+    posterior_stability <- extract_v021_posterior_stability_features(list(
+      finalized = TRUE, terminal_state = "completed",
+      posterior_mean = retained$posterior_mean,
+      posterior_median = retained$posterior_median,
+      posterior_sd = retained$posterior_sd,
+      interval_lower = retained$posterior_interval_lower,
+      interval_upper = retained$posterior_interval_upper,
+      psp = retained$p_sign2, lfsr = retained$lfsr,
+      rhat_max = retained$rhat, bulk_ess_min = retained$ess_bulk,
+      tail_ess_min = retained$ess_tail,
+      divergence_count = retained$divergences,
+      treedepth_hit_count = retained$treedepth_hits,
+      ebfmi_min = retained$ebfmi_min,
+      retry_count = max(length(result$retry_history[[1L]]) - 1L, 0L),
+      diagnostic_class = retained$diagnostic_class,
+      predictive_eligible = retained$bayesian_eligible,
+      elpd = NA_real_, successful_test_observation_count = 0L,
+      folds_attempted = 0L, folds_failed = 0L))
+    robustness <- build_v021_robustness_feature_artifact(
+      prepared_execution$manifest, tasks$direction_index[[i]], observed_support,
+      posterior_stability, code_provenance = git_commit)
+    write_v021_robustness_feature_artifact_atomic(
+      robustness, file.path(paths$output_root, "robustness_feature_records",
+                            paste0(manifest$direction_id[[i]], ".rds")),
+      prepared_execution$manifest)
+    set_v021_failure_trace_phase(parent_trace, "feature_generation", completed = TRUE)
     checkpoint <- .v021_record_from_row(
       manifest[i, , drop = FALSE], "completed", elapsed_time = elapsed,
       retry_history = result$retry_history[[1L]] %||% list(), pathfinder_used = FALSE,

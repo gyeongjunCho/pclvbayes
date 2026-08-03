@@ -14,7 +14,7 @@ v021_feature_fixture <- function() list(
   residual_regime_disagreement = FALSE, kfold_attempted = TRUE,
   kfold_completed = TRUE, kfold_folds_ok = 5L, kfold_folds_failed = 0L,
   elpd_available = TRUE, aggregate_elpd = -12.5,
-  stacking_available = TRUE, stacking_weight = 0.65, n_pairs = 24L
+  n_pairs = 24L
 )
 
 test_that("V021-04 schema is versioned, ordered, unique, and reproducible", {
@@ -68,10 +68,10 @@ test_that("diagnostic and predictive fields are copied without computation", {
   fields <- c("rhat", "bulk_ess", "tail_ess", "divergence_count",
               "treedepth_saturation_count", "ebfmi_min", "chain_sign_agreement",
               "diagnostic_class", "bayesian_eligible", "kfold_completed",
-              "aggregate_elpd", "stacking_weight")
+              "aggregate_elpd")
   expected <- c("rhat", "ess_bulk", "ess_tail", "divergences", "treedepth_hits",
                 "ebfmi_min", "chain_sign_agreement", "diagnostic_class",
-                "bayesian_eligible", "kfold_completed", "aggregate_elpd", "stacking_weight")
+                "bayesian_eligible", "kfold_completed", "aggregate_elpd")
   for (i in seq_along(fields)) expect_identical(record$values[[fields[[i]]]], source[[expected[[i]]]])
 })
 
