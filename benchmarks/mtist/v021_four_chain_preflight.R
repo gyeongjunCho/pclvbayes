@@ -3,7 +3,7 @@
 v021_preflight_schema <- "v021_four_chain_preflight_v1"
 v021_preflight_selection_rule <- paste(
   "MTIST dataset 37; canonical direction index from seed 20260802;",
-  "first four direction_index rows; no truth or outcome fields inspected"
+  "first two direction_index rows; no truth or outcome fields inspected"
 )
 
 build_v021_four_chain_preflight_config <- function(output_root) {
@@ -11,11 +11,11 @@ build_v021_four_chain_preflight_config <- function(output_root) {
       !nzchar(output_root)) stop("output_root must be one path.")
   list(
     preflight_schema = v021_preflight_schema,
-    dataset_id = "37", seed = 20260802L, selected_direction_count = 4L,
+    dataset_id = "37", seed = 20260802L, selected_direction_count = 2L,
     selection_rule = v021_preflight_selection_rule,
     chains = 4L, iter_warmup = 2000L, iter_sampling = 2000L,
     nominal_retained_draws = 8000L, maximum_simultaneous_fits = 2L,
-    run_kfold = FALSE, use_pathfinder = FALSE, controlled_interrupt_direction = 4L,
+    run_kfold = TRUE, use_pathfinder = FALSE,
     output_root = normalizePath(output_root, mustWork = FALSE)
   )
 }
@@ -25,20 +25,19 @@ validate_v021_four_chain_preflight_config <- function(config) {
     "preflight_schema", "dataset_id", "seed", "selected_direction_count",
     "selection_rule", "chains", "iter_warmup", "iter_sampling",
     "nominal_retained_draws", "maximum_simultaneous_fits", "run_kfold",
-    "use_pathfinder", "controlled_interrupt_direction", "output_root"
+    "use_pathfinder", "output_root"
   )
   if (!is.list(config) || !identical(names(config), expected) ||
       !identical(config$preflight_schema, v021_preflight_schema))
     stop("Invalid V021-05 preflight configuration.")
   if (!identical(config$dataset_id, "37") || !identical(config$seed, 20260802L) ||
-      !identical(config$selected_direction_count, 4L) ||
+      !identical(config$selected_direction_count, 2L) ||
       !identical(config$selection_rule, v021_preflight_selection_rule) ||
       !identical(config$chains, 4L) || !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
       !identical(config$maximum_simultaneous_fits, 2L) ||
-      !identical(config$run_kfold, FALSE) || !identical(config$use_pathfinder, FALSE) ||
-      !identical(config$controlled_interrupt_direction, 4L))
+      !identical(config$run_kfold, TRUE) || !identical(config$use_pathfinder, FALSE))
     stop("Preflight configuration does not match the frozen V021-05 contract.")
   invisible(TRUE)
 }
@@ -68,16 +67,16 @@ register_v021_preflight_worker <- function(pid, expected_ppid, worker_role,
                    error = identity)
   if (inherits(stat, "error") || !length(stat))
     stop("Outer-worker procfs identity is unavailable at registration.")
-  identity <- .v021_parse_linux_stat(stat[[1L]], pid)
-  if (!identical(identity$ppid, expected_ppid) ||
-      !identity$process_state %in% .v021_linux_non_zombie_states)
+  process_identity <- .v021_parse_linux_stat(stat[[1L]], pid)
+  if (!identical(process_identity$ppid, expected_ppid) ||
+      !process_identity$process_state %in% .v021_linux_non_zombie_states)
     stop("Outer-worker PPID, ancestry, or process state is invalid at registration.")
   build_v021_worker_registry(
-    pid, identity$start_time, expected_ppid, worker_role, batch_id, task_id,
+    pid, process_identity$start_time, expected_ppid, worker_role, batch_id, task_id,
     as.character(clock()))
 }
 
-select_v021_preflight_tasks <- function(task_table, count = 4L) {
+select_v021_preflight_tasks <- function(task_table, count = 2L) {
   required <- c("task_id", "direction_index", "target", "source", "seed")
   if (!is.data.frame(task_table) || !all(required %in% names(task_table)))
     stop("task_table lacks canonical direction identity.")
@@ -142,6 +141,12 @@ validate_v021_preflight_monitor <- function(monitor, policy) {
   invisible(TRUE)
 }
 
+v021_preflight_successful_test_observation_count <- function(value) {
+  if (is.null(value) || length(value) != 1L || is.na(value) || !is.finite(value) ||
+      value < 0 || value != as.integer(value)) return(0L)
+  as.integer(value)
+}
+
 v021_preflight_retained_record <- function(task, fit_result) {
   if (!is.list(fit_result) || inherits(fit_result, "pclv_failure"))
     stop("A retained directional fit result is required.")
@@ -166,9 +171,14 @@ v021_preflight_retained_record <- function(task, fit_result) {
     residual_identifiable = fit_result$residual_identifiable,
     bayesian_eligible = identical(fit_result$diagnostic_class, "converged"),
     residual_regime_disagreement = fit_result$residual_regime_disagreement,
-    kfold_attempted = FALSE, kfold_completed = FALSE, kfold_folds_ok = 0L,
-    kfold_folds_failed = 0L, elpd_available = FALSE,
-    aggregate_elpd = NA_real_, aggregate_elpd_missing_state = "not_executed",
+    kfold_attempted = !is.null(fit_result$kfold),
+    kfold_completed = !is.null(fit_result$kfold) && !isTRUE(fit_result$kfold_failed),
+    kfold_folds_ok = fit_result$kfold_n_folds_ok %||% 0L,
+    kfold_folds_failed = fit_result$kfold_n_folds_fail %||% 0L,
+    elpd_available = is.finite(fit_result$kfold_mean %||% NA_real_),
+    aggregate_elpd = fit_result$kfold_mean %||% NA_real_,
+    aggregate_elpd_missing_state = if (is.finite(fit_result$kfold_mean %||% NA_real_))
+      "observed" else if (is.null(fit_result$kfold)) "not_executed" else "failed",
     stacking_available = FALSE, stacking_weight = NA_real_,
     stacking_weight_missing_state = "not_executed", n_pairs = fit_result$n_pairs
   )

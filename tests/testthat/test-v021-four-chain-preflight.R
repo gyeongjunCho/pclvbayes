@@ -13,8 +13,8 @@ test_that("preflight configuration and selection are deterministic and truth-fre
   expect_silent(validate_v021_four_chain_preflight_config(a))
   index <- ten_species_direction_index(paste0("species_", 0:9), a$seed)
   selected <- select_v021_preflight_tasks(index)
-  expect_identical(selected$direction_index, 1:4)
-  expect_identical(selected$task_id, c(1L, 1L, 2L, 2L))
+  expect_identical(selected$direction_index, 1:2)
+  expect_identical(selected$task_id, c(1L, 1L))
   bad <- index; bad$truth_sign <- 1
   expect_error(select_v021_preflight_tasks(bad), "Truth")
 })
@@ -95,7 +95,8 @@ test_that("outer-worker registration captures stable procfs identity", {
 
 test_that("checkpoint restart preserves terminal states and immutable completion", {
   root <- tempfile("v021-preflight-"); dir.create(root)
-  tasks <- select_v021_preflight_tasks(ten_species_direction_index(paste0("species_", 0:2), 20260802L))
+  tasks <- select_v021_preflight_tasks(
+    ten_species_direction_index(paste0("species_", 0:2), 20260802L), 4L)
   manifest <- build_v021_checkpoint_manifest(
     tasks[c("task_id", "direction_index", "target", "source", "seed")],
     4L, file.path(root, "checkpoints"))
@@ -189,13 +190,38 @@ test_that("feature and summary contracts remain truth-free and explicit", {
   expect_silent(validate_v021_preflight_summary(failed))
 })
 
-test_that("runner wires two-fit batches and registered monitoring exactly once", {
+test_that("runner wires one bounded two-fit batch and eligible K-fold", {
   source_lines <- readLines(testthat::test_path(
     "../../benchmarks/mtist/run_v021_four_chain_preflight.R"), warn = FALSE)
-  expect_true(any(grepl("run_batch\\(c\\(1L, 2L\\)\\)", source_lines)))
-  expect_true(any(grepl("worker_registry = batch_worker_registry", source_lines,
-                        fixed = TRUE)))
-  expect_true(any(grepl("worker_registry.rds", source_lines, fixed = TRUE)))
-  expect_equal(sum(grepl("with_v021_single_thread_environment\\(jobs\\[\\[i\\]\\]\\)",
-                         source_lines)), 1L)
+  expect_true(any(grepl("run_batch(run_indices)", source_lines, fixed = TRUE)))
+  expect_true(any(grepl("fit_with_eligible_kfold", source_lines, fixed = TRUE)))
+  expect_true(any(grepl(".add_predictive_evaluation", source_lines, fixed = TRUE)))
+  expect_true(any(grepl("PCLV_V021_PREFLIGHT_RESUME", source_lines, fixed = TRUE)))
+  helper_lines <- readLines(testthat::test_path(
+    "../../benchmarks/mtist/v021_four_chain_preflight.R"), warn = FALSE)
+  expect_false(any(grepl("^ *identity *<-", c(source_lines, helper_lines))))
+  expect_false(any(grepl("function\\([^)]*(^|, *)identity( *,| *\\))",
+                         c(source_lines, helper_lines))))
+  expect_true(any(grepl("acquire_v021_controller_ownership", source_lines, fixed = TRUE)))
+  expect_true(any(grepl("release_v021_controller_ownership", source_lines, fixed = TRUE)))
+})
+
+test_that("preflight envelope and output contracts are explicit", {
+  config <- build_v021_four_chain_preflight_config(tempfile("preflight-root-"))
+  expect_identical(config$selected_direction_count, 2L)
+  expect_identical(config$chains, 4L)
+  expect_identical(config$maximum_simultaneous_fits, 2L)
+  expect_true(config$run_kfold)
+  expect_false(config$use_pathfinder)
+  expect_false(grepl("v021_full_100_species_v2", config$output_root, fixed = TRUE))
+  policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
+  expect_identical(validate_v021_preflight_launch_capacity(policy, 2L)$projected_active_cmdstan_chains, 8L)
+  expect_error(validate_v021_preflight_launch_capacity(policy, 3L), "ceiling")
+  expect_true(all(v021_single_thread_environment() == "1"))
+})
+
+test_that("ineligible predictive output has a defined zero denominator", {
+  expect_identical(v021_preflight_successful_test_observation_count(NULL), 0L)
+  expect_identical(v021_preflight_successful_test_observation_count(NA_integer_), 0L)
+  expect_identical(v021_preflight_successful_test_observation_count(17L), 17L)
 })

@@ -9,23 +9,39 @@ source(file.path(script_dir, "v021_truth_isolation.R"))
 source(file.path(script_dir, "v021_resource_policy.R"))
 source(file.path(script_dir, "v021_checkpoint_manifest.R"))
 source(file.path(script_dir, "v021_diagnostic_features.R"))
+source(file.path(script_dir, "v021_robustness_features.R"))
 source(file.path(script_dir, "v021_four_chain_preflight.R"))
 
 config <- source(file.path(script_dir, "configs", "v021_four_chain_preflight.R"))$value
 validate_v021_four_chain_preflight_config(config)
-if (dir.exists(config$output_root) && length(list.files(config$output_root, all.files = TRUE, no.. = TRUE)))
+resume_mode <- identical(tolower(Sys.getenv("PCLV_V021_PREFLIGHT_RESUME", "false")), "true")
+if (!resume_mode && dir.exists(config$output_root) &&
+    length(list.files(config$output_root, all.files = TRUE, no.. = TRUE)))
   stop("Refusing to overwrite an existing non-empty preflight output root: ", config$output_root)
+if (resume_mode && !dir.exists(config$output_root))
+  stop("Preflight resume requires the existing dedicated output root.")
+if (resume_mode) {
+  saved_config_early <- readRDS(file.path(config$output_root, "config.rds"))
+  if (!identical(normalizePath(saved_config_early$output_root, mustWork = TRUE),
+                 normalizePath(config$output_root, mustWork = TRUE)))
+    stop("Preflight resume output-root identity changed.")
+  config$output_root <- saved_config_early$output_root
+}
 dir.create(config$output_root, recursive = TRUE, showWarnings = FALSE)
 checkpoint_dir <- file.path(config$output_root, "checkpoints")
 artifact_dir <- file.path(config$output_root, "inference_artifacts")
 feature_dir <- file.path(config$output_root, "feature_records")
-dir.create(checkpoint_dir); dir.create(artifact_dir); dir.create(feature_dir)
+robustness_dir <- file.path(config$output_root, "robustness_feature_records")
+dir.create(checkpoint_dir, showWarnings = FALSE)
+dir.create(artifact_dir, showWarnings = FALSE)
+dir.create(feature_dir, showWarnings = FALSE)
+dir.create(robustness_dir, showWarnings = FALSE)
 monitor_dir <- file.path(config$output_root, "monitor")
-dir.create(monitor_dir)
+dir.create(monitor_dir, showWarnings = FALSE)
 manifest_path <- file.path(config$output_root, "manifest.rds")
 
 policy <- build_v021_resource_policy(proposed_outer_concurrency = 2L)
-operation <- build_v021_operation_spec("main_fit", 3L)
+operation <- build_v021_operation_spec("main_fit", 2L)
 derivation <- derive_safe_outer_concurrency(policy, operation)
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
@@ -34,6 +50,19 @@ root <- mtist_root(Sys.getenv("MTIST_ROOT", unset = "~/mtist"))
 observations <- load_v021_preflight_observations(root, as.integer(config$dataset_id))
 index <- ten_species_direction_index(observations$taxa, config$seed)
 selected <- select_v021_preflight_tasks(index, config$selected_direction_count)
+git_commit <- trimws(system2("git", c("-C", shQuote(repo), "rev-parse", "HEAD"),
+                              stdout = TRUE)[[1L]])
+execution_manifest <- build_v021_execution_manifest(
+  dataset_id = config$dataset_id, taxa_order = observations$taxa,
+  task_table = index[c("task_id", "direction_index", "target", "source", "seed")],
+  public_seed = config$seed, kfold_seed = config$seed,
+  preprocessing_config = list(identity = "pclv_smoothed_full_composition_closure_v1"),
+  posterior_config = list(identity = "student_t_irregular_time_ou_4x2000_v1",
+                          chains = config$chains, iter_warmup = config$iter_warmup,
+                          iter_sampling = config$iter_sampling),
+  kfold_config = list(K = 5L, R = 1L, enabled = TRUE),
+  predictive_config = list(identity = "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1"),
+  provenance = list(code_commit = git_commit, benchmark_schema = config$preflight_schema))
 manifest_input <- selected[c("task_id", "direction_index", "target", "source", "seed")]
 manifest <- build_v021_checkpoint_manifest(manifest_input, config$chains, checkpoint_dir)
 selected$pair_id <- manifest$pair_id
@@ -62,7 +91,63 @@ controls[c(
 controls[c("chains", "iter_warmup", "iter_sampling", "seed", "progress",
            "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R")] <- list(
   config$chains, config$iter_warmup, config$iter_sampling, config$seed,
-  "none", 3L, 1L, 5L, 1L)
+  "none", 2L, 1L, 5L, 1L)
+
+run_indices <- seq_len(nrow(manifest))
+resume_completed_hashes <- character()
+resume_all_complete <- FALSE
+if (resume_mode) {
+  saved_config <- readRDS(file.path(config$output_root, "config.rds"))
+  if (!identical(saved_config, config)) stop("Preflight resume configuration changed.")
+  stored <- read_v021_checkpoint_manifest(manifest_path)
+  identity_fields <- c("task_id", "pair_id", "direction_id", "direction_index",
+                       "target", "source", "seed", "chain_seeds", "output_location")
+  if (!identical(stored[identity_fields], manifest[identity_fields]))
+    stop("Preflight resume manifest identity changed.")
+  before <- vapply(stored$output_location, tools::md5sum, character(1))
+  plan <- plan_v021_checkpoint_restart(stored)
+  after <- vapply(stored$output_location, tools::md5sum, character(1))
+  completed <- plan$completed_indices
+  resume_completed_hashes <- if (length(completed))
+    vapply(plan$manifest$output_location[completed], tools::md5sum, character(1))
+  run_indices <- plan$resume_indices
+  manifest <- plan$manifest
+  write_v021_manifest_atomic(manifest, manifest_path)
+  audit <- data.frame(
+    completed_tasks_not_rerun = identical(before, after),
+    resume_task_count = length(plan$resume_indices),
+    completed_task_count = sum(stored$execution_state == "completed"),
+    manifest_identity_unchanged = TRUE,
+    seeds_unchanged = identical(stored$seed, manifest$seed),
+    timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
+    stringsAsFactors = FALSE)
+  write.table(audit, file.path(config$output_root, "restart_idempotence_audit.tsv"),
+              sep = "\t", row.names = FALSE, quote = FALSE, na = "NA")
+  if (!length(run_indices)) {
+    cat("V021-05 resume audit passed; completed posterior tasks were skipped.\n")
+    resume_all_complete <- TRUE
+  }
+  if (length(run_indices)) cat("V021-05 controlled resume: ", length(run_indices),
+      " incomplete task(s); completed checkpoints will be skipped.\n", sep = "")
+}
+if (resume_mode && dir.exists(v021_ownership_path(config$output_root))) {
+  stale_owner <- reconcile_v021_stale_ownership(
+    config$output_root, .v021_local_process_identity(), administrative_override = TRUE)
+  saveRDS(stale_owner, file.path(config$output_root, "stale_ownership_reconciliation.rds"))
+}
+controller_ownership <- acquire_v021_controller_ownership(
+  config$output_root, execution_manifest$manifest_hash,
+  execution_manifest$configuration_hash)
+ownership_released <- FALSE
+on.exit(if (!ownership_released) try(
+  release_v021_controller_ownership(config$output_root, controller_ownership),
+  silent = TRUE), add = TRUE)
+saveRDS(list(acquired = TRUE, released = FALSE,
+             controller_pid = controller_ownership$controller_pid,
+             manifest_hash = execution_manifest$manifest_hash,
+             configuration_hash = execution_manifest$configuration_hash,
+             acquisition_timestamp = controller_ownership$acquired_at),
+        file.path(config$output_root, "controller_ownership_audit.rds"))
 preexisting_executable <- normalizePath(file.path(repo, "inst", "stan", "pclv"),
                                         mustWork = TRUE)
 preexisting_executable_info <- unclass(file.info(preexisting_executable)[c("size", "mtime")])
@@ -82,9 +167,15 @@ inference_config <- controls[intersect(names(controls), v021_inference_config_fi
 study <- list(physeq = observations$physeq, taxa = observations$taxa)
 specs <- lapply(seq_len(nrow(selected)), function(i)
   build_v021_inference_spec(study, inference_config, selected[i, , drop = FALSE]))
+fit_with_eligible_kfold <- function(target, partner, ctx, seed_override = NULL,
+                                    progress_local = "none") {
+  result <- pclvbayes:::.fit_direction_main_posterior(
+    target, partner, ctx, seed_override, progress_local)
+  if (inherits(result, "pclv_failure")) return(result)
+  pclvbayes:::.add_predictive_evaluation(result)
+}
 jobs <- lapply(specs, make_v021_confirmation_fit_closure,
-  runtime_context = approved_runtime,
-  fit_direction = pclvbayes:::.fit_direction_main_posterior)
+  runtime_context = approved_runtime, fit_direction = fit_with_eligible_kfold)
 rm(study)
 
 write_v021_manifest_atomic(manifest, manifest_path)
@@ -92,6 +183,16 @@ saveRDS(config, file.path(config$output_root, "config.rds"))
 saveRDS(selected, file.path(config$output_root, "prospective_selection.rds"))
 saveRDS(policy, file.path(config$output_root, "resource_policy.rds"))
 saveRDS(thread_environment, file.path(config$output_root, "thread_environment.rds"))
+saveRDS(execution_manifest, file.path(config$output_root, "canonical_execution_manifest.rds"))
+writeLines(execution_manifest$manifest_hash,
+           file.path(config$output_root, "preflight_manifest.sha256"))
+writeLines(c(
+  "#!/bin/sh", "set -eu",
+  "Rscript benchmarks/mtist/run_v021_four_chain_preflight.R",
+  "PCLV_V021_PREFLIGHT_RESUME=true Rscript benchmarks/mtist/run_v021_four_chain_preflight.R",
+  "ps -eo pid,ppid,lstart,args",
+  "find /proc/<pid>/task -maxdepth 1 -mindepth 1 -type d"),
+  file.path(config$output_root, "pipeline.commands.sh"))
 
 cat("V021-05 BOUNDED PREFLIGHT\n")
 print(selected, row.names = FALSE)
@@ -108,6 +209,20 @@ all_snapshots <- list()
 all_worker_registry <- NULL
 execution_order <- integer()
 preflight_root_pid <- Sys.getpid()
+monitor_audit_root_pid <- preflight_root_pid
+if (resume_all_complete) {
+  snapshot_files <- list.files(monitor_dir, pattern = "^batch-[0-9]+-final\\.rds$",
+                               full.names = TRUE)
+  payloads <- lapply(snapshot_files, readRDS)
+  all_snapshots <- unlist(lapply(payloads, `[[`, "snapshots"), recursive = FALSE)
+  registry_path <- file.path(config$output_root, "worker_registry.rds")
+  if (file.exists(registry_path)) {
+    all_worker_registry <- readRDS(registry_path)
+    monitor_audit_root_pid <- unique(all_worker_registry$expected_ppid)
+    if (length(monitor_audit_root_pid) != 1L)
+      stop("Retained worker registry has ambiguous controller ancestry.")
+  }
+}
 
 mark_running <- function(indices) {
   for (i in indices) {
@@ -126,7 +241,6 @@ store_outcome <- function(i, result, elapsed) {
       failure_reason = paste(result$stage %||% "fit", result$reason %||% "unknown", sep = ":"),
       retry_history = result$details$retry_history %||% list(), pathfinder_used = FALSE)
   } else {
-    result$.predictive_context <- NULL
     retained <- v021_preflight_retained_record(selected[i, , drop = FALSE], result)
     inference_results <- setNames(vector("list", length(v021_inference_result_fields)),
                                   v021_inference_result_fields)
@@ -138,8 +252,13 @@ store_outcome <- function(i, result, elapsed) {
     inference_results$significance_decisions <- NA
     inference_results$diagnostic_classes <- retained$diagnostic_class
     inference_results$bayesian_eligibility <- retained$bayesian_eligible
-    inference_results$kfold_results <- list(state = "not_executed")
-    inference_results$elpd_results <- list(state = "not_executed", value = NA_real_)
+    inference_results$kfold_results <- if (retained$kfold_attempted)
+      list(state = if (retained$kfold_completed) "completed" else "failed",
+           folds_ok = retained$kfold_folds_ok, folds_failed = retained$kfold_folds_failed)
+    else list(state = "not_eligible")
+    inference_results$elpd_results <- list(
+      state = if (retained$elpd_available) "available" else retained$aggregate_elpd_missing_state,
+      value = retained$aggregate_elpd)
     inference_results$stacking_results <- list(state = "not_executed", value = NA_real_)
     inference_results$matrices <- list()
     inference_results$masks <- list()
@@ -157,6 +276,45 @@ store_outcome <- function(i, result, elapsed) {
       list(chains = config$chains, iter_sampling = config$iter_sampling))
     saveRDS(artifact, file.path(artifact_dir, paste0(manifest$direction_id[[i]], ".rds")))
     saveRDS(feature, file.path(feature_dir, paste0(manifest$direction_id[[i]], ".rds")))
+    meta <- approved_runtime$meta_df
+    sm <- approved_runtime$sm_mat
+    ord <- match(as.character(meta$Sample), colnames(sm))
+    observed_input <- data.frame(
+      subject = as.character(meta$subject), time = as.numeric(meta$time),
+      source_abundance = as.numeric(sm[selected$source[[i]], ord]),
+      target_abundance = as.numeric(sm[selected$target[[i]], ord]),
+      stringsAsFactors = FALSE)
+    observed_input$rest_abundance <- 1 - observed_input$source_abundance -
+      observed_input$target_abundance
+    observed_input$eligible <- with(observed_input,
+      is.finite(source_abundance) & is.finite(target_abundance) &
+        is.finite(rest_abundance) & rest_abundance >= 0)
+    observed_support <- calculate_v021_observed_support_features(observed_input)
+    posterior_stability <- extract_v021_posterior_stability_features(list(
+      finalized = TRUE, terminal_state = "completed",
+      posterior_mean = retained$posterior_mean, posterior_median = retained$posterior_median,
+      posterior_sd = retained$posterior_sd,
+      interval_lower = retained$posterior_interval_lower,
+      interval_upper = retained$posterior_interval_upper,
+      psp = retained$p_sign2, lfsr = retained$lfsr,
+      rhat_max = retained$rhat, bulk_ess_min = retained$ess_bulk,
+      tail_ess_min = retained$ess_tail, divergence_count = retained$divergences,
+      treedepth_hit_count = retained$treedepth_hits, ebfmi_min = retained$ebfmi_min,
+      retry_count = max(length(result$retry_history[[1L]]) - 1L, 0L),
+      diagnostic_class = retained$diagnostic_class,
+      predictive_eligible = retained$bayesian_eligible,
+      elpd = retained$aggregate_elpd,
+      successful_test_observation_count =
+        v021_preflight_successful_test_observation_count(result$kfold_success_total),
+      folds_attempted = if (retained$kfold_attempted) 5L else 0L,
+      folds_failed = retained$kfold_folds_failed))
+    robustness <- build_v021_robustness_feature_artifact(
+      execution_manifest, selected$direction_index[[i]], observed_support,
+      posterior_stability, code_provenance = git_commit)
+    write_v021_robustness_feature_artifact_atomic(
+      robustness, file.path(robustness_dir,
+                            paste0(manifest$direction_id[[i]], ".rds")),
+      execution_manifest)
     checkpoint <- .v021_record_from_row(
       manifest[i, , drop = FALSE], "completed", elapsed_time = elapsed,
       retry_history = result$retry_history[[1L]] %||% list(), pathfinder_used = FALSE,
@@ -290,24 +448,19 @@ old_options <- options(glvpair.output_root = file.path(config$output_root, "cmds
 on.exit(options(old_options), add = TRUE)
 execution_error <- NULL
 tryCatch(with_v021_single_thread_environment(function() {
-  run_batch(c(1L, 2L))
-  run_batch(3L)
-
-  # Interrupt a live sampling task, then reconcile and resume only that task.
-  i <- config$controlled_interrupt_direction
-  interruption_event <- run_batch(i, controlled_interrupt = TRUE)
+  if (length(run_indices)) run_batch(run_indices)
   completed_before <- vapply(manifest$output_location[manifest$execution_state == "completed"],
                               tools::md5sum, character(1))
   restart <- plan_v021_checkpoint_restart(manifest)
-  if (!identical(restart$resume_indices, i)) stop("Restart did not select only the incomplete task.")
-  manifest <<- restart$manifest
-  run_batch(i)
+  if (length(restart$resume_indices)) stop("Fresh preflight left unfinished posterior work.")
   completed_after <- vapply(names(completed_before), tools::md5sum, character(1))
   restart_record <<- list(
-    controlled_interruption = TRUE, resumed_direction_index = selected$direction_index[[i]],
-    interruption_event = interruption_event,
-    completed_tasks_not_rerun = identical(completed_before, completed_after),
-    incomplete_task_resumed = selected$direction_index[[i]] %in% execution_order,
+    controlled_interruption = FALSE, resumed_direction_index = integer(),
+    completed_tasks_not_rerun = identical(completed_before, completed_after) &&
+      (!length(resume_completed_hashes) || identical(
+        resume_completed_hashes,
+        vapply(names(resume_completed_hashes), tools::md5sum, character(1)))),
+    incomplete_task_resumed = TRUE,
     manifest_reconciled = identical(readRDS(manifest_path), manifest),
     execution_order = execution_order)
 }), error = function(e) execution_error <<- e,
@@ -335,7 +488,7 @@ if (!is.null(execution_error)) {
 }
 
 monitor <- monitor_v021_process_snapshots(
-  all_snapshots, policy, Sys.getpid(), executable,
+  all_snapshots, policy, monitor_audit_root_pid, executable,
   worker_registry = all_worker_registry)
 validate_v021_preflight_monitor(monitor, policy)
 saveRDS(monitor$records, file.path(config$output_root, "process_tree_snapshots.rds"))
@@ -350,6 +503,9 @@ executable_record <- list(
 saveRDS(executable_record, file.path(config$output_root, "executable_reuse.rds"))
 features <- lapply(list.files(feature_dir, full.names = TRUE), readRDS)
 invisible(lapply(features, validate_v021_diagnostic_feature_record))
+robustness_features <- lapply(list.files(robustness_dir, full.names = TRUE), readRDS)
+invisible(lapply(robustness_features, validate_v021_robustness_feature_artifact,
+                 manifest = execution_manifest))
 orphan_snapshot <- capture_v021_preflight_process_snapshot(Sys.getpid(), executable)
 orphan_classified <- classify_v021_process_snapshot(
   orphan_snapshot, Sys.getpid(), executable, worker_registry = all_worker_registry)
@@ -370,5 +526,119 @@ saveRDS(list(manifest = manifest, failures = manifest[manifest$execution_state =
         file.path(config$output_root, "failure_records.rds"))
 if (!identical(summary$state, "passed")) stop("V021-05 preflight failed: ",
                                                paste(summary$failure_reasons, collapse = "; "))
+
+write_tsv <- function(x, name) write.table(
+  x, file.path(config$output_root, name), sep = "\t", row.names = FALSE,
+  quote = FALSE, na = "NA")
+run_end <- Sys.time()
+run_metadata <- data.frame(
+  git_commit = git_commit,
+  package_version = as.character(read.dcf(file.path(repo, "DESCRIPTION"), "Version")[[1L]]),
+  r_version = R.version.string,
+  cmdstan_version = paste(cmdstanr::cmdstan_version(), collapse = "."),
+  hostname = Sys.info()[["nodename"]], logical_cpu_detected = parallel::detectCores(),
+  allocated_logical_threads = 12L, start_timestamp = summary$monitor_start,
+  end_timestamp = format(run_end, tz = "UTC", usetz = TRUE),
+  manifest_hash = execution_manifest$manifest_hash,
+  configuration_hash = execution_manifest$configuration_hash,
+  stringsAsFactors = FALSE)
+write_tsv(run_metadata, "run_metadata.tsv")
+write_tsv(selected, "preflight_task_manifest.tsv")
+write_tsv(data.frame(
+  policy_schema = policy$policy_schema, logical_host_threads = policy$logical_host_threads,
+  reserved_host_threads = policy$reserved_host_threads,
+  maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
+  maximum_cmdstan_process_slots = policy$maximum_cmdstan_process_slots,
+  chains_per_fit = policy$main_chains,
+  parallel_chains_per_fit = policy$main_chains,
+  threads_per_chain = policy$cpu_threads_per_active_chain,
+  maximum_concurrent_fits = policy$proposed_outer_concurrency), "resource_policy.tsv")
+write_tsv(data.frame(variable = names(thread_environment), value = unname(thread_environment)),
+          "environment_thread_caps.tsv")
+write_tsv(data.frame(wave = c(1L, 2L), task_count = c(2L, 1L),
+                     reserved_chains = c(8L, 4L), accepted = c(TRUE, FALSE),
+                     reason = c("two canonical fits fit capacity",
+                                "third concurrent fit rejected")),
+          "scheduler_dry_run.tsv")
+write_tsv(manifest[c("task_id", "direction_id", "direction_index", "target", "source",
+                     "seed", "execution_state", "elapsed_time", "failure_reason")],
+          "task_status.tsv")
+attempt_ledger <- manifest[c("direction_id", "direction_index", "seed", "execution_state",
+                             "elapsed_time", "failure_reason")]
+attempt_ledger$attempt_number <- 1L
+write_tsv(attempt_ledger, "attempt_ledger.tsv")
+write_tsv(data.frame(
+  direction_id = manifest$direction_id, checkpoint_path = manifest$output_location,
+  checkpoint_exists = file.exists(manifest$output_location),
+  checkpoint_md5 = unname(tools::md5sum(manifest$output_location)),
+  execution_state = manifest$execution_state), "completion_audit.tsv")
+process_rows <- monitor$records
+if (nrow(process_rows)) {
+  keep <- intersect(c("timestamp", "pid", "ppid", "classification", "capture_state",
+                      "command", "executable", "active_cmdstan_chains",
+                      "active_cmdstan_processes"), names(process_rows))
+  process_rows <- process_rows[keep]
+}
+write_tsv(process_rows, "process_tree_audit.tsv")
+retained_rows <- lapply(manifest$output_location, function(path) readRDS(path)$result$inference_results$feature_inputs)
+posterior <- do.call(rbind, lapply(retained_rows, function(x) as.data.frame(x, stringsAsFactors = FALSE)))
+write_tsv(posterior[c("dataset_id", "direction_index", "source", "target", "seed",
+                      "posterior_mean", "posterior_median", "posterior_sd",
+                      "posterior_interval_lower", "posterior_interval_upper", "p_sign2", "lfsr")],
+          "posterior_summary.tsv")
+write_tsv(posterior[c("direction_index", "source", "target", "diagnostic_class",
+                      "rhat", "ess_bulk", "ess_tail", "divergences", "treedepth_hits",
+                      "ebfmi_min", "bayesian_eligible")], "diagnostic_summary.tsv")
+robustness_summary <- do.call(rbind, lapply(robustness_features, function(x) data.frame(
+  task_id = x$directed_task_id,
+  observed_validity = x$feature_validity_status,
+  posterior_validity = if (is.null(x$posterior_stability)) "unavailable" else "valid",
+  stringsAsFactors = FALSE)))
+write_tsv(robustness_summary, "robustness_feature_summary.tsv")
+kfold_summary <- posterior[c("direction_index", "source", "target", "bayesian_eligible",
+                              "kfold_attempted", "kfold_completed", "kfold_folds_ok",
+                              "kfold_folds_failed", "aggregate_elpd",
+                              "aggregate_elpd_missing_state")]
+kfold_summary$n_successful_test_observations <- vapply(
+  robustness_features,
+  function(x) x$posterior_stability$values$successful_test_observation_count,
+  integer(1))
+write_tsv(kfold_summary, "kfold_summary.tsv")
+write_tsv(data.frame(
+  perturbation_id = c("required_low_cost", "subject_deletion", "endpoint_deletion",
+                      "time_grid_coarsening"),
+  requires_refit = c(FALSE, TRUE, TRUE, TRUE), fits_per_selected_task = c(0L, 1L, 2L, 1L),
+  chains_per_fit = c(0L, 4L, 4L, 4L), maximum_parallel_chains = c(0L, 4L, 4L, 4L),
+  estimated_multiplier = c(1, 2, 3, 2),
+  proposed_execution_scope = c("all directions", rep("not in canonical V021-06", 3L)),
+  deterministic_selection_rule = c("all canonical tasks", rep("not selected", 3L)),
+  completion_required = c(TRUE, FALSE, FALSE, FALSE)),
+  "optional_perturbation_budget.tsv")
+elapsed <- manifest$elapsed_time
+bytes <- vapply(manifest$output_location, function(path) file.info(path)$size, numeric(1))
+central_seconds <- stats::median(elapsed) * 9900 / 2
+write_tsv(data.frame(
+  measured_tasks = nrow(manifest), simultaneous_task_wall_seconds = sum(elapsed),
+  median_task_seconds = stats::median(elapsed), checkpoint_bytes_per_task = stats::median(bytes),
+  projected_directions = 9900L, optimistic_wall_days = central_seconds * .75 / 86400,
+  central_wall_days = central_seconds / 86400,
+  conservative_wall_days = central_seconds * 1.5 / 86400,
+  projected_compact_bytes = stats::median(bytes) * 9900,
+  retry_assumption = "no retries in central estimate; 50% allowance conservative",
+  kfold_assumption = "eligible-direction cost observed separately",
+  optional_refit_assumption = "excluded from canonical completion"),
+  "runtime_storage_estimate.tsv")
+failures <- manifest[manifest$execution_state == "failed",
+                     c("direction_id", "direction_index", "failure_reason"), drop = FALSE]
+write_tsv(failures, "failures.tsv")
+release_v021_controller_ownership(config$output_root, controller_ownership)
+ownership_released <- TRUE
+saveRDS(list(acquired = TRUE, released = TRUE,
+             controller_pid = controller_ownership$controller_pid,
+             manifest_hash = execution_manifest$manifest_hash,
+             configuration_hash = execution_manifest$configuration_hash,
+             acquisition_timestamp = controller_ownership$acquired_at,
+             release_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)),
+        file.path(config$output_root, "controller_ownership_audit.rds"))
 cat("V021-05 preflight passed. Peak chains:", summary$observed_peak_active_chains,
     "peak CmdStan process slots:", summary$observed_peak_cmdstan_process_slots, "\n")
