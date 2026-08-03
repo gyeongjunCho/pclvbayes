@@ -124,6 +124,21 @@ if (length(observations$taxa) != config$taxa_count)
   stop("V021-06 observational input does not contain exactly 100 taxa.")
 tasks <- build_v021_full_task_table(observations$taxa, config$seed, config$dataset_id)
 
+if (identical(tolower(Sys.getenv("PCLV_V021_MANIFEST_DRY_RUN", "false")), "true")) {
+  git_commit <- trimws(system2(
+    "git", c("-C", shQuote(repo), "rev-parse", "HEAD"), stdout = TRUE)[[1L]])
+  prepared <- prepare_v021_full_execution(
+    config, observations$taxa,
+    provenance = list(code_commit = git_commit,
+                      benchmark_schema = config$benchmark_schema),
+    initialize = FALSE)
+  cat(sprintf(
+    "V021-03 dry run: manifest=%s runnable=%d completed=%d sampling_launched=false\n",
+    prepared$manifest$manifest_hash, length(prepared$plan$runnable_indices),
+    length(prepared$plan$completed_indices)))
+  quit(save = "no", status = 0L)
+}
+
 if (debug_mode) {
   missing_directions <- setdiff(debug_directions, tasks$direction_index)
   if (length(missing_directions))

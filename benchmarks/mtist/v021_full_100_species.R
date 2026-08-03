@@ -25,6 +25,11 @@ build_v021_full_config <- function(output_root) {
     iter_sampling = 2000L,
     nominal_retained_draws = 8000L,
     maximum_simultaneous_fits = 3L,
+    maximum_task_attempts = 2L,
+    kfold_seed = 20260802L,
+    preprocessing_config_id = "pclv_smoothed_full_composition_closure_v1",
+    posterior_config_id = "student_t_irregular_time_ou_4x2000_v1",
+    predictive_config_id = "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1",
     run_kfold = FALSE,
     use_pathfinder = FALSE,
     output_root = normalizePath(output_root, mustWork = FALSE)
@@ -36,7 +41,9 @@ validate_v021_full_config <- function(config) {
     "benchmark_schema", "dataset_id", "seed", "taxa_count",
     "unordered_pair_count", "directed_task_count", "selection_rule", "chains",
     "iter_warmup", "iter_sampling", "nominal_retained_draws",
-    "maximum_simultaneous_fits", "run_kfold", "use_pathfinder", "output_root"
+    "maximum_simultaneous_fits", "maximum_task_attempts", "kfold_seed",
+    "preprocessing_config_id", "posterior_config_id", "predictive_config_id",
+    "run_kfold", "use_pathfinder", "output_root"
   )
   if (!is.list(config) || !identical(names(config), fields) ||
       !identical(config$benchmark_schema, v021_full_schema) ||
@@ -49,6 +56,14 @@ validate_v021_full_config <- function(config) {
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
       !identical(config$maximum_simultaneous_fits, 3L) ||
+      !identical(config$maximum_task_attempts, 2L) ||
+      !identical(config$kfold_seed, 20260802L) ||
+      !identical(config$preprocessing_config_id,
+                 "pclv_smoothed_full_composition_closure_v1") ||
+      !identical(config$posterior_config_id,
+                 "student_t_irregular_time_ou_4x2000_v1") ||
+      !identical(config$predictive_config_id,
+                 "student-t-scale-mixture-kalman-ou-q16_k5_r1_v1") ||
       !identical(config$run_kfold, FALSE) || !identical(config$use_pathfinder, FALSE))
     stop("Invalid V021-06 full benchmark configuration.")
   invisible(TRUE)
@@ -128,6 +143,43 @@ validate_v021_full_restart_states <- function(manifest) {
   if (any(plan$resume_indices %in% which(terminal)))
     stop("Terminal tasks cannot enter the V021-06 resume plan.")
   plan
+}
+
+build_v021_full_execution_manifest <- function(config, taxa, provenance) {
+  validate_v021_full_config(config)
+  tasks <- build_v021_full_task_table(taxa, config$seed, config$dataset_id)
+  build_v021_execution_manifest(
+    dataset_id = config$dataset_id, taxa_order = taxa,
+    task_table = tasks[c("task_id", "direction_index", "target", "source", "seed")],
+    public_seed = config$seed, kfold_seed = config$kfold_seed,
+    preprocessing_config = list(identity = config$preprocessing_config_id),
+    posterior_config = list(
+      identity = config$posterior_config_id, chains = config$chains,
+      iter_warmup = config$iter_warmup, iter_sampling = config$iter_sampling),
+    kfold_config = list(K = 5L, R = 1L, enabled = config$run_kfold),
+    predictive_config = list(identity = config$predictive_config_id),
+    provenance = provenance)
+}
+
+prepare_v021_full_execution <- function(config, taxa, provenance,
+                                         initialize = FALSE) {
+  manifest <- build_v021_full_execution_manifest(config, taxa, provenance)
+  paths <- v021_execution_paths(config$output_root)
+  if (isTRUE(initialize)) initialize_v021_execution_root(manifest, config$output_root)
+  if (file.exists(paths$manifest)) {
+    plan <- plan_v021_execution_resume(
+      manifest, config$output_root, config$maximum_task_attempts,
+      persist_reconciliation = FALSE)
+  } else {
+    plan <- list(
+      manifest = manifest, status = new_v021_task_status(manifest),
+      attempt_ledger = new_v021_attempt_ledger(manifest),
+      runnable_indices = seq_len(nrow(manifest$tasks)), completed_indices = integer(),
+      reconciliation_changed = FALSE, paths = paths)
+  }
+  list(manifest = manifest, plan = plan,
+       status_summary = compact_v021_execution_status(plan), paths = paths,
+       dry_run = !isTRUE(initialize), sampling_launched = FALSE)
 }
 
 .v021_trace_sensitive_name <- function(x) {
