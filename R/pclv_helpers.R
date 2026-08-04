@@ -2358,7 +2358,12 @@
                                 freeze_retry_hypers = FALSE,
                                 seed_override = NULL,
                                 min_pairs = 4L) {
-  pts <- .build_train_test(pair_in, train_subjects, test_subjects)
+  pts <- .build_train_test(
+    pair_in,
+    train_subjects,
+    test_subjects,
+    min_pairs = min_pairs
+  )
   if (inherits(pts, "pclv_failure")) {
     return(pts)
   }
@@ -2420,8 +2425,12 @@
     freeze_retry_hypers = freeze_retry_hypers   # ★ 하이퍼를 바꾸지 않는 리트라이
   )
   fit <- tryfit$fit
+  # Register cleanup before handling a structured diagnostic failure because
+  # .sample_with_retry() may return both a retained fit and a failure payload.
+  if (!is.null(fit)) {
+    on.exit(.cleanup_cmdstan_fit_output(fit), add = TRUE)
+  }
   if (!is.null(tryfit$failure)) return(tryfit$failure)
-  on.exit(.cleanup_cmdstan_fit_output(fit), add = TRUE)
 
   # 방어적 동일성 확인(디버그용; 필요시 주석 처리)
   fa <- tryfit$final_args
@@ -2768,7 +2777,7 @@
                                           partner,
                                           ctx,
                                           seed_override = NULL,
-                                          progress_local = progress) {
+                                          progress_local = "none") {
 
   # ---- 컨텍스트 바인딩(워커 환경 내에서 사용) ----
   meta_df              <- ctx$meta_df
@@ -2987,8 +2996,8 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
         base_args$init <- pf_inits
         initialization_provenance$pathfinder_status <- "success"
         initialization_provenance$actual <- "pathfinder"
-        if (!is.null(iter_warmup) && iter_warmup >= 1500)
-          base_args$iter_warmup <- max(500L, floor(iter_warmup / 2))
+        # Pathfinder supplies initialization only. Preserve the caller's
+        # requested warmup contract exactly.
       }
     }
     if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE)
@@ -3246,71 +3255,219 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
 
 .add_predictive_evaluation <- function(main_result) {
   if (.is_pclv_failure(main_result)) return(main_result)
-  predictive <- main_result$.predictive_context
-  if (is.null(predictive)) stop("Main-posterior result lacks predictive context.")
-  main_result$.predictive_context <- NULL
-  if (!is.null(main_result$diagnostic_failure[[1L]])) return(main_result)
 
-  if (predictive$progress != "none")
-    cat(sprintf("%s pair: k-fold evaluation started (K=%d, R=%d)\n",
-                predictive$pair_tag, predictive$K, predictive$R))
+  predictive <- main_result$.predictive_context
+  if (is.null(predictive)) {
+    stop("Main-posterior result lacks predictive context.")
+  }
+  main_result$.predictive_context <- NULL
+
+  # Posterior-diagnostic failures remain explicit and are not sent through
+  # predictive evaluation.
+  diagnostic_failure <- main_result$diagnostic_failure
+  if (is.list(diagnostic_failure) &&
+      length(diagnostic_failure) >= 1L &&
+      !is.null(diagnostic_failure[[1L]])) {
+    return(main_result)
+  }
+
+  if (!identical(predictive$progress, "none")) {
+    cat(sprintf(
+      "%s pair: k-fold evaluation started (K=%d, R=%d)\n",
+      predictive$pair_tag,
+      predictive$K,
+      predictive$R
+    ))
+  }
+
   sample_args <- predictive$sample_args
   sample_args$seed <- as.integer(predictive$sampling_seed)
   sample_args$step_size <- NULL
   sample_args$inv_metric <- NULL
   sample_args$metric_file <- NULL
-  kfold <- .repkfold_eval(
-    mod = predictive$mod,
-    stan_list_base = predictive$stan_list,
-    sample_args_base = sample_args,
-    pair_in = predictive$pair_in,
-    K = predictive$K,
-    R = predictive$R,
-    seed = predictive$split_seed,
-    silent_sampler = predictive$silent_sampler,
-    n_workers_kfold = predictive$n_workers_kfold,
-    max_retries = predictive$max_retries,
-    freeze_retry_hypers = TRUE,
-    min_pairs = predictive$min_pairs,
-    progress = predictive$progress
+
+  kfold <- tryCatch(
+    .repkfold_eval(
+      mod = predictive$mod,
+      stan_list_base = predictive$stan_list,
+      sample_args_base = sample_args,
+      pair_in = predictive$pair_in,
+      K = predictive$K,
+      R = predictive$R,
+      seed = predictive$split_seed,
+      silent_sampler = predictive$silent_sampler,
+      n_workers_kfold = predictive$n_workers_kfold,
+      max_retries = predictive$max_retries,
+      freeze_retry_hypers = TRUE,
+      min_pairs = predictive$min_pairs,
+      progress = predictive$progress
+    ),
+    error = function(e) {
+      .pclv_failure(
+        "kfold_evaluation",
+        "unexpected_kfold_error",
+        list(
+          message = conditionMessage(e),
+          pair_tag = predictive$pair_tag,
+          K = predictive$K,
+          R = predictive$R,
+          split_seed = predictive$split_seed,
+          sampling_seed = predictive$sampling_seed
+        )
+      )
+    }
   )
-  if (predictive$progress != "none")
-    cat(sprintf("%s pair: k-fold evaluation completed\n", predictive$pair_tag))
+
+  if (.is_pclv_failure(kfold)) {
+    if (!identical(predictive$progress, "none")) {
+      cat(sprintf(
+        "%s pair: k-fold evaluation failed (%s)\n",
+        predictive$pair_tag,
+        kfold$reason
+      ))
+    }
+
+    # Preserve a stable directed-result schema even when the entire predictive
+    # phase fails before a normal repeated-K-fold payload can be assembled.
+    main_result$kfold <- NULL
+    main_result$kfold_mean <- NA_real_
+    main_result$kfold_method <- NA_character_
+    main_result$kfold_outer_rounds <- 1L
+    main_result$kfold_failed <- TRUE
+    main_result$kfold_n_folds_ok <- 0L
+    main_result$kfold_n_folds_fail <- NA_integer_
+    main_result$kfold_subject <- list(NULL)
+    main_result$kfold_subject_ppd <- list(NULL)
+    main_result$kfold_subject_ids <- list(NULL)
+    main_result$kfold_subject_counts <- list(NULL)
+    main_result$kfold_subject_success <- list(NULL)
+    main_result$kfold_subject_fail <- list(NULL)
+    main_result$kfold_success_total <- 0L
+    main_result$kfold_failures <- list(kfold)
+    main_result$kfold_splits <- list(NULL)
+    main_result$kfold_seed_used <- as.integer(predictive$split_seed)
+    main_result$kfold_K <- as.integer(predictive$K)
+    main_result$kfold_R <- as.integer(predictive$R)
+    main_result$kfold_sd <- NA_real_
+    main_result$kfold_se <- NA_real_
+    main_result$kfold_n_subjects <- 0L
+    main_result$kfold_retry_total <- NA_integer_
+    main_result$kfold_retry_mean <- NA_real_
+    main_result$kfold_nu_fold_means <- list(NULL)
+
+    return(main_result)
+  }
+
+  if (!is.list(kfold) ||
+      is.null(kfold$elpd_subject) ||
+      is.null(kfold$elpd_method) ||
+      is.null(kfold$n_folds_ok) ||
+      is.null(kfold$n_folds_fail)) {
+    failure <- .pclv_failure(
+      "kfold_evaluation",
+      "invalid_kfold_result",
+      list(pair_tag = predictive$pair_tag)
+    )
+
+    main_result$kfold <- NULL
+    main_result$kfold_mean <- NA_real_
+    main_result$kfold_method <- NA_character_
+    main_result$kfold_outer_rounds <- 1L
+    main_result$kfold_failed <- TRUE
+    main_result$kfold_n_folds_ok <- 0L
+    main_result$kfold_n_folds_fail <- NA_integer_
+    main_result$kfold_subject <- list(NULL)
+    main_result$kfold_subject_ppd <- list(NULL)
+    main_result$kfold_subject_ids <- list(NULL)
+    main_result$kfold_subject_counts <- list(NULL)
+    main_result$kfold_subject_success <- list(NULL)
+    main_result$kfold_subject_fail <- list(NULL)
+    main_result$kfold_success_total <- 0L
+    main_result$kfold_failures <- list(failure)
+    main_result$kfold_splits <- list(NULL)
+    main_result$kfold_seed_used <- as.integer(predictive$split_seed)
+    main_result$kfold_K <- as.integer(predictive$K)
+    main_result$kfold_R <- as.integer(predictive$R)
+    main_result$kfold_sd <- NA_real_
+    main_result$kfold_se <- NA_real_
+    main_result$kfold_n_subjects <- 0L
+    main_result$kfold_retry_total <- NA_integer_
+    main_result$kfold_retry_mean <- NA_real_
+    main_result$kfold_nu_fold_means <- list(NULL)
+
+    return(main_result)
+  }
+
+  if (!identical(predictive$progress, "none")) {
+    cat(sprintf(
+      "%s pair: k-fold evaluation completed\n",
+      predictive$pair_tag
+    ))
+  }
+
+  finite_elpd <- is.finite(kfold$elpd_subject)
+  n_finite_subjects <- sum(finite_elpd)
+
+  kfold_sd <- if (n_finite_subjects >= 2L) {
+    stats::sd(kfold$elpd_subject[finite_elpd])
+  } else {
+    NA_real_
+  }
+
+  kfold_se <- if (n_finite_subjects >= 2L) {
+    kfold_sd / sqrt(n_finite_subjects)
+  } else {
+    NA_real_
+  }
 
   main_result$kfold <- kfold
-  main_result$kfold_mean <- if (is.null(kfold)) NA_real_ else kfold$elpd_mean
-  main_result$kfold_method <- if (is.null(kfold)) NA_character_ else kfold$elpd_method
-  main_result$kfold_outer_rounds <- 1L
-  main_result$kfold_failed <- is.null(kfold) ||
-    (!is.null(kfold$n_folds_fail) && kfold$n_folds_fail > 0L)
-  main_result$kfold_n_folds_ok <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_ok
-  main_result$kfold_n_folds_fail <- if (is.null(kfold)) NA_integer_ else kfold$n_folds_fail
-  main_result$kfold_subject <- list(if (is.null(kfold)) NULL else kfold$elpd_subject)
-  main_result$kfold_subject_ppd <- list(if (is.null(kfold)) NULL else kfold$elpd_subject_ppd)
-  main_result$kfold_subject_ids <- list(if (is.null(kfold)) NULL else names(kfold$elpd_subject))
-  main_result$kfold_subject_counts <- list(if (is.null(kfold)) NULL else kfold$subject_test_counts)
-  main_result$kfold_subject_success <- list(if (is.null(kfold)) NULL else kfold$subject_success_counts)
-  main_result$kfold_subject_fail <- list(if (is.null(kfold)) NULL else kfold$subject_failure_counts)
-  main_result$kfold_success_total <- if (is.null(kfold)) NA_integer_ else kfold$total_successful_evaluations
-  main_result$kfold_failures <- list(if (is.null(kfold)) NULL else kfold$failures)
-  main_result$kfold_splits <- list(if (is.null(kfold)) NULL else kfold$splits_df)
-  main_result$kfold_seed_used <- if (is.null(kfold)) NA_integer_ else predictive$split_seed
-  main_result$kfold_K <- if (is.null(kfold)) NA_integer_ else kfold$K
-  main_result$kfold_R <- if (is.null(kfold)) NA_integer_ else kfold$R
-  main_result$kfold_sd <- if (is.null(kfold)) NA_real_ else stats::sd(kfold$elpd_subject, na.rm = TRUE)
-  main_result$kfold_se <- if (is.null(kfold)) NA_real_ else {
-    n <- sum(is.finite(kfold$elpd_subject))
-    stats::sd(kfold$elpd_subject, na.rm = TRUE) / sqrt(pmax(n, 1L))
+  main_result$kfold_mean <- if (is.null(kfold$elpd_mean)) {
+    NA_real_
+  } else {
+    as.numeric(kfold$elpd_mean)
   }
-  main_result$kfold_n_subjects <- if (is.null(kfold)) NA_integer_ else sum(is.finite(kfold$elpd_subject))
-  main_result$kfold_retry_total <- if (is.null(kfold) || is.null(kfold$retry_total)) NA_integer_ else kfold$retry_total
-  main_result$kfold_retry_mean <- if (is.null(kfold) || is.null(kfold$retry_mean)) NA_real_ else kfold$retry_mean
-  main_result$kfold_nu_fold_means <- list(if (is.null(kfold) || is.null(kfold$nu_fold_means)) NULL else kfold$nu_fold_means)
+  main_result$kfold_method <- as.character(kfold$elpd_method)
+  main_result$kfold_outer_rounds <- 1L
+  main_result$kfold_failed <-
+    isTRUE(kfold$n_folds_fail > 0L)
+  main_result$kfold_n_folds_ok <- as.integer(kfold$n_folds_ok)
+  main_result$kfold_n_folds_fail <- as.integer(kfold$n_folds_fail)
+  main_result$kfold_subject <- list(kfold$elpd_subject)
+  main_result$kfold_subject_ppd <- list(kfold$elpd_subject_ppd)
+  main_result$kfold_subject_ids <- list(names(kfold$elpd_subject))
+  main_result$kfold_subject_counts <- list(kfold$subject_test_counts)
+  main_result$kfold_subject_success <- list(kfold$subject_success_counts)
+  main_result$kfold_subject_fail <- list(kfold$subject_failure_counts)
+  main_result$kfold_success_total <- as.integer(
+    kfold$total_successful_evaluations
+  )
+  main_result$kfold_failures <- list(kfold$failures)
+  main_result$kfold_splits <- list(kfold$splits_df)
+  main_result$kfold_seed_used <- as.integer(predictive$split_seed)
+  main_result$kfold_K <- as.integer(kfold$K)
+  main_result$kfold_R <- as.integer(kfold$R)
+  main_result$kfold_sd <- kfold_sd
+  main_result$kfold_se <- kfold_se
+  main_result$kfold_n_subjects <- as.integer(n_finite_subjects)
+  main_result$kfold_retry_total <- if (is.null(kfold$retry_total)) {
+    NA_integer_
+  } else {
+    as.integer(kfold$retry_total)
+  }
+  main_result$kfold_retry_mean <- if (is.null(kfold$retry_mean)) {
+    NA_real_
+  } else {
+    as.numeric(kfold$retry_mean)
+  }
+  main_result$kfold_nu_fold_means <- list(
+    if (is.null(kfold$nu_fold_means)) NULL else kfold$nu_fold_means
+  )
+
   main_result
 }
 
 .run_one <- function(target, partner, ctx, seed_override = NULL,
-                     progress_local = progress) {
+                     progress_local = "none") {
   main_result <- .fit_direction_main_posterior(
     target = target, partner = partner, ctx = ctx,
     seed_override = seed_override, progress_local = progress_local
@@ -3371,19 +3528,39 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
 .mk_self <- function(df) {
   ii <- df |>
     dplyr::transmute(
-      taxon = .data$i,
+      taxon = as.character(.data$i),
+      partner = as.character(.data$j),
       a_self_mean = .data$a_ii_mean,
-      a_self_q2.5 = .data$a_ii_q2.5, a_self_q97.5 = .data$a_ii_q97.5,
+      a_self_q2.5 = .data$a_ii_q2.5,
+      a_self_q97.5 = .data$a_ii_q97.5,
       p_sign2_self = .data$p_sign2_ii
     )
+
   jj <- df |>
     dplyr::transmute(
-      taxon = .data$j,
+      taxon = as.character(.data$j),
+      partner = as.character(.data$i),
       a_self_mean = .data$a_jj_mean,
-      a_self_q2.5 = .data$a_jj_q2.5, a_self_q97.5 = .data$a_jj_q97.5,
+      a_self_q2.5 = .data$a_jj_q2.5,
+      a_self_q97.5 = .data$a_jj_q97.5,
       p_sign2_self = .data$p_sign2_jj
     )
-  dplyr::bind_rows(ii, jj)
+
+  out <- dplyr::bind_rows(ii, jj)
+  identity <- paste(out$taxon, out$partner, sep = "\r")
+
+  if (anyNA(out$taxon) ||
+      anyNA(out$partner) ||
+      any(!nzchar(out$taxon)) ||
+      any(!nzchar(out$partner))) {
+    stop("Self-effect identities must contain non-missing taxon and partner values.")
+  }
+
+  if (anyDuplicated(identity)) {
+    stop("Duplicate taxon-partner self identities.")
+  }
+
+  out
 }
 
 

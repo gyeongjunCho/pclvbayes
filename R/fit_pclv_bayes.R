@@ -214,29 +214,6 @@ fit_pclv_bayes <- function(
   meta_df <- validated$meta_df
   mat_rel <- validated$mat_rel
 
-  try({
-    .cleanup_stale_csv_start <- function(older_than_hours = 24) {
-      cutoff <- Sys.time() - older_than_hours * 3600
-      roots <- unique(c(
-        getOption("glvpair.output_root",
-                  tools::R_user_dir("glvpair", which = "cache")),
-        tempdir()
-      ))
-      for (rt in roots) {
-        if (!dir.exists(rt)) next
-        files <- list.files(rt, recursive = TRUE, full.names = TRUE, include.dirs = FALSE)
-        if (!length(files)) next
-        # glvpair/cmdstan 관련 경로만, csv/txt/json만 대상으로 제한
-        sel <- grepl("(glvpair|cmdstan)", files) &
-          grepl("\\.(csv|txt|json)$", files, ignore.case = TRUE)
-        if (!any(sel)) next
-        info <- suppressWarnings(file.info(files[sel]))
-        stale <- rownames(info)[is.finite(info$mtime) & info$mtime < cutoff]
-        if (length(stale)) unlink(stale, recursive = TRUE)
-      }
-    }
-    .cleanup_stale_csv_start(older_than_hours = 24)
-  }, silent = TRUE)
 
   runtime <- .prepare_fit_runtime(validated)
   if (.is_pclv_failure(runtime)) return(runtime)

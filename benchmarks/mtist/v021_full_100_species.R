@@ -39,29 +39,98 @@ reap_v021_uncollected_jobs <- function(..., collector = parallel::mccollect) {
   list(class = class(collected), child_pids = pids)
 }
 
-reap_v021_terminal_children <- function(collector = parallel::mccollect) {
-  if (!is.function(collector)) stop("Child collector must be a function.")
-  collector(wait = TRUE)
+v021_proc_identity <- function(
+    pid,
+    proc_root = "/proc",
+    stat_reader = function(path) readLines(path, warn = FALSE, n = 1L)) {
+  pid <- as.integer(pid)
+  if (length(pid) != 1L || is.na(pid) || pid < 1L)
+    stop("Process PID must be one positive integer.")
+
+  stat_path <- file.path(proc_root, as.character(pid), "stat")
+  stat <- tryCatch(stat_reader(stat_path), error = function(e) character())
+  if (!length(stat)) return(NULL)
+
+  parsed <- tryCatch(
+    .v021_parse_linux_stat(stat, pid),
+    error = function(e) NULL
+  )
+  if (is.null(parsed)) {
+    return(list(
+      pid = pid,
+      start_time = NA_character_,
+      process_state = NA_character_,
+      readable = FALSE
+    ))
+  }
+
+  list(
+    pid = pid,
+    start_time = as.character(parsed$start_time),
+    process_state = as.character(parsed$process_state),
+    readable = TRUE
+  )
 }
 
-wait_v021_collected_child_exit <- function(pid, timeout_seconds = 2,
-                                            poll_seconds = 0.01,
-                                            remover = function(pid)
-                                              parallel:::rmChild(pid),
-                                            path_exists = file.exists,
-                                            sleep = Sys.sleep) {
+wait_v021_collected_child_exit <- function(
+    pid,
+    expected_start_time,
+    timeout_seconds = 10,
+    poll_seconds = 0.01,
+    identity_reader = v021_proc_identity,
+    sleep = Sys.sleep,
+    clock = function() proc.time()[["elapsed"]]) {
   pid <- as.integer(pid)
   if (length(pid) != 1L || is.na(pid) || pid < 1L)
     stop("Collected child PID must be one positive integer.")
-  deadline <- proc.time()[["elapsed"]] + timeout_seconds
-  path <- file.path("/proc", as.character(pid))
-  while (path_exists(path) && proc.time()[["elapsed"]] < deadline) {
-    remover(pid)
+  if (!is.character(expected_start_time) ||
+      length(expected_start_time) != 1L ||
+      is.na(expected_start_time) ||
+      !nzchar(expected_start_time))
+    stop("Collected child start time must be one non-empty character value.")
+  if (!is.numeric(timeout_seconds) ||
+      length(timeout_seconds) != 1L ||
+      !is.finite(timeout_seconds) ||
+      timeout_seconds < 0)
+    stop("timeout_seconds must be one finite nonnegative value.")
+  if (!is.numeric(poll_seconds) ||
+      length(poll_seconds) != 1L ||
+      !is.finite(poll_seconds) ||
+      poll_seconds <= 0)
+    stop("poll_seconds must be one finite positive value.")
+  if (!is.function(identity_reader) ||
+      !is.function(sleep) ||
+      !is.function(clock))
+    stop("Child-exit readers and timing hooks must be functions.")
+
+  deadline <- clock() + timeout_seconds
+
+  repeat {
+    identity <- identity_reader(pid)
+
+    # Missing /proc identity means that the collected process has exited.
+    if (is.null(identity))
+      return(invisible(TRUE))
+
+    if (!is.list(identity) ||
+        is.null(identity$start_time) ||
+        length(identity$start_time) != 1L)
+      stop("Invalid collected-child process identity.")
+
+    # The PID may have been reused after the monitor exited. A different
+    # start-time identity is not the collected child and must not fail the run.
+    if (!identical(as.character(identity$start_time), expected_start_time))
+      return(invisible(TRUE))
+
+    if (clock() >= deadline)
+      break
+
     sleep(poll_seconds)
   }
-  if (path_exists(path)) stop("Collected child did not leave the process table.")
-  invisible(TRUE)
+
+  stop("Collected child identity remained in the process table after collection.")
 }
+
 
 recover_v021_monitor_peaks <- function(output_root, policy, executable) {
   validate_v021_resource_policy(policy)

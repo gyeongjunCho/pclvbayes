@@ -660,11 +660,21 @@ run_batch <- function(indices) {
   # K-fold process. Forked K-fold utilities must not inherit the monitor pipe.
   file.create(stop_file)
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
-  monitor_result <- unname(collect_v021_tracked_jobs(monitor_job_tracker))[[1L]]
+  monitor_collected <- unname(
+    collect_v021_tracked_jobs(monitor_job_tracker)
+  )
+  if (length(monitor_collected) != 1L)
+    stop("Monitor child did not return exactly one collected result.")
+  monitor_result <- monitor_collected[[1L]]
   if (inherits(monitor_result, "v021_traced_child_error"))
     stop(monitor_result$condition_message)
-  reap_v021_terminal_children()
-  wait_v021_collected_child_exit(as.integer(monitor_job$pid))
+
+  # The scoped collection above is the single authoritative reap operation.
+  # Do not mutate parallel's private child registry or collect unrelated jobs.
+  wait_v021_collected_child_exit(
+    as.integer(monitor_job$pid),
+    expected_start_time = as.character(monitor_registry$start_time[[1L]])
+  )
   set_v021_failure_trace_phase(parent_trace, "monitor_shutdown", completed = TRUE)
   payload <- readRDS(final_file)
   parent_trace$monitor_state <- payload$latest_monitor %||% payload$error %||% NULL
@@ -787,3 +797,4 @@ cat("V021-06 completed.\n")
 }
 
 run_v021_full_100_species()
+

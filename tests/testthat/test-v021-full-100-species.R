@@ -543,16 +543,6 @@ test_that("collected worker handles are not reaped twice after controller failur
   expect_identical(length(calls), 1L)
 })
 
-test_that("terminal controller children receive a final blocking reap", {
-  calls <- list()
-  collector <- function(wait = TRUE) {
-    calls[[length(calls) + 1L]] <<- list(wait = wait)
-    list()
-  }
-  expect_identical(reap_v021_terminal_children(collector), list())
-  expect_identical(calls, list(list(wait = TRUE)))
-})
-
 test_that("empty durable monitor history starts with zero recovered peaks", {
   root <- tempfile("v021-monitor-peaks-")
   dir.create(file.path(root, "monitor"), recursive = TRUE)
@@ -561,21 +551,85 @@ test_that("empty durable monitor history starts with zero recovered peaks", {
   expect_identical(peaks, list(chains = 0L, processes = 0L))
 })
 
-test_that("collected monitor exit waits for transient procfs zombie removal", {
+test_that("collected monitor exit waits without mutating child bookkeeping", {
   checks <- 0L
-  path_exists <- function(path) {
+  identity_reader <- function(pid) {
     checks <<- checks + 1L
-    checks < 3L
+    if (checks < 3L) {
+      list(pid = pid, start_time = "12345", process_state = "Z", readable = TRUE)
+    } else {
+      NULL
+    }
   }
   sleeps <- numeric()
-  removed <- integer()
+  clock_value <- 0
+  clock <- function() {
+    clock_value <<- clock_value + 0.001
+    clock_value
+  }
+
   expect_true(wait_v021_collected_child_exit(
-    123L, remover = function(pid) removed <<- c(removed, pid),
-    path_exists = path_exists,
-    sleep = function(seconds) sleeps <<- c(sleeps, seconds)))
-  expect_identical(removed, c(123L, 123L))
+    123L,
+    expected_start_time = "12345",
+    identity_reader = identity_reader,
+    sleep = function(seconds) sleeps <<- c(sleeps, seconds),
+    clock = clock
+  ))
   expect_identical(sleeps, c(0.01, 0.01))
-  expect_error(wait_v021_collected_child_exit(NA_integer_), "positive integer")
+  expect_error(
+    wait_v021_collected_child_exit(
+      NA_integer_,
+      expected_start_time = "12345"
+    ),
+    "positive integer"
+  )
+  expect_error(
+    wait_v021_collected_child_exit(
+      123L,
+      expected_start_time = NA_character_
+    ),
+    "start time"
+  )
+})
+
+test_that("collected monitor exit accepts PID reuse as the original child being gone", {
+  calls <- 0L
+  expect_true(wait_v021_collected_child_exit(
+    123L,
+    expected_start_time = "original-start",
+    identity_reader = function(pid) {
+      calls <<- calls + 1L
+      list(pid = pid, start_time = "reused-start",
+           process_state = "S", readable = TRUE)
+    }
+  ))
+  expect_identical(calls, 1L)
+})
+
+test_that("runner uses one scoped monitor collection before predictive children", {
+  runner <- paste(
+    readLines(testthat::test_path(
+      "../../benchmarks/mtist/run_v021_full_100_species.R"
+    ), warn = FALSE),
+    collapse = "\n"
+  )
+
+  expect_false(grepl("rmChild", runner, fixed = TRUE))
+  expect_false(grepl("reap_v021_terminal_children", runner, fixed = TRUE))
+
+  collect_at <- regexpr(
+    "collect_v021_tracked_jobs(monitor_job_tracker)",
+    runner,
+    fixed = TRUE
+  )[[1L]]
+  predictive_at <- regexpr(
+    "evaluator = pclvbayes:::.add_predictive_evaluation",
+    runner,
+    fixed = TRUE
+  )[[1L]]
+
+  expect_gt(collect_at, 0L)
+  expect_gt(predictive_at, collect_at)
 })
 
 test_that("dead-controller restart reconciles stale reservations without completion", {
@@ -664,3 +718,4 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
   expect_identical(length(list.files(trace_root,
     pattern = "^v021_full_failure_trace_v1-.*[.]rds$")), 1L)
 })
+

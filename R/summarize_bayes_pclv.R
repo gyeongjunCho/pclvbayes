@@ -2,7 +2,7 @@
 #'
 #' @description
 #' Given the result list from \code{fit_pclv_bayes()}, returns a summary table
-#' for directed cross effects or self effects.
+#' for directed cross effects or pair-context self effects.
 #'
 #' Directed cross coefficients are pair-to-rest dynamic coefficients and are
 #' not generally absolute direct-gLV effects. Posterior sign support and MCMC
@@ -24,7 +24,16 @@
 #'     \code{ebfmi_min >= 0.30}.
 #' }
 #'
+#' Missing diagnostic values fail closed. Results without a diagnostic class
+#' are marked \code{"diagnostics_unavailable"} unless a historical
+#' \code{direction_ok_*} field explicitly establishes their status.
+#'
+#' Self coefficients are pair-context estimands. The returned self table keeps
+#' both \code{taxon} and \code{partner}, preventing unrelated pair-specific
+#' self estimates and diagnostics from being joined by taxon alone.
+#'
 #' Indeterminate directions remain explicit and are not interpreted as zero.
+#' Non-finite coefficient means receive a missing sign rather than \code{"0"}.
 #' Tables are sorted by \code{bayes_FDR} in ascending order with missing values
 #' last.
 #'
@@ -36,177 +45,470 @@
 #' @param interaction One of \code{"cross"} or \code{"self"}.
 #'
 #' @return A list containing the requested \code{$cross} or \code{$self}
-#'   summary table.
+#'   summary table. The self table includes \code{taxon} and \code{partner}.
 #'
 #' @export
 summarize_bayes_pclv <- function(df,
                                  alpha = NULL,
-                                 diag_mode = c("moderate","strict"),
+                                 diag_mode = c("moderate", "strict"),
                                  interaction = "cross") {
-  # deps
   if (!requireNamespace("dplyr", quietly = TRUE) ||
       !requireNamespace("tibble", quietly = TRUE)) {
     stop("Packages 'dplyr' and 'tibble' are required.")
   }
 
-  diag_mode <- match.arg(diag_mode, c("moderate","strict"))
-  interaction <- match.arg(interaction, c("cross","self"))
-  do_cross <- (interaction == "cross")
-  do_self  <- (interaction == "self")
+  diag_mode <- match.arg(diag_mode, c("moderate", "strict"))
+  interaction <- match.arg(interaction, c("cross", "self"))
+  do_cross <- identical(interaction, "cross")
+  do_self <- identical(interaction, "self")
 
-  # thresholds
-  thr <- switch(diag_mode,
-                "strict"   = list(rhat = 1.01, ess = 1000, div = 0L,  tdhit = 0L,  ebfmi = 0.40),
-                "moderate" = list(rhat = 1.05, ess =  400, div = 8L,  tdhit = 80L, ebfmi = 0.30)
+  if (!is.null(alpha)) {
+    if (!is.numeric(alpha) ||
+        length(alpha) != 1L ||
+        !is.finite(alpha) ||
+        alpha < 0 ||
+        alpha > 1) {
+      stop("`alpha` must be NULL or a finite scalar in [0, 1].")
+    }
+    alpha <- as.numeric(alpha)
+  }
+
+  thr <- switch(
+    diag_mode,
+    strict = list(
+      rhat = 1.01,
+      ess = 1000,
+      div = 0L,
+      tdhit = 0L,
+      ebfmi = 0.40
+    ),
+    moderate = list(
+      rhat = 1.05,
+      ess = 400,
+      div = 8L,
+      tdhit = 80L,
+      ebfmi = 0.30
+    )
   )
 
-  # inputs
-  if (!is.list(df) || !all(c("cross","self","raw") %in% names(df))) {
+  if (!is.list(df) ||
+      !all(c("cross", "self", "raw") %in% names(df))) {
     stop("`df` must include $cross, $self, and $raw.")
   }
-  cross <- tibble::as_tibble(df$cross)
-  self  <- tibble::as_tibble(df$self)
-  raw   <- tibble::as_tibble(df$raw)
 
-  # Results created before chain-specific reporting are interpreted using the
-  # historical direction_ok contract. New results always carry these fields.
-  for (suffix in c("ij", "ji")) {
-    class_col <- paste0("diagnostic_class_", suffix)
-    ok_col <- paste0("direction_ok_", suffix)
-    if (!class_col %in% names(raw)) {
-      raw[[class_col]] <- if (ok_col %in% names(raw))
-        ifelse(raw[[ok_col]], "converged", "sampler_diagnostics_failed") else "converged"
+  cross <- tibble::as_tibble(df$cross)
+  self <- tibble::as_tibble(df$self)
+  raw <- tibble::as_tibble(df$raw)
+
+  # Validate only the columns required by the requested summary. The raw table
+  # supplies directional diagnostics and pair identity; self posterior
+  # summaries are taken from `df$self`, preserving compatibility with
+  # historical/test fixtures whose raw table does not repeat those columns.
+  required_raw <- c(
+    "i", "j",
+    "n_pairs_ij", "n_pairs_ji",
+    "rhat_ij", "essb_ij", "esst_ij", "div_ij", "tdhit_ij",
+    "ebfmi_min_ij",
+    "rhat_ji", "essb_ji", "esst_ji", "div_ji", "tdhit_ji",
+    "ebfmi_min_ji"
+  )
+
+  missing_raw <- setdiff(required_raw, names(raw))
+  if (length(missing_raw)) {
+    stop(
+      sprintf(
+        "`df$raw` lacks required column(s): %s.",
+        paste(missing_raw, collapse = ", ")
+      )
+    )
+  }
+
+  if (do_cross) {
+    required_cross <- c(
+      "from", "to", "n_subjects",
+      "a_mean", "a_q2.5", "a_q97.5", "p_sign2"
+    )
+    missing_cross <- setdiff(required_cross, names(cross))
+    if (length(missing_cross)) {
+      stop(
+        sprintf(
+          "`df$cross` lacks required column(s): %s.",
+          paste(missing_cross, collapse = ", ")
+        )
+      )
     }
   }
 
-  # diagnostics per direction from 'raw'
+  if (do_self) {
+    required_self <- c(
+      "taxon",
+      "a_self_mean", "a_self_q2.5", "a_self_q97.5",
+      "p_sign2_self"
+    )
+    missing_self <- setdiff(required_self, names(self))
+    if (length(missing_self)) {
+      stop(
+        sprintf(
+          "`df$self` lacks required column(s): %s.",
+          paste(missing_self, collapse = ", ")
+        )
+      )
+    }
+  }
+
+  # Historical results may lack chain-specific diagnostic classes. They are
+  # accepted only when the corresponding historical direction_ok field exists.
+  for (suffix in c("ij", "ji")) {
+    class_col <- paste0("diagnostic_class_", suffix)
+    ok_col <- paste0("direction_ok_", suffix)
+
+    if (!class_col %in% names(raw)) {
+      if (ok_col %in% names(raw)) {
+        ok_value <- raw[[ok_col]]
+        raw[[class_col]] <- ifelse(
+          is.na(ok_value),
+          "diagnostics_unavailable",
+          ifelse(
+            ok_value,
+            "converged",
+            "sampler_diagnostics_failed"
+          )
+        )
+      } else {
+        raw[[class_col]] <- rep(
+          "diagnostics_unavailable",
+          nrow(raw)
+        )
+      }
+    }
+
+    raw[[class_col]] <- as.character(raw[[class_col]])
+    raw[[class_col]][
+      is.na(raw[[class_col]]) | !nzchar(raw[[class_col]])
+    ] <- "diagnostics_unavailable"
+  }
+
+  if (!"diagnostic_class" %in% names(cross)) {
+    cross$diagnostic_class <- NA_character_
+  } else {
+    cross$diagnostic_class <- as.character(cross$diagnostic_class)
+  }
+
   cross_diag <- dplyr::bind_rows(
     dplyr::transmute(
       raw,
-      from = .data$j, to = .data$i,
-      n_pairs = .data$n_pairs_ij,
-      rhat = .data$rhat_ij, essb = .data$essb_ij, esst = .data$esst_ij,
-      div = .data$div_ij, tdhit = .data$tdhit_ij,
+      from = as.character(.data$j),
+      to = as.character(.data$i),
+      n_pairs = as.integer(.data$n_pairs_ij),
+      rhat = .data$rhat_ij,
+      essb = .data$essb_ij,
+      esst = .data$esst_ij,
+      div = .data$div_ij,
+      tdhit = .data$tdhit_ij,
       ebfmi_min = .data$ebfmi_min_ij,
       diagnostic_class_diag = .data$diagnostic_class_ij
     ),
     dplyr::transmute(
       raw,
-      from = .data$i, to = .data$j,
-      n_pairs = .data$n_pairs_ji,
-      rhat = .data$rhat_ji, essb = .data$essb_ji, esst = .data$esst_ji,
-      div = .data$div_ji, tdhit = .data$tdhit_ji,
+      from = as.character(.data$i),
+      to = as.character(.data$j),
+      n_pairs = as.integer(.data$n_pairs_ji),
+      rhat = .data$rhat_ji,
+      essb = .data$essb_ji,
+      esst = .data$esst_ji,
+      div = .data$div_ji,
+      tdhit = .data$tdhit_ji,
       ebfmi_min = .data$ebfmi_min_ji,
       diagnostic_class_diag = .data$diagnostic_class_ji
     )
   )
-  self_diag <- dplyr::bind_rows(
-    dplyr::transmute(
-      raw,
-      taxon = .data$i,
-      n_pairs = .data$n_pairs_ij,
-      rhat = .data$rhat_ij, essb = .data$essb_ij, esst = .data$esst_ij,
-      div = .data$div_ij, tdhit = .data$tdhit_ij,
-      ebfmi_min = .data$ebfmi_min_ij,
-      diagnostic_class = .data$diagnostic_class_ij
-    ),
-    dplyr::transmute(
-      raw,
-      taxon = .data$j,
-      n_pairs = .data$n_pairs_ji,
-      rhat = .data$rhat_ji, essb = .data$essb_ji, esst = .data$esst_ji,
-      div = .data$div_ji, tdhit = .data$tdhit_ji,
-      ebfmi_min = .data$ebfmi_min_ji,
-      diagnostic_class = .data$diagnostic_class_ji
-    )
-  )
 
-  # ---------------------------
-  # CROSS summary (diag_ok gating)
-  # ---------------------------
+  cross_key <- paste(cross_diag$from, cross_diag$to, sep = "\r")
+  if (anyDuplicated(cross_key)) {
+    stop(
+      "`df$raw` contains duplicate directed identities; cross diagnostics cannot be joined one-to-one."
+    )
+  }
+
   if (do_cross) {
-    # 1) 진단 붙이고 diag_ok 먼저 계산
+    n_cross_before <- nrow(cross)
+
     cross_merged <- cross |>
-      dplyr::left_join(cross_diag, by = c("from","to")) |>
-      dplyr::mutate(
-        sampler_diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
-                                       .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
-        diagnostic_class = dplyr::coalesce(.data$diagnostic_class, .data$diagnostic_class_diag),
-        diag_ok = .data$sampler_diag_ok & .data$diagnostic_class == "converged",
-        a_sign = dplyr::case_when(
-          is.finite(.data$a_mean) & .data$a_mean >  0 ~ "+",
-          is.finite(.data$a_mean) & .data$a_mean <  0 ~ "-",
-          TRUE ~ "0"
-        ),
-        bayes_FDR = ifelse(.data$diag_ok, .lfsr_safe(.data$p_sign2), NA_real_)
+      dplyr::left_join(
+        cross_diag,
+        by = c("from", "to")
       )
 
-    # Cross-pair pseudo-BMA and stacking are intentionally disabled.
-    # Distinct incoming edges generally use different pair-to-rest responses,
-    # so they are not common-outcome candidate models.
+    if (nrow(cross_merged) != n_cross_before) {
+      stop(
+        "Cross diagnostic join changed the row count; directed identities are not one-to-one."
+      )
+    }
+
     cross_sum <- cross_merged |>
+      dplyr::mutate(
+        diagnostic_class = dplyr::coalesce(
+          .data$diagnostic_class,
+          .data$diagnostic_class_diag,
+          "diagnostics_unavailable"
+        ),
+        sampler_diag_ok = .diag_ok_fun(
+          .data$rhat,
+          .data$essb,
+          .data$esst,
+          .data$div,
+          .data$tdhit,
+          .data$ebfmi_min,
+          thr = thr
+        ),
+        diag_ok =
+          .data$sampler_diag_ok &
+          .data$diagnostic_class == "converged",
+        a_sign = dplyr::case_when(
+          !is.finite(.data$a_mean) ~ NA_character_,
+          .data$a_mean > 0 ~ "+",
+          .data$a_mean < 0 ~ "-",
+          TRUE ~ "0"
+        ),
+        bayes_FDR = ifelse(
+          .data$diag_ok,
+          .lfsr_safe(.data$p_sign2),
+          NA_real_
+        )
+      ) |>
       dplyr::transmute(
-        from, to,
+        from = as.character(.data$from),
+        to = as.character(.data$to),
         n_subjects = .data$n_subjects,
         n_pairs = .data$n_pairs,
-        a_sign, a_mean, a_q2.5, a_q97.5,
-        p_sign2, bayes_FDR,
-        rhat, essb, esst, div, tdhit, ebfmi_min,
-        diagnostic_class, sampler_diag_ok, diag_ok
+        a_sign = .data$a_sign,
+        a_mean = .data$a_mean,
+        a_q2.5 = .data$a_q2.5,
+        a_q97.5 = .data$a_q97.5,
+        p_sign2 = .data$p_sign2,
+        bayes_FDR = .data$bayes_FDR,
+        rhat = .data$rhat,
+        essb = .data$essb,
+        esst = .data$esst,
+        div = .data$div,
+        tdhit = .data$tdhit,
+        ebfmi_min = .data$ebfmi_min,
+        diagnostic_class = .data$diagnostic_class,
+        sampler_diag_ok = .data$sampler_diag_ok,
+        diag_ok = .data$diag_ok
       )
 
     if (!is.null(alpha)) {
       cross_sum <- dplyr::mutate(
         cross_sum,
-        pass_bayes_fdr = is.finite(.data$bayes_FDR) & .data$bayes_FDR <= alpha
+        pass_bayes_fdr =
+          is.finite(.data$bayes_FDR) &
+          .data$bayes_FDR <= alpha
       )
     }
-    cross_sum <- dplyr::arrange(cross_sum, .data$bayes_FDR)
+
+    cross_sum <- dplyr::arrange(
+      cross_sum,
+      .data$bayes_FDR
+    )
   }
 
-  # ---------------------------
-  # SELF summary (diag_ok gating)
-  # ---------------------------
   if (do_self) {
-    self_sum <- self |>
-      dplyr::left_join(self_diag, by = c("taxon")) |>
+    # New results carry `partner` directly in df$self. Historical package
+    # results omitted it, but .mk_self() emitted rows deterministically as all
+    # i-side rows followed by all j-side rows. Reconstruct partner only when
+    # that exact invariant is verifiable; otherwise fail rather than performing
+    # an ambiguous taxon-only join.
+    if (!"partner" %in% names(self)) {
+      expected_n <- 2L * nrow(raw)
+
+      if (nrow(self) != expected_n) {
+        stop(
+          paste(
+            "`df$self` lacks `partner`, and its row count does not match",
+            "the historical two-rows-per-pair layout; self contexts are",
+            "ambiguous."
+          )
+        )
+      }
+
+      expected_taxon <- c(
+        as.character(raw$i),
+        as.character(raw$j)
+      )
+      reconstructed_partner <- c(
+        as.character(raw$j),
+        as.character(raw$i)
+      )
+
+      if (!identical(as.character(self$taxon), expected_taxon)) {
+        stop(
+          paste(
+            "`df$self` lacks `partner`, and its row order does not match",
+            "the historical .mk_self() layout; self contexts cannot be",
+            "reconstructed safely."
+          )
+        )
+      }
+
+      self$partner <- reconstructed_partner
+    }
+
+    self$taxon <- as.character(self$taxon)
+    self$partner <- as.character(self$partner)
+
+    if (anyNA(self$taxon) ||
+        anyNA(self$partner) ||
+        any(!nzchar(self$taxon)) ||
+        any(!nzchar(self$partner))) {
+      stop(
+        "`df$self` contains missing or empty taxon-partner identities."
+      )
+    }
+
+    self_diag <- dplyr::bind_rows(
+      dplyr::transmute(
+        raw,
+        taxon = as.character(.data$i),
+        partner = as.character(.data$j),
+        n_pairs = as.integer(.data$n_pairs_ij),
+        rhat = .data$rhat_ij,
+        essb = .data$essb_ij,
+        esst = .data$esst_ij,
+        div = .data$div_ij,
+        tdhit = .data$tdhit_ij,
+        ebfmi_min = .data$ebfmi_min_ij,
+        diagnostic_class = .data$diagnostic_class_ij
+      ),
+      dplyr::transmute(
+        raw,
+        taxon = as.character(.data$j),
+        partner = as.character(.data$i),
+        n_pairs = as.integer(.data$n_pairs_ji),
+        rhat = .data$rhat_ji,
+        essb = .data$essb_ji,
+        esst = .data$esst_ji,
+        div = .data$div_ji,
+        tdhit = .data$tdhit_ji,
+        ebfmi_min = .data$ebfmi_min_ji,
+        diagnostic_class = .data$diagnostic_class_ji
+      )
+    )
+
+    self_key <- paste(
+      self$taxon,
+      self$partner,
+      sep = "\r"
+    )
+    self_diag_key <- paste(
+      self_diag$taxon,
+      self_diag$partner,
+      sep = "\r"
+    )
+
+    if (anyDuplicated(self_key)) {
+      stop(
+        "`df$self` contains duplicate taxon-partner self identities."
+      )
+    }
+    if (anyDuplicated(self_diag_key)) {
+      stop(
+        "`df$raw` contains duplicate taxon-partner diagnostic identities."
+      )
+    }
+
+    n_self_before <- nrow(self)
+
+    self_merged <- self |>
+      dplyr::left_join(
+        self_diag,
+        by = c("taxon", "partner")
+      )
+
+    if (nrow(self_merged) != n_self_before) {
+      stop(
+        "Self diagnostic join changed the row count; identities are not one-to-one."
+      )
+    }
+
+    self_sum <- self_merged |>
       dplyr::mutate(
+        diagnostic_class = dplyr::coalesce(
+          as.character(.data$diagnostic_class),
+          "diagnostics_unavailable"
+        ),
+        sampler_diag_ok = .diag_ok_fun(
+          .data$rhat,
+          .data$essb,
+          .data$esst,
+          .data$div,
+          .data$tdhit,
+          .data$ebfmi_min,
+          thr = thr
+        ),
+        diag_ok =
+          .data$sampler_diag_ok &
+          .data$diagnostic_class == "converged",
         from = .data$taxon,
-        to   = .data$taxon,
+        to = .data$taxon,
         a_sign = dplyr::case_when(
-          is.finite(.data$a_self_mean) & .data$a_self_mean >  0 ~ "+",
-          is.finite(.data$a_self_mean) & .data$a_self_mean <  0 ~ "-",
+          !is.finite(.data$a_self_mean) ~ NA_character_,
+          .data$a_self_mean > 0 ~ "+",
+          .data$a_self_mean < 0 ~ "-",
           TRUE ~ "0"
         ),
-        sampler_diag_ok = .diag_ok_fun(.data$rhat, .data$essb, .data$esst,
-                                       .data$div, .data$tdhit, .data$ebfmi_min, thr = thr),
-        diag_ok = .data$sampler_diag_ok & .data$diagnostic_class == "converged",
-        bayes_FDR = ifelse(.data$diag_ok, .lfsr_safe(.data$p_sign2_self), NA_real_)
+        bayes_FDR = ifelse(
+          .data$diag_ok,
+          .lfsr_safe(.data$p_sign2_self),
+          NA_real_
+        )
       ) |>
       dplyr::transmute(
-        from, to,
+        taxon = .data$taxon,
+        partner = .data$partner,
+        from = .data$from,
+        to = .data$to,
         n_pairs = .data$n_pairs,
-        a_sign,
-        a_mean  = .data$a_self_mean,
-        a_q2.5  = .data$a_self_q2.5,
+        a_sign = .data$a_sign,
+        a_mean = .data$a_self_mean,
+        a_q2.5 = .data$a_self_q2.5,
         a_q97.5 = .data$a_self_q97.5,
         p_sign2 = .data$p_sign2_self,
-        bayes_FDR,
-        rhat, essb, esst, div, tdhit, ebfmi_min,
-        diagnostic_class, sampler_diag_ok, diag_ok
+        bayes_FDR = .data$bayes_FDR,
+        rhat = .data$rhat,
+        essb = .data$essb,
+        esst = .data$esst,
+        div = .data$div,
+        tdhit = .data$tdhit,
+        ebfmi_min = .data$ebfmi_min,
+        diagnostic_class = .data$diagnostic_class,
+        sampler_diag_ok = .data$sampler_diag_ok,
+        diag_ok = .data$diag_ok
       )
 
     if (!is.null(alpha)) {
       self_sum <- dplyr::mutate(
         self_sum,
-        pass_bayes_fdr = is.finite(.data$bayes_FDR) & .data$bayes_FDR <= alpha
+        pass_bayes_fdr =
+          is.finite(.data$bayes_FDR) &
+          .data$bayes_FDR <= alpha
       )
     }
-    self_sum <- dplyr::arrange(self_sum, .data$bayes_FDR)
+
+    self_sum <- dplyr::arrange(
+      self_sum,
+      .data$bayes_FDR,
+      .data$taxon,
+      .data$partner
+    )
   }
 
   out <- list()
-  if (do_cross) out$cross <- cross_sum
-  if (do_self)  out$self  <- self_sum
+  if (do_cross) {
+    out$cross <- cross_sum
+  }
+  if (do_self) {
+    out$self <- self_sum
+  }
   out
 }
