@@ -12,13 +12,15 @@ test_that("full benchmark configuration is exact and deterministic", {
   b <- build_v021_full_config(tempdir())
   expect_identical(a, b)
   expect_silent(validate_v021_full_config(a))
-  expect_identical(a$benchmark_schema, "v021_full_100_species_v3")
+  expect_identical(a$benchmark_schema, "v021_full_100_species_v4")
   expect_identical(a$chains, 4L)
   expect_identical(a$main_parallel_chains, 1L)
+  expect_identical(a$kfold_parallel_chains, 1L)
   expect_identical(a$iter_warmup, 2000L)
   expect_identical(a$iter_sampling, 2000L)
   expect_identical(a$nominal_retained_draws, 8000L)
   expect_identical(a$maximum_simultaneous_fits, 12L)
+  expect_identical(a$maximum_simultaneous_kfold_fits, 12L)
   expect_identical(a$rolling_window_size, 60L)
   expect_true(a$run_kfold)
   expect_false(a$use_pathfinder)
@@ -69,20 +71,28 @@ test_that("three-direction debug preflight permits one incomplete pair only expl
                          runner, fixed = TRUE)))
 })
 
-test_that("policy v4 runs twelve four-chain directions one chain at a time", {
+test_that("policy v5 runs main and K-fold as separate twelve-by-one phases", {
   config <- build_v021_full_config(tempdir())
   policy <- build_v021_full_resource_policy(config)
   derivation <- validate_v021_preflight_launch_capacity(policy, 12L)
-  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v5")
   expect_identical(policy$logical_host_threads, 16L)
   expect_identical(policy$reserved_host_threads, 4L)
   expect_identical(policy$usable_chain_slots, 12L)
   expect_identical(policy$main_chains, 4L)
   expect_identical(policy$main_parallel_chains, 1L)
+  expect_identical(policy$kfold_parallel_chains, 1L)
   expect_identical(policy$proposed_outer_concurrency, 12L)
+  expect_identical(policy$maximum_concurrent_kfold_fits, 12L)
   expect_identical(derivation$projected_active_cmdstan_chains, 12L)
   expect_identical(derivation$projected_active_cmdstan_processes, 12L)
+  kfold <- derive_safe_outer_concurrency(
+    policy, build_v021_operation_spec("kfold_fit", 12L))
+  expect_identical(kfold$projected_active_cmdstan_chains, 12L)
+  expect_identical(kfold$projected_active_cmdstan_processes, 12L)
   expect_error(validate_v021_preflight_launch_capacity(policy, 13L), "ceiling")
+  expect_error(derive_safe_outer_concurrency(
+    policy, build_v021_operation_spec("kfold_fit", 13L)), "ceiling")
 })
 
 test_that("restart resumes incomplete work without rerunning terminal tasks", {
@@ -145,6 +155,21 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl("worker_compilation_count = 0L", runner, fixed = TRUE)))
   expect_true(any(grepl("pclvbayes.parallel_chains_override", runner, fixed = TRUE)))
   expect_true(any(grepl("config$main_parallel_chains", runner, fixed = TRUE)))
+  expect_true(any(grepl("kfold_chain_slot_rolling", runner, fixed = TRUE)))
+  expect_true(any(grepl("config$maximum_simultaneous_kfold_fits",
+                         runner, fixed = TRUE)))
+  expect_true(any(grepl("predictive_fit_worker", runner, fixed = TRUE)))
+  expect_true(any(grepl("run_predictive_rolling", runner, fixed = TRUE)))
+  expect_true(any(grepl("main_kfold_overlap = FALSE", runner, fixed = TRUE)))
+  main_monitor_collect <- grep(
+    "collect_v021_tracked_jobs(monitor_job_tracker)", runner, fixed = TRUE)
+  predictive_launch <- grep("run_predictive_rolling()", runner, fixed = TRUE)
+  expect_length(main_monitor_collect, 1L)
+  expect_length(predictive_launch, 1L)
+  expect_lt(main_monitor_collect, predictive_launch)
+  expect_true(any(grepl(
+    "collect_v021_tracked_jobs(predictive_monitor_job_tracker)",
+    runner, fixed = TRUE)))
   expect_false(any(grepl("cmdstan_model|compile\\(", runner)))
   expect_false(any(grepl("stacking_results|pseudo_BMA|elpd_pointwise", runner)))
 })
@@ -730,7 +755,7 @@ test_that("runner uses one scoped monitor collection before predictive children"
     fixed = TRUE
   )[[1L]]
   predictive_at <- regexpr(
-    "evaluator = pclvbayes:::.add_predictive_evaluation",
+    "pclvbayes:::.add_predictive_evaluation(input_result)",
     runner,
     fixed = TRUE
   )[[1L]]

@@ -1,6 +1,6 @@
 # Benchmark-only full 100-species execution contract for ROADMAP V021-06.
 
-v021_full_schema <- "v021_full_100_species_v3"
+v021_full_schema <- "v021_full_100_species_v4"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
 v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
 v021_full_cleanup_audit_schema <- "v021_full_cleanup_audit_v1"
@@ -146,7 +146,7 @@ wait_v021_collected_child_exit <- function(
 recover_v021_monitor_peaks <- function(output_root, policy, executable) {
   validate_v021_resource_policy(policy)
   monitor_root <- file.path(output_root, "monitor")
-  files <- list.files(monitor_root, pattern = "^batch-[0-9]+\\.rds$",
+  files <- list.files(monitor_root, pattern = "^batch-[0-9]+(-kfold)?\\.rds$",
                       full.names = TRUE)
   if (!length(files)) return(list(chains = 0L, processes = 0L))
   peaks <- lapply(files, function(path) {
@@ -231,10 +231,12 @@ build_v021_full_config <- function(output_root) {
     selection_rule = v021_full_selection_rule,
     chains = 4L,
     main_parallel_chains = 1L,
+    kfold_parallel_chains = 1L,
     iter_warmup = 2000L,
     iter_sampling = 2000L,
     nominal_retained_draws = 8000L,
     maximum_simultaneous_fits = 12L,
+    maximum_simultaneous_kfold_fits = 12L,
     rolling_window_size = 60L,
     maximum_task_attempts = 2L,
     kfold_seed = 20260802L,
@@ -252,9 +254,10 @@ validate_v021_full_config <- function(config) {
   fields <- c(
     "benchmark_schema", "dataset_id", "seed", "taxa_count",
     "unordered_pair_count", "directed_task_count", "selection_rule", "chains",
-    "main_parallel_chains", "iter_warmup", "iter_sampling",
-    "nominal_retained_draws",
-    "maximum_simultaneous_fits", "rolling_window_size",
+    "main_parallel_chains", "kfold_parallel_chains",
+    "iter_warmup", "iter_sampling", "nominal_retained_draws",
+    "maximum_simultaneous_fits", "maximum_simultaneous_kfold_fits",
+    "rolling_window_size",
     "maximum_task_attempts", "kfold_seed",
     "preprocessing_config_id", "posterior_config_id", "predictive_config_id",
     "run_kfold", "use_pathfinder", "cpu_affinity", "output_root"
@@ -268,10 +271,12 @@ validate_v021_full_config <- function(config) {
       !identical(config$selection_rule, v021_full_selection_rule) ||
       !identical(config$chains, 4L) ||
       !identical(config$main_parallel_chains, 1L) ||
+      !identical(config$kfold_parallel_chains, 1L) ||
       !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
       !identical(config$maximum_simultaneous_fits, 12L) ||
+      !identical(config$maximum_simultaneous_kfold_fits, 12L) ||
       !identical(config$rolling_window_size, 60L) ||
       !identical(config$maximum_task_attempts, 2L) ||
       !identical(config$kfold_seed, 20260802L) ||
@@ -295,10 +300,12 @@ build_v021_full_resource_policy <- function(config) {
     retry_chains = config$chains,
     retry_parallel_chains = config$main_parallel_chains,
     kfold_chains = config$chains,
-    kfold_parallel_chains = 1L,
+    kfold_parallel_chains = config$kfold_parallel_chains,
     confirmation_chains = config$chains,
     confirmation_parallel_chains = config$main_parallel_chains,
-    proposed_outer_concurrency = config$maximum_simultaneous_fits
+    proposed_outer_concurrency = config$maximum_simultaneous_fits,
+    maximum_concurrent_kfold_fits =
+      config$maximum_simultaneous_kfold_fits
   )
 }
 
@@ -398,7 +405,10 @@ build_v021_full_execution_manifest <- function(config, taxa, provenance) {
       identity = config$posterior_config_id, chains = config$chains,
       parallel_chains = config$main_parallel_chains,
       iter_warmup = config$iter_warmup, iter_sampling = config$iter_sampling),
-    kfold_config = list(K = 5L, R = 1L, enabled = config$run_kfold),
+    kfold_config = list(
+      K = 5L, R = 1L, enabled = config$run_kfold,
+      parallel_chains = config$kfold_parallel_chains,
+      maximum_concurrent_fits = config$maximum_simultaneous_kfold_fits),
     predictive_config = list(identity = config$predictive_config_id),
     provenance = provenance)
 }
@@ -534,9 +544,12 @@ run_v021_full_dry_run_audit <- function(prepared, policy, result_root,
     retry_count = completed$status$tasks$attempt_count[[1L]],
     maximum_wave_slots = max(vapply(waves, `[[`, integer(1), "reserved_chain_slots")),
     ownership_released = !dir.exists(v021_ownership_path(result_root)),
-    kfold_planning = list(priority = "canonical completed-main direction order",
-                          parallel_chains = policy$kfold_parallel_chains,
-                          shared_budget = TRUE),
+    kfold_planning = list(
+      priority = "canonical completed-main direction order",
+      scheduler = "kfold_chain_slot_rolling",
+      parallel_chains = policy$kfold_parallel_chains,
+      maximum_concurrent_fits = policy$maximum_concurrent_kfold_fits,
+      shared_budget = TRUE, main_kfold_overlap = FALSE),
     obsolete_weight_fields_absent = TRUE,
     sampling_launched = FALSE)
 }

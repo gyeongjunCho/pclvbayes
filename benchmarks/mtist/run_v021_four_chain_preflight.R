@@ -41,7 +41,9 @@ monitor_dir <- file.path(config$output_root, "monitor")
 dir.create(monitor_dir, showWarnings = FALSE)
 manifest_path <- file.path(config$output_root, "manifest.rds")
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+policy <- build_v021_resource_policy(
+  proposed_outer_concurrency = 3L,
+  maximum_concurrent_kfold_fits = 1L)
 operation <- build_v021_operation_spec("main_fit", 3L)
 derivation <- derive_safe_outer_concurrency(policy, operation)
 thread_environment <- v021_single_thread_environment()
@@ -606,7 +608,10 @@ write_tsv(data.frame(
   chains_per_fit = policy$main_chains,
   parallel_chains_per_fit = policy$main_parallel_chains,
   threads_per_chain = policy$cpu_threads_per_active_chain,
-  maximum_concurrent_fits = policy$proposed_outer_concurrency), "resource_policy.tsv")
+  maximum_concurrent_fits = policy$proposed_outer_concurrency,
+  kfold_parallel_chains_per_fit = policy$kfold_parallel_chains,
+  maximum_concurrent_kfold_fits = policy$maximum_concurrent_kfold_fits),
+  "resource_policy.tsv")
 write_tsv(data.frame(variable = names(thread_environment), value = unname(thread_environment)),
           "environment_thread_caps.tsv")
 write_tsv(data.frame(wave = c(1L, 2L), task_count = c(3L, 1L),

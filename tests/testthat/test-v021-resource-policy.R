@@ -883,7 +883,7 @@ test_that("diagnose recognition accepts canonical controller-owned utility", {
 
 test_that("the policy records the exact 16-thread, 4-reserved, 12-slot contract", {
   policy <- build_v021_resource_policy()
-  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v5")
   expect_identical(policy$logical_host_threads, 16L)
   expect_identical(policy$reserved_host_threads, 4L)
   expect_identical(policy$usable_chain_slots, 12L)
@@ -908,6 +908,8 @@ test_that("malformed and contradictory resource policies are rejected", {
                                           kfold_parallel_chains = 3L), "cannot exceed")
   expect_error(build_v021_resource_policy(global_slot_scheduler = FALSE), "requires")
   expect_error(build_v021_resource_policy(proposed_outer_concurrency = 4L), "exceeds")
+  expect_error(build_v021_resource_policy(
+    maximum_concurrent_kfold_fits = 13L), "K-fold|ceiling")
   policy <- build_v021_resource_policy()
   policy$usable_chain_slots <- 11L
   expect_error(validate_v021_resource_policy(policy), "16/4/12")
@@ -958,7 +960,8 @@ test_that("n_workers_outer cannot override the binding chain ceiling", {
 })
 
 test_that("every operation uses the same slot accounting model", {
-  policy <- build_v021_resource_policy()
+  policy <- build_v021_resource_policy(
+    maximum_concurrent_kfold_fits = 12L)
   slots <- policy$operation_slots
   expect_identical(slots$simultaneous_chain_slots,
                    c(4L, 4L, 0L, 1L, 4L))

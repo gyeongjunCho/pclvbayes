@@ -1,6 +1,6 @@
 # Benchmark-only resource and process-monitoring contract for ROADMAP V021-02.
 
-v021_resource_policy_schema <- "v021_resource_policy_v4"
+v021_resource_policy_schema <- "v021_resource_policy_v5"
 v021_preflight_states <- c(
   "passed", "failed_ceiling_exceeded", "failed_unverified_process_tree",
   "failed_thread_environment", "failed_invalid_policy", "failed_monitoring_error"
@@ -106,6 +106,7 @@ build_v021_resource_policy <- function(
     confirmation_chains = main_chains,
     confirmation_parallel_chains = main_parallel_chains,
     proposed_outer_concurrency = NULL,
+    maximum_concurrent_kfold_fits = 1L,
     global_slot_scheduler = TRUE) {
   logical_host_threads <- .v021_resource_int(logical_host_threads, "logical_host_threads")
   reserved_host_threads <- .v021_resource_int(
@@ -160,8 +161,20 @@ build_v021_resource_policy <- function(
   if (is.null(proposed_outer_concurrency)) proposed_outer_concurrency <- safe_outer
   proposed_outer_concurrency <- .v021_resource_int(
     proposed_outer_concurrency, "proposed_outer_concurrency")
+  maximum_concurrent_kfold_fits <- .v021_resource_int(
+    maximum_concurrent_kfold_fits, "maximum_concurrent_kfold_fits")
   if (proposed_outer_concurrency > safe_outer)
     stop("Proposed outer concurrency exceeds the global slot ceiling.")
+  kfold_row <- operation_slots[
+    operation_slots$operation == "kfold_fit", , drop = FALSE]
+  kfold_safe <- min(
+    floor(maximum_active_cmdstan_chains /
+            kfold_row$simultaneous_chain_slots[[1L]]),
+    floor(maximum_cmdstan_process_slots /
+            kfold_row$cmdstan_process_slots[[1L]])
+  )
+  if (maximum_concurrent_kfold_fits > kfold_safe)
+    stop("Maximum concurrent K-fold fits exceed the global slot ceiling.")
 
   policy <- list(
     policy_schema = v021_resource_policy_schema,
@@ -184,8 +197,9 @@ build_v021_resource_policy <- function(
     confirmation_chains = confirmation_chains,
     confirmation_parallel_chains = confirmation_parallel_chains,
     proposed_outer_concurrency = proposed_outer_concurrency,
-    maximum_concurrent_kfold_fits = 1L,
-    controller_worker_limit = proposed_outer_concurrency,
+    maximum_concurrent_kfold_fits = maximum_concurrent_kfold_fits,
+    controller_worker_limit = max(
+      proposed_outer_concurrency, maximum_concurrent_kfold_fits),
     retries_share_chain_budget = TRUE,
     environment_thread_caps = v021_single_thread_environment(),
     result_root_ownership_policy = v021_controller_ownership_schema,
@@ -236,8 +250,10 @@ validate_v021_resource_policy <- function(policy) {
     stop("Policy requires exactly one thread per chain and numerical library.")
   if (!identical(policy$global_slot_scheduler, TRUE))
     stop("V021-02 requires the verified global slot scheduler.")
-  if (!identical(policy$maximum_concurrent_kfold_fits, 1L) ||
-      !identical(policy$controller_worker_limit, policy$proposed_outer_concurrency) ||
+  if (!identical(
+        policy$controller_worker_limit,
+        max(policy$proposed_outer_concurrency,
+            policy$maximum_concurrent_kfold_fits)) ||
       !identical(policy$retries_share_chain_budget, TRUE) ||
       !identical(policy$result_root_ownership_policy, v021_controller_ownership_schema) ||
       !is.numeric(policy$scheduler_poll_interval_seconds) ||
@@ -270,6 +286,15 @@ validate_v021_resource_policy <- function(policy) {
       max(policy$operation_slots$simultaneous_chain_slots,
           policy$operation_slots$cmdstan_process_slots) > policy$usable_chain_slots)
     stop("Proposed outer concurrency is mathematically unsafe.")
+  kfold_row <- policy$operation_slots[
+    policy$operation_slots$operation == "kfold_fit", , drop = FALSE]
+  if (policy$maximum_concurrent_kfold_fits *
+        kfold_row$simultaneous_chain_slots[[1L]] >
+        policy$maximum_active_cmdstan_chains ||
+      policy$maximum_concurrent_kfold_fits *
+        kfold_row$cmdstan_process_slots[[1L]] >
+        policy$maximum_cmdstan_process_slots)
+    stop("Maximum concurrent K-fold fits are mathematically unsafe.")
   invisible(TRUE)
 }
 
@@ -298,8 +323,18 @@ derive_safe_outer_concurrency <- function(policy, operation_spec) {
   process_capacity <- if (per_fit_process_slots > 0L)
     floor(policy$maximum_cmdstan_process_slots / per_fit_process_slots) else Inf
   safe <- as.integer(min(chain_capacity, process_capacity))
-  if (any(spec$operations %in% c("main_fit", "retry_fit", "confirmation_fit")))
+  # An operation specification describes operations that can occur sequentially
+  # within one direction, not stages that overlap.  Therefore a mixed
+  # main/retry/K-fold specification is bound by the main outer-concurrency
+  # ceiling; the K-fold-specific ceiling binds only a K-fold-only stage.
+  has_primary_stage <- any(
+    spec$operations %in% c("main_fit", "retry_fit", "confirmation_fit")
+  )
+  if (has_primary_stage) {
     safe <- min(safe, policy$proposed_outer_concurrency)
+  } else if ("kfold_fit" %in% spec$operations) {
+    safe <- min(safe, policy$maximum_concurrent_kfold_fits)
+  }
   if (safe < 1L) stop("Operation cannot fit within the global resource ceiling.")
   requested <- spec$requested_outer_concurrency
   projected_chains <- requested * per_fit_chain_slots
@@ -931,10 +966,16 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   process_peak <- max(process_counts)
   main_slot_row <- policy$operation_slots[
     policy$operation_slots$operation == "main_fit", , drop = FALSE]
+  kfold_slot_row <- policy$operation_slots[
+    policy$operation_slots$operation == "kfold_fit", , drop = FALSE]
   configured_launch_chain_ceiling <- min(
     policy$maximum_active_cmdstan_chains,
-    policy$proposed_outer_concurrency *
-      main_slot_row$simultaneous_chain_slots[[1L]])
+    max(
+      policy$proposed_outer_concurrency *
+        main_slot_row$simultaneous_chain_slots[[1L]],
+      policy$maximum_concurrent_kfold_fits *
+        kfold_slot_row$simultaneous_chain_slots[[1L]]
+    ))
   complete <- all(vapply(classified, function(x) {
     terminal <- if ("capture_state" %in% names(x))
       x$capture_state %in% c("vanished_during_capture", "zombie_process")

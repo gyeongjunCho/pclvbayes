@@ -324,7 +324,7 @@ validate_v021_preflight_summary <- function(summary) {
   )
   if (!is.list(summary) || !identical(names(summary), required) ||
       !identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2") ||
-      !identical(summary$resource_policy_schema, "v021_resource_policy_v4") ||
+      !identical(summary$resource_policy_schema, "v021_resource_policy_v5") ||
       !identical(summary$logical_host_threads, 16L) ||
       !identical(summary$reserved_host_threads, 4L) ||
       !identical(summary$usable_execution_capacity, 12L) ||

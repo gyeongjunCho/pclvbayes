@@ -22,7 +22,7 @@ test_that("preflight configuration and selection are deterministic and truth-fre
 test_that("four-chain concurrency is bounded at three under policy v4", {
   policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
   derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
-  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v5")
   expect_identical(derivation$projected_active_cmdstan_chains, 12L)
   expect_identical(derivation$projected_active_cmdstan_processes, 12L)
   expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
@@ -175,7 +175,7 @@ test_that("feature and summary contracts remain truth-free and explicit", {
     list(passed=TRUE, active_preflight_cmdstan_processes=0L))
   expect_identical(summary$state, "passed")
   expect_identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2")
-  expect_identical(summary$resource_policy_schema, "v021_resource_policy_v4")
+  expect_identical(summary$resource_policy_schema, "v021_resource_policy_v5")
   expect_identical(summary$logical_host_threads, 16L)
   expect_identical(summary$reserved_host_threads, 4L)
   expect_identical(summary$usable_execution_capacity, 12L)

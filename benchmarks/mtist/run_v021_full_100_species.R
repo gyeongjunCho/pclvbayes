@@ -78,14 +78,23 @@ validate_v021_resource_policy(policy)
 derivation <- derive_safe_outer_concurrency(
   policy,
   build_v021_operation_spec("main_fit", config$maximum_simultaneous_fits))
-if (!identical(policy$policy_schema, "v021_resource_policy_v4") ||
+kfold_derivation <- derive_safe_outer_concurrency(
+  policy,
+  build_v021_operation_spec(
+    "kfold_fit", config$maximum_simultaneous_kfold_fits))
+if (!identical(policy$policy_schema, "v021_resource_policy_v5") ||
     !identical(policy$main_chains, 4L) ||
     !identical(policy$main_parallel_chains, 1L) ||
+    !identical(policy$kfold_parallel_chains, 1L) ||
     !identical(policy$proposed_outer_concurrency, 12L) ||
+    !identical(policy$maximum_concurrent_kfold_fits, 12L) ||
     !identical(derivation$per_fit_simultaneous_chain_slots, 1L) ||
     !identical(derivation$projected_active_cmdstan_chains, 12L) ||
-    !identical(derivation$projected_active_cmdstan_processes, 12L))
-  stop("V021-06 requires the verified policy-v4 12x1 chain-slot contract.")
+    !identical(derivation$projected_active_cmdstan_processes, 12L) ||
+    !identical(kfold_derivation$per_fit_simultaneous_chain_slots, 1L) ||
+    !identical(kfold_derivation$projected_active_cmdstan_chains, 12L) ||
+    !identical(kfold_derivation$projected_active_cmdstan_processes, 12L))
+  stop("V021-06 requires the verified policy-v5 main-and-K-fold 12x1 contract.")
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
 
@@ -275,6 +284,12 @@ launch_record$scheduler <- list(
   chains_per_direction = as.integer(config$chains),
   parallel_chains_per_direction = as.integer(config$main_parallel_chains),
   maximum_active_main_fits = as.integer(config$maximum_simultaneous_fits),
+  predictive_strategy = "kfold_chain_slot_rolling",
+  kfold_parallel_chains_per_direction =
+    as.integer(config$kfold_parallel_chains),
+  maximum_active_kfold_fits =
+    as.integer(config$maximum_simultaneous_kfold_fits),
+  main_kfold_overlap = FALSE,
   window_size = as.integer(config$rolling_window_size),
   polling_seconds = 0.05)
 .v021_atomic_save_rds(launch_record, file.path(paths$output_root, "launch_record.rds"))
@@ -509,6 +524,8 @@ run_batch <- function(indices) {
 
   fit_job_tracker <- new_v021_child_job_tracker()
   monitor_job_tracker <- new_v021_child_job_tracker()
+  predictive_job_tracker <- new_v021_child_job_tracker()
+  predictive_monitor_job_tracker <- new_v021_child_job_tracker()
   active_meta <- new.env(hash = TRUE, parent = emptyenv())
 
   collect_ready_jobs <- function(tracker) {
@@ -652,7 +669,9 @@ run_batch <- function(indices) {
         stdout = FALSE, stderr = FALSE)))
   }
   runtime_reaper <- function()
-    reap_v021_uncollected_jobs(fit_job_tracker, monitor_job_tracker)
+    reap_v021_uncollected_jobs(
+      fit_job_tracker, monitor_job_tracker,
+      predictive_job_tracker, predictive_monitor_job_tracker)
 
   on.exit({
     cleanup_result <- tryCatch(
@@ -885,38 +904,441 @@ run_batch <- function(indices) {
     peak_slots <<- max(
       peak_slots, batch_monitor$observed_peak_active_cmdstan_processes)
 
-    evaluate_predictive <- function(i, result) {
-      direction_id <- manifest$direction_id[[i]]
-      attempt_number <- v021_task_attempt_number(
-        execution_status, tasks$direction_index[[i]])
-      evaluated <- with_v021_predictive_reservation(
-        result, active_reservations, policy, direction_id, attempt_number,
-        evaluator = pclvbayes:::.add_predictive_evaluation,
-        persist = function(value) {
-          active_reservations <<- value
+    run_predictive_rolling <- function() {
+      valid_positions <- which(!vapply(
+        results,
+        inherits,
+        logical(1),
+        what = c("try-error", "pclv_failure", "v021_traced_child_error")
+      ))
+      if (!length(valid_positions))
+        return(list(results = results, elapsed = rep(0, length(indices))))
+
+      maximum_predictive <- min(
+        length(valid_positions),
+        as.integer(config$maximum_simultaneous_kfold_fits)
+      )
+      derive_safe_outer_concurrency(
+        policy,
+        build_v021_operation_spec("kfold_fit", maximum_predictive)
+      )
+
+      predictive_batch_id <- paste0(batch_id, "-kfold")
+      predictive_stop_file <- tempfile("v021-full-kfold-monitor-stop-")
+      predictive_monitor_start_file <- tempfile(
+        "v021-full-kfold-monitor-start-")
+      predictive_registry_file <- tempfile(
+        "v021-full-kfold-registry-", fileext = ".rds")
+      predictive_final_file <- file.path(
+        paths$monitor_root, paste0(predictive_batch_id, ".rds"))
+      predictive_latest_file <- file.path(paths$monitor_root, "latest.rds")
+      predictive_results <- results
+      predictive_elapsed <- rep(0, length(indices))
+      predictive_meta <- new.env(hash = TRUE, parent = emptyenv())
+      predictive_registry <- NULL
+      predictive_ownership <- NULL
+      predictive_exit_condition <- NULL
+      predictive_cleanup_installed <- FALSE
+
+      # Fail closed even if setup fails before durable predictive ownership is
+      # installed. All spawned children are still behind private gate files at
+      # this point, so direct-child signaling is sufficient for early teardown.
+      on.exit({
+        if (!predictive_cleanup_installed) {
+          jobs <- predictive_job_tracker$jobs
+          if (length(jobs)) {
+            pids <- vapply(
+              jobs, function(job) as.integer(job$pid), integer(1))
+            try(runtime_signaler(pids, "SIGINT"), silent = TRUE)
+            Sys.sleep(0.1)
+            try(runtime_signaler(pids, "SIGTERM"), silent = TRUE)
+          }
+          try(reap_v021_uncollected_jobs(
+            predictive_job_tracker, predictive_monitor_job_tracker),
+            silent = TRUE)
+          try({
+            owned_ids <- manifest$direction_id[indices[valid_positions]]
+            active <- active_reservations$state == "reserved" &
+              active_reservations$job_type == "kfold_fit" &
+              active_reservations$task_identity %in% owned_ids
+            active_reservations$state[active] <<- "worker_terminated"
+            write_v021_reservations_atomic(
+              active_reservations, reservation_path, policy)
+          }, silent = TRUE)
+        }
+      }, add = TRUE)
+
+      predictive_traces <- lapply(valid_positions, function(j) {
+        i <- indices[[j]]
+        new_v021_failure_trace_context(
+          trace_root, "predictive_worker", predictive_batch_id,
+          manifest$task_id[[i]], manifest$direction_id[[i]])
+      })
+      names(predictive_traces) <- as.character(valid_positions)
+
+      reserve_predictive <- function(j) {
+        i <- indices[[j]]
+        attempt_number <- v021_task_attempt_number(
+          execution_status, tasks$direction_index[[i]])
+        active_reservations <<- reserve_v021_capacity(
+          active_reservations, policy, manifest$direction_id[[i]],
+          attempt_number, "kfold_fit")
+        write_v021_reservations_atomic(
+          active_reservations, reservation_path, policy)
+      }
+
+      release_predictive <- function(j) {
+        i <- indices[[j]]
+        attempt_number <- v021_task_attempt_number(
+          execution_status, tasks$direction_index[[i]])
+        active_reservations <<- release_v021_capacity(
+          active_reservations, policy, manifest$direction_id[[i]],
+          attempt_number, "kfold_fit", worker_terminated = TRUE)
+        write_v021_reservations_atomic(
+          active_reservations, reservation_path, policy)
+      }
+
+      spawn_predictive_job <- function(j) {
+        i <- indices[[j]]
+        gate_file <- tempfile("v021-full-kfold-start-")
+        trace <- predictive_traces[[as.character(j)]]
+        input_result <- predictive_results[[j]]
+        job <- parallel::mcparallel({
+          while (!file.exists(gate_file)) Sys.sleep(0.01)
+          set_v021_failure_trace_phase(trace, "predictive_worker_execution")
+          run_v021_traced_child(function() {
+            value <- withr::with_options(
+              list(pclvbayes.parallel_chains_override =
+                     as.integer(config$kfold_parallel_chains)),
+              with_v021_single_thread_environment(function() {
+                pclvbayes:::.add_predictive_evaluation(input_result)
+              })
+            )
+            set_v021_failure_trace_phase(
+              trace, "predictive_worker_execution", completed = TRUE)
+            value
+          }, trace)
+        }, silent = TRUE)
+
+        pid <- as.integer(job$pid)
+        pid_key <- as.character(pid)
+        predictive_job_tracker$jobs[[pid_key]] <- job
+        predictive_meta[[pid_key]] <- list(
+          position = as.integer(j),
+          start_elapsed = proc.time()[["elapsed"]])
+        list(
+          gate_file = gate_file,
+          registry = register_v021_preflight_worker(
+            pid, parent_pid, "predictive_fit_worker", predictive_batch_id,
+            manifest$direction_id[[i]])
+        )
+      }
+
+      initial_count <- min(length(valid_positions), maximum_predictive)
+      initial_positions <- valid_positions[seq_len(initial_count)]
+      initial_spawned <- vector("list", initial_count)
+      for (k in seq_along(initial_positions)) {
+        j <- initial_positions[[k]]
+        reserve_predictive(j)
+        initial_spawned[[k]] <- spawn_predictive_job(j)
+      }
+      predictive_fit_registry <- do.call(
+        rbind, lapply(initial_spawned, function(value) value$registry))
+      predictive_registry <- predictive_fit_registry
+
+      predictive_cleanup_path <- file.path(
+        paths$output_root, "cleanup_audits",
+        paste0(predictive_batch_id, ".rds"))
+      predictive_ownership <- new_v021_batch_ownership(
+        predictive_batch_id, parent_pid, predictive_fit_registry,
+        executable, paths$output_root, predictive_cleanup_path)
+
+      persist_predictive_registry <- function() {
+        validate_v021_worker_registry(predictive_registry)
+        updated <- predictive_ownership
+        updated$worker_registry <- predictive_registry
+        predictive_ownership <<- updated
+        .v021_atomic_save_rds(
+          predictive_registry, predictive_registry_file)
+        .v021_atomic_save_rds(
+          predictive_registry,
+          file.path(
+            paths$output_root, "worker_registries",
+            paste0(predictive_batch_id, ".rds")))
+        .v021_atomic_save_rds(list(
+          ownership_schema = "v021_full_batch_ownership_v1",
+          batch_id = predictive_batch_id,
+          parent_pid = as.integer(parent_pid),
+          known_model_executable = executable,
+          output_root = paths$output_root,
+          worker_registry = predictive_registry,
+          registration_timestamp =
+            format(Sys.time(), tz = "UTC", usetz = TRUE)),
+          file.path(
+            paths$output_root, "batch_ownership",
+            paste0(predictive_batch_id, ".rds")))
+        invisible(TRUE)
+      }
+
+      predictive_inventory_reader <- function() {
+        snapshot <- capture_v021_preflight_process_snapshot(
+          parent_pid, executable)
+        classify_v021_process_snapshot(
+          snapshot, parent_pid, executable,
+          worker_registry = predictive_ownership$worker_registry)
+      }
+      predictive_reaper <- function()
+        reap_v021_uncollected_jobs(
+          predictive_job_tracker, predictive_monitor_job_tracker)
+
+      on.exit({
+        cleanup_result <- tryCatch(
+          cleanup_v021_owned_batch(
+            predictive_ownership, predictive_exit_condition,
+            "parent", "predictive_return_handling",
+            predictive_inventory_reader, runtime_signaler,
+            runtime_alive_reader, predictive_reaper),
+          error = identity)
+        if (inherits(cleanup_result, "error"))
+          message(
+            "V021 predictive cleanup failure: ",
+            conditionMessage(cleanup_result))
+
+        release_result <- tryCatch({
+          owned_ids <- manifest$direction_id[indices[valid_positions]]
+          active <- active_reservations$state == "reserved" &
+            active_reservations$job_type == "kfold_fit" &
+            active_reservations$task_identity %in% owned_ids
+          active_reservations$state[active] <<- "worker_terminated"
           write_v021_reservations_atomic(
-            value, reservation_path, policy)
-        })
-      active_reservations <<- evaluated$reservations
-      evaluated$result
+            active_reservations, reservation_path, policy)
+          TRUE
+        }, error = identity)
+        if (inherits(release_result, "error"))
+          message(
+            "V021 predictive reservation cleanup failure: ",
+            conditionMessage(release_result))
+      }, add = TRUE)
+      predictive_cleanup_installed <- TRUE
+
+      stop_owned_predictive <- function(snapshot, registry_snapshot = NULL) {
+        registry_now <- registry_snapshot
+        if (is.null(registry_now))
+          registry_now <- tryCatch(
+            readRDS(predictive_registry_file),
+            error = function(e) predictive_registry)
+        fit_rows <- registry_now[
+          registry_now$worker_role == "predictive_fit_worker",
+          , drop = FALSE]
+        if (!nrow(fit_rows)) return(invisible(TRUE))
+
+        matched <- match(snapshot$pid, fit_rows$pid)
+        same_identity <- !is.na(matched) &
+          as.character(snapshot$start_time) ==
+            as.character(fit_rows$start_time[matched])
+        owned <- as.integer(snapshot$pid[same_identity])
+        repeat {
+          children <- snapshot$pid[snapshot$ppid %in% owned]
+          expanded <- unique(c(owned, children))
+          if (identical(sort(expanded), sort(owned))) break
+          owned <- expanded
+        }
+        for (pid in rev(owned))
+          system2(
+            "kill", c("-INT", as.character(pid)),
+            stdout = FALSE, stderr = FALSE)
+        invisible(TRUE)
+      }
+
+      predictive_monitor_trace <- new_v021_failure_trace_context(
+        trace_root, "predictive_monitor_child", predictive_batch_id,
+        manifest$task_id[indices[valid_positions]],
+        manifest$direction_id[indices[valid_positions]])
+      predictive_monitor_job <- parallel::mcparallel(
+        run_v021_traced_child(function() {
+          while (!file.exists(predictive_monitor_start_file))
+            Sys.sleep(0.01)
+          snapshots <- list()
+          last_registry <- readRDS(predictive_registry_file)
+
+          repeat {
+            set_v021_failure_trace_phase(
+              predictive_monitor_trace, "predictive_monitor_polling")
+            registry_read <- tryCatch(
+              readRDS(predictive_registry_file), error = identity)
+            if (!inherits(registry_read, "error"))
+              last_registry <- registry_read
+            snap <- tryCatch(
+              capture_v021_preflight_process_snapshot(
+                parent_pid, executable),
+              error = identity)
+
+            if (inherits(registry_read, "error") ||
+                inherits(snap, "error")) {
+              reason <- if (inherits(registry_read, "error"))
+                conditionMessage(registry_read) else conditionMessage(snap)
+              payload <- list(error = reason, snapshots = snapshots)
+              .v021_atomic_save_rds(payload, predictive_latest_file)
+              .v021_atomic_save_rds(payload, predictive_final_file)
+              if (!inherits(snap, "error"))
+                stop_owned_predictive(snap, last_registry)
+              else if (length(snapshots))
+                stop_owned_predictive(
+                  tail(snapshots, 1L)[[1L]], last_registry)
+              break
+            }
+
+            registry_now <- registry_read
+            snapshots[[length(snapshots) + 1L]] <- snap
+            monitor <- monitor_v021_process_snapshots(
+              list(snap), policy, parent_pid, executable,
+              worker_registry = registry_now)
+            payload <- list(
+              snapshot = snap, latest_monitor = monitor,
+              batch_id = predictive_batch_id)
+            .v021_atomic_save_rds(payload, predictive_latest_file)
+
+            if (!identical(monitor$monitoring_state, "verified") ||
+                !identical(monitor$compliance_status, "compliant")) {
+              payload$snapshots <- snapshots
+              payload$error <- monitor$reason %||%
+                "resource_ceiling_exceeded"
+              .v021_atomic_save_rds(payload, predictive_latest_file)
+              .v021_atomic_save_rds(payload, predictive_final_file)
+              stop_owned_predictive(snap, registry_now)
+              break
+            }
+
+            set_v021_failure_trace_phase(
+              predictive_monitor_trace, "predictive_monitor_polling",
+              completed = TRUE)
+            if (file.exists(predictive_stop_file)) {
+              set_v021_failure_trace_phase(
+                predictive_monitor_trace, "predictive_monitor_shutdown")
+              payload$snapshots <- snapshots
+              .v021_atomic_save_rds(payload, predictive_final_file)
+              set_v021_failure_trace_phase(
+                predictive_monitor_trace, "predictive_monitor_shutdown",
+                completed = TRUE)
+              break
+            }
+            Sys.sleep(1)
+          }
+          TRUE
+        }, predictive_monitor_trace),
+        silent = TRUE)
+      predictive_monitor_job_tracker$jobs <- setNames(
+        list(predictive_monitor_job),
+        as.character(predictive_monitor_job$pid))
+      predictive_monitor_registry <- register_v021_preflight_worker(
+        as.integer(predictive_monitor_job$pid), parent_pid,
+        "predictive_resource_monitor", predictive_batch_id,
+        paste0(predictive_batch_id, "-monitor"))
+      predictive_registry <- rbind(
+        predictive_registry, predictive_monitor_registry)
+      persist_predictive_registry()
+
+      launch_registered_predictive <- function(j) {
+        reserve_predictive(j)
+        spawned <- spawn_predictive_job(j)
+        predictive_registry <<- rbind(
+          predictive_registry, spawned$registry)
+        persist_predictive_registry()
+        if (!file.create(spawned$gate_file))
+          stop("Failed to release a registered predictive worker.")
+        invisible(TRUE)
+      }
+
+      if (!file.create(predictive_monitor_start_file))
+        stop("Failed to start the predictive resource monitor.")
+      for (spawned in initial_spawned)
+        if (!file.create(spawned$gate_file))
+          stop("Failed to release an initial predictive worker.")
+
+      next_position <- initial_count + 1L
+      repeat {
+        while (length(predictive_job_tracker$jobs) < maximum_predictive &&
+               next_position <= length(valid_positions)) {
+          launch_registered_predictive(valid_positions[[next_position]])
+          next_position <- next_position + 1L
+        }
+
+        if (!length(predictive_job_tracker$jobs) &&
+            next_position > length(valid_positions))
+          break
+
+        collected <- collect_ready_jobs(predictive_job_tracker)
+        if (!length(collected)) {
+          Sys.sleep(0.05)
+          next
+        }
+
+        for (pid_key in names(collected)) {
+          meta <- predictive_meta[[pid_key]]
+          if (is.null(meta))
+            stop(
+              "Collected predictive child was not present in active metadata.")
+          j <- as.integer(meta$position)
+          predictive_results[[j]] <- collected[[pid_key]]
+          predictive_elapsed[[j]] <-
+            proc.time()[["elapsed"]] - as.numeric(meta$start_elapsed)
+          rm(list = pid_key, envir = predictive_meta)
+          release_predictive(j)
+        }
+      }
+
+      if (!file.create(predictive_stop_file))
+        stop("Failed to request predictive monitor shutdown.")
+      predictive_monitor_collected <- unname(
+        collect_v021_tracked_jobs(predictive_monitor_job_tracker))
+      if (length(predictive_monitor_collected) != 1L)
+        stop(
+          "Predictive monitor child did not return exactly one result.")
+      predictive_monitor_result <- predictive_monitor_collected[[1L]]
+      if (inherits(
+          predictive_monitor_result, "v021_traced_child_error"))
+        stop(predictive_monitor_result$condition_message)
+      wait_v021_collected_child_exit(
+        as.integer(predictive_monitor_job$pid),
+        expected_start_time = as.character(
+          predictive_monitor_registry$start_time[[1L]]))
+
+      predictive_payload <- readRDS(predictive_final_file)
+      parent_trace$monitor_state <-
+        predictive_payload$latest_monitor %||%
+          predictive_payload$error %||% NULL
+      if (!is.null(predictive_payload$error))
+        stop(
+          "Live predictive process monitor failed: ",
+          predictive_payload$error)
+      predictive_monitor <- monitor_v021_process_snapshots(
+        predictive_payload$snapshots, policy, parent_pid, executable,
+        worker_registry = predictive_registry)
+      validate_v021_preflight_monitor(predictive_monitor, policy)
+      peak_chains <<- max(
+        peak_chains,
+        predictive_monitor$observed_peak_active_cmdstan_chains)
+      peak_slots <<- max(
+        peak_slots,
+        predictive_monitor$observed_peak_active_cmdstan_processes)
+
+      list(results = predictive_results, elapsed = predictive_elapsed)
     }
 
-    # Preserve canonical direction order for predictive evaluation and durable
-    # artifact finalization, regardless of rolling main-fit completion order.
+    # The main monitor is fully collected before predictive workers are forked.
+    # K-fold directions then run as a separate 12x1 rolling phase. Durable
+    # artifacts remain finalized in canonical direction order.
+    predictive <- run_predictive_rolling()
+    results <- predictive$results
+    predictive_elapsed <- predictive$elapsed
+
     for (j in seq_along(indices)) {
       i <- indices[[j]]
       result <- results[[j]]
       elapsed <- elapsed_by_position[[j]]
       if (!is.finite(elapsed)) elapsed <- 0
-
-      if (!inherits(
-          result,
-          c("try-error", "pclv_failure", "v021_traced_child_error"))) {
-        predictive_started <- proc.time()[["elapsed"]]
-        result <- evaluate_predictive(i, result)
-        elapsed <- elapsed +
-          (proc.time()[["elapsed"]] - predictive_started)
-      }
+      if (is.finite(predictive_elapsed[[j]]))
+        elapsed <- elapsed + predictive_elapsed[[j]]
 
       store_outcome(i, result, elapsed)
       results[j] <- list(NULL)

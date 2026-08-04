@@ -85,7 +85,7 @@ archive_file() {
 
 start_controller() {
   local output_log="$1" metadata="$2" mode="$3"
-  printf '%s_commit\t%s\n%s_time\t%s\ncpu_affinity\t0-15\nactive_chain_cap\t12\nconcurrent_fits\t3\n' \
+  printf '%s_commit\t%s\n%s_time\t%s\ncpu_affinity\t0-15\nactive_chain_cap\t12\nconcurrent_fits\t12\nkfold_concurrent_fits\t12\n' \
     "$mode" "$CURRENT_HEAD" "$mode" "$(date --iso-8601=seconds)" > "$metadata"
 
   nohup env \
@@ -414,4 +414,4 @@ case "${1:-help}" in
     ;;
   *) die "unknown action: $1" ;;
 esac
-# Chain-slot rolling: 4 total chains, 1 parallel chain, 12 active fits.
+# Chain-slot rolling: main 12x1, then K-fold 12x1; phases do not overlap.

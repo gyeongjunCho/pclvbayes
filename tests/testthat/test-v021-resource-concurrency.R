@@ -22,7 +22,7 @@ source(testthat::test_path("../../benchmarks/mtist/v021_full_100_species.R"))
 
 test_that("canonical policy derives the twelve-chain capacity contract", {
   policy <- build_v021_resource_policy()
-  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v5")
   expect_identical(policy$main_chains, 4L)
   expect_identical(policy$main_parallel_chains, 4L)
   expect_identical(policy$kfold_chains, 4L)
@@ -55,7 +55,9 @@ test_that("production chain-slot policy derives twelve serial-chain directions",
   policy <- build_v021_full_resource_policy(config)
   expect_identical(policy$main_chains, 4L)
   expect_identical(policy$main_parallel_chains, 1L)
+  expect_identical(policy$kfold_parallel_chains, 1L)
   expect_identical(policy$proposed_outer_concurrency, 12L)
+  expect_identical(policy$maximum_concurrent_kfold_fits, 12L)
   expect_identical(policy$controller_worker_limit, 12L)
   expect_identical(v021_job_demand(policy, "main_fit"), 1L)
   expect_identical(v021_job_demand(policy, "retry_fit"), 1L)
@@ -64,6 +66,10 @@ test_that("production chain-slot policy derives twelve serial-chain directions",
     policy, build_v021_operation_spec("main_fit", 12L))
   expect_identical(derivation$projected_active_cmdstan_chains, 12L)
   expect_identical(derivation$projected_active_cmdstan_processes, 12L)
+  kfold <- derive_safe_outer_concurrency(
+    policy, build_v021_operation_spec("kfold_fit", 12L))
+  expect_identical(kfold$projected_active_cmdstan_chains, 12L)
+  expect_identical(kfold$projected_active_cmdstan_processes, 12L)
 })
 
 test_that("reservations share capacity across posterior retry and K-fold work", {
