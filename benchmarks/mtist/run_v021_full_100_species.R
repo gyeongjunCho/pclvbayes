@@ -646,8 +646,8 @@ run_batch <- function(indices) {
     if (!length(pids)) return(integer())
     keep <- vapply(seq_along(pids), function(k) {
       stat <- tryCatch(
-        readLines(
-          file.path("/proc", pids[[k]], "stat"), warn = FALSE, n = 1L),
+        suppressWarnings(readLines(
+          file.path("/proc", pids[[k]], "stat"), warn = FALSE, n = 1L)),
         error = function(e) character())
       if (!length(stat)) return(FALSE)
       parsed <- tryCatch(
@@ -989,7 +989,7 @@ run_batch <- function(indices) {
         task <- fold_tasks[[q]]
         i <- indices[[task$position]]
         new_v021_failure_trace_context(
-          trace_root, "predictive_fold_worker", predictive_batch_id,
+          trace_root, "outer_worker", predictive_batch_id,
           manifest$task_id[[i]], task$fold_identity)
       })
 
@@ -1171,7 +1171,7 @@ run_batch <- function(indices) {
       }
 
       predictive_monitor_trace <- new_v021_failure_trace_context(
-        trace_root, "predictive_monitor_child", predictive_batch_id,
+        trace_root, "monitor_child", predictive_batch_id,
         manifest$task_id[indices[valid_positions]],
         manifest$direction_id[indices[valid_positions]])
       predictive_monitor_job <- parallel::mcparallel(

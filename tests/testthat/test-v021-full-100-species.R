@@ -160,6 +160,19 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl("config$maximum_simultaneous_kfold_fits",
                          runner, fixed = TRUE)))
   expect_true(any(grepl("predictive_fold_worker", runner, fixed = TRUE)))
+  expect_true(any(grepl(
+    'trace_root, "outer_worker", predictive_batch_id',
+    runner, fixed = TRUE)))
+  expect_true(any(grepl(
+    'trace_root, "monitor_child", predictive_batch_id',
+    runner, fixed = TRUE)))
+  expect_false(any(grepl(
+    'trace_root, "predictive_fold_worker", predictive_batch_id',
+    runner, fixed = TRUE)))
+  expect_false(any(grepl(
+    'trace_root, "predictive_monitor_child", predictive_batch_id',
+    runner, fixed = TRUE)))
+  expect_true(any(grepl("suppressWarnings(readLines(", runner, fixed = TRUE)))
   expect_true(any(grepl("run_predictive_rolling", runner, fixed = TRUE)))
   expect_true(any(grepl("main_kfold_overlap = FALSE", runner, fixed = TRUE)))
   main_monitor_collect <- grep(
