@@ -1,3 +1,8 @@
 build_v021_four_chain_preflight_config(
-  file.path("benchmarks", "mtist", "results", "v021_four_chain_preflight_v4")
+  file.path(
+    "benchmarks",
+    "mtist",
+    "results",
+    "v021_four_chain_preflight_v5"
+  )
 )
