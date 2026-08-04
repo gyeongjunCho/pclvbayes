@@ -1079,6 +1079,41 @@
   }, add = TRUE)
 
   # --- 스모크 모드(옵션): 초경량 테스트 시 체인 순차 실행 강제 ---
+  # Benchmark-only chain concurrency override.
+  # Without this option, normal package execution remains unchanged.
+  parallel_override <- getOption(
+    "pclvbayes.parallel_chains_override",
+    NULL
+  )
+
+  if (!is.null(parallel_override)) {
+    chains_raw <- args$chains
+
+    valid_override <- is.numeric(parallel_override) &&
+      length(parallel_override) == 1L &&
+      !is.na(parallel_override) &&
+      is.finite(parallel_override) &&
+      parallel_override == as.integer(parallel_override)
+
+    valid_chains <- is.numeric(chains_raw) &&
+      length(chains_raw) == 1L &&
+      !is.na(chains_raw) &&
+      is.finite(chains_raw) &&
+      chains_raw == as.integer(chains_raw)
+
+    if (!valid_override || !valid_chains ||
+        parallel_override < 1L ||
+        chains_raw < 1L ||
+        parallel_override > chains_raw) {
+      stop(
+        "pclvbayes.parallel_chains_override must be ",
+        "an integer from 1 through chains."
+      )
+    }
+
+    args$parallel_chains <- as.integer(parallel_override)
+  }
+
   if (isTRUE(args$.smoke_mode)) {
     args$parallel_chains <- 1L
   }

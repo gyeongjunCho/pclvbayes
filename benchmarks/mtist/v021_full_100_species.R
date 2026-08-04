@@ -1,6 +1,6 @@
 # Benchmark-only full 100-species execution contract for ROADMAP V021-06.
 
-v021_full_schema <- "v021_full_100_species_v2"
+v021_full_schema <- "v021_full_100_species_v3"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
 v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
 v021_full_cleanup_audit_schema <- "v021_full_cleanup_audit_v1"
@@ -230,10 +230,12 @@ build_v021_full_config <- function(output_root) {
     directed_task_count = 9900L,
     selection_rule = v021_full_selection_rule,
     chains = 4L,
+    main_parallel_chains = 1L,
     iter_warmup = 2000L,
     iter_sampling = 2000L,
     nominal_retained_draws = 8000L,
-    maximum_simultaneous_fits = 3L,
+    maximum_simultaneous_fits = 12L,
+    rolling_window_size = 60L,
     maximum_task_attempts = 2L,
     kfold_seed = 20260802L,
     preprocessing_config_id = "pclv_smoothed_full_composition_closure_v1",
@@ -250,8 +252,10 @@ validate_v021_full_config <- function(config) {
   fields <- c(
     "benchmark_schema", "dataset_id", "seed", "taxa_count",
     "unordered_pair_count", "directed_task_count", "selection_rule", "chains",
-    "iter_warmup", "iter_sampling", "nominal_retained_draws",
-    "maximum_simultaneous_fits", "maximum_task_attempts", "kfold_seed",
+    "main_parallel_chains", "iter_warmup", "iter_sampling",
+    "nominal_retained_draws",
+    "maximum_simultaneous_fits", "rolling_window_size",
+    "maximum_task_attempts", "kfold_seed",
     "preprocessing_config_id", "posterior_config_id", "predictive_config_id",
     "run_kfold", "use_pathfinder", "cpu_affinity", "output_root"
   )
@@ -262,10 +266,13 @@ validate_v021_full_config <- function(config) {
       !identical(config$unordered_pair_count, 4950L) ||
       !identical(config$directed_task_count, 9900L) ||
       !identical(config$selection_rule, v021_full_selection_rule) ||
-      !identical(config$chains, 4L) || !identical(config$iter_warmup, 2000L) ||
+      !identical(config$chains, 4L) ||
+      !identical(config$main_parallel_chains, 1L) ||
+      !identical(config$iter_warmup, 2000L) ||
       !identical(config$iter_sampling, 2000L) ||
       !identical(config$nominal_retained_draws, 8000L) ||
-      !identical(config$maximum_simultaneous_fits, 3L) ||
+      !identical(config$maximum_simultaneous_fits, 12L) ||
+      !identical(config$rolling_window_size, 60L) ||
       !identical(config$maximum_task_attempts, 2L) ||
       !identical(config$kfold_seed, 20260802L) ||
       !identical(config$preprocessing_config_id,
@@ -278,6 +285,21 @@ validate_v021_full_config <- function(config) {
       !identical(config$cpu_affinity, "0-15"))
     stop("Invalid V021-06 full benchmark configuration.")
   invisible(TRUE)
+}
+
+build_v021_full_resource_policy <- function(config) {
+  validate_v021_full_config(config)
+  build_v021_resource_policy(
+    main_chains = config$chains,
+    main_parallel_chains = config$main_parallel_chains,
+    retry_chains = config$chains,
+    retry_parallel_chains = config$main_parallel_chains,
+    kfold_chains = config$chains,
+    kfold_parallel_chains = 1L,
+    confirmation_chains = config$chains,
+    confirmation_parallel_chains = config$main_parallel_chains,
+    proposed_outer_concurrency = config$maximum_simultaneous_fits
+  )
 }
 
 v021_current_cpu_affinity <- function(path = "/proc/self/status") {
@@ -374,6 +396,7 @@ build_v021_full_execution_manifest <- function(config, taxa, provenance) {
     preprocessing_config = list(identity = config$preprocessing_config_id),
     posterior_config = list(
       identity = config$posterior_config_id, chains = config$chains,
+      parallel_chains = config$main_parallel_chains,
       iter_warmup = config$iter_warmup, iter_sampling = config$iter_sampling),
     kfold_config = list(K = 5L, R = 1L, enabled = config$run_kfold),
     predictive_config = list(identity = config$predictive_config_id),
@@ -438,7 +461,7 @@ build_v021_full_storage_projection <- function(
   retry_conservative <- base_conservative * retry_fraction
   permanent_central <- base_central + kfold_central + retry_central
   permanent_conservative <- base_conservative + kfold_conservative + retry_conservative
-  temporary_peak <- 3 * 32 * 1024^2
+  temporary_peak <- 12 * 32 * 1024^2
   safety_requirement <- (permanent_conservative + temporary_peak) * safety_factor
   list(
     projection_schema = "v021_full_storage_projection_v1",

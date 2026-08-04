@@ -241,9 +241,10 @@ build_v021_preflight_summary <- function(config, selected, policy, monitor,
     iter_warmup = config$iter_warmup, iter_sampling = config$iter_sampling,
     nominal_retained_draws = config$nominal_retained_draws,
     maximum_simultaneous_fits = config$maximum_simultaneous_fits,
-    projected_active_chains = as.integer(config$maximum_simultaneous_fits * config$chains),
+    projected_active_chains = as.integer(
+      config$maximum_simultaneous_fits * policy$main_parallel_chains),
     projected_cmdstan_process_slots = as.integer(
-      config$maximum_simultaneous_fits * config$chains),
+      config$maximum_simultaneous_fits * policy$main_parallel_chains),
     output_root = config$output_root,
     dataset_id = config$dataset_id,
     executable_identity = executable_record$executable_path,
@@ -323,7 +324,7 @@ validate_v021_preflight_summary <- function(summary) {
   )
   if (!is.list(summary) || !identical(names(summary), required) ||
       !identical(summary$summary_schema, "v021_four_chain_preflight_summary_v2") ||
-      !identical(summary$resource_policy_schema, "v021_resource_policy_v3") ||
+      !identical(summary$resource_policy_schema, "v021_resource_policy_v4") ||
       !identical(summary$logical_host_threads, 16L) ||
       !identical(summary$reserved_host_threads, 4L) ||
       !identical(summary$usable_execution_capacity, 12L) ||

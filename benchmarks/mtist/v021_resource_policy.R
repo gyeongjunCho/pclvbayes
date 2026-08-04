@@ -1,6 +1,6 @@
 # Benchmark-only resource and process-monitoring contract for ROADMAP V021-02.
 
-v021_resource_policy_schema <- "v021_resource_policy_v3"
+v021_resource_policy_schema <- "v021_resource_policy_v4"
 v021_preflight_states <- c(
   "passed", "failed_ceiling_exceeded", "failed_unverified_process_tree",
   "failed_thread_environment", "failed_invalid_policy", "failed_monitoring_error"
@@ -67,20 +67,24 @@ validate_v021_worker_registry <- function(registry) {
   invisible(TRUE)
 }
 
-.v021_operation_table <- function(main_chains, retry_chains, pathfinder_processes,
-                                  kfold_chains, kfold_parallel_chains,
-                                  confirmation_chains) {
+.v021_operation_table <- function(
+    main_chains, main_parallel_chains,
+    retry_chains, retry_parallel_chains,
+    pathfinder_processes,
+    kfold_chains, kfold_parallel_chains,
+    confirmation_chains, confirmation_parallel_chains) {
   data.frame(
     operation = v021_operation_types,
     total_chains = as.integer(c(
       main_chains, retry_chains, 0L, kfold_chains, confirmation_chains
     )),
     simultaneous_chain_slots = as.integer(c(
-      main_chains, retry_chains, 0L, kfold_parallel_chains, confirmation_chains
+      main_parallel_chains, retry_parallel_chains, 0L,
+      kfold_parallel_chains, confirmation_parallel_chains
     )),
     cmdstan_process_slots = as.integer(c(
-      main_chains, retry_chains, pathfinder_processes,
-      kfold_parallel_chains, confirmation_chains
+      main_parallel_chains, retry_parallel_chains, pathfinder_processes,
+      kfold_parallel_chains, confirmation_parallel_chains
     )),
     execution_relationship = c(
       "direction_main", "sequential_retry_of_direction",
@@ -95,10 +99,13 @@ build_v021_resource_policy <- function(
     logical_host_threads = 16L, reserved_host_threads = 4L,
     maximum_active_cmdstan_chains = 12L, maximum_cmdstan_process_slots = 12L,
     cpu_threads_per_active_chain = 1L,
-    main_chains = 4L, retry_chains = main_chains,
+    main_chains = 4L, main_parallel_chains = main_chains,
+    retry_chains = main_chains, retry_parallel_chains = main_parallel_chains,
     pathfinder_processes = 1L, pathfinder_num_paths = 8L,
     kfold_chains = main_chains, kfold_parallel_chains = 1L,
-    confirmation_chains = main_chains, proposed_outer_concurrency = NULL,
+    confirmation_chains = main_chains,
+    confirmation_parallel_chains = main_parallel_chains,
+    proposed_outer_concurrency = NULL,
     global_slot_scheduler = TRUE) {
   logical_host_threads <- .v021_resource_int(logical_host_threads, "logical_host_threads")
   reserved_host_threads <- .v021_resource_int(
@@ -110,7 +117,11 @@ build_v021_resource_policy <- function(
   cpu_threads_per_active_chain <- .v021_resource_int(
     cpu_threads_per_active_chain, "cpu_threads_per_active_chain")
   main_chains <- .v021_resource_int(main_chains, "main_chains")
+  main_parallel_chains <- .v021_resource_int(
+    main_parallel_chains, "main_parallel_chains")
   retry_chains <- .v021_resource_int(retry_chains, "retry_chains")
+  retry_parallel_chains <- .v021_resource_int(
+    retry_parallel_chains, "retry_parallel_chains")
   pathfinder_processes <- .v021_resource_int(
     pathfinder_processes, "pathfinder_processes", positive = FALSE)
   pathfinder_num_paths <- .v021_resource_int(pathfinder_num_paths, "pathfinder_num_paths")
@@ -118,22 +129,30 @@ build_v021_resource_policy <- function(
   kfold_parallel_chains <- .v021_resource_int(
     kfold_parallel_chains, "kfold_parallel_chains")
   confirmation_chains <- .v021_resource_int(confirmation_chains, "confirmation_chains")
+  confirmation_parallel_chains <- .v021_resource_int(
+    confirmation_parallel_chains, "confirmation_parallel_chains")
   usable <- logical_host_threads - reserved_host_threads
   if (usable < 1L || usable != maximum_active_cmdstan_chains ||
       usable != maximum_cmdstan_process_slots)
     stop("Usable host threads must equal both global CmdStan ceilings.")
   if (cpu_threads_per_active_chain != 1L)
     stop("Exactly one CPU thread per active chain is required.")
-  if (kfold_parallel_chains > kfold_chains)
-    stop("kfold_parallel_chains cannot exceed kfold_chains.")
+  if (main_parallel_chains > main_chains ||
+      retry_parallel_chains > retry_chains ||
+      kfold_parallel_chains > kfold_chains ||
+      confirmation_parallel_chains > confirmation_chains)
+    stop("Parallel chains cannot exceed total chains for an operation.")
   if (!is.logical(global_slot_scheduler) || length(global_slot_scheduler) != 1L ||
       is.na(global_slot_scheduler)) stop("global_slot_scheduler must be one logical value.")
   if (!isTRUE(global_slot_scheduler))
     stop("V021-02 requires the verified global slot scheduler.")
 
   operation_slots <- .v021_operation_table(
-    main_chains, retry_chains, pathfinder_processes, kfold_chains,
-    kfold_parallel_chains, confirmation_chains
+    main_chains, main_parallel_chains,
+    retry_chains, retry_parallel_chains,
+    pathfinder_processes,
+    kfold_chains, kfold_parallel_chains,
+    confirmation_chains, confirmation_parallel_chains
   )
   binding_slots <- max(operation_slots$simultaneous_chain_slots,
                        operation_slots$cmdstan_process_slots)
@@ -154,13 +173,16 @@ build_v021_resource_policy <- function(
     cpu_threads_per_active_chain = cpu_threads_per_active_chain,
     numerical_library_threads = 1L,
     main_chains = main_chains,
+    main_parallel_chains = main_parallel_chains,
     retry_chains = retry_chains,
+    retry_parallel_chains = retry_parallel_chains,
     pathfinder_processes = pathfinder_processes,
     pathfinder_chain_slots = 0L,
     pathfinder_num_paths = pathfinder_num_paths,
     kfold_chains = kfold_chains,
     kfold_parallel_chains = kfold_parallel_chains,
     confirmation_chains = confirmation_chains,
+    confirmation_parallel_chains = confirmation_parallel_chains,
     proposed_outer_concurrency = proposed_outer_concurrency,
     maximum_concurrent_kfold_fits = 1L,
     controller_worker_limit = proposed_outer_concurrency,
@@ -181,9 +203,11 @@ validate_v021_resource_policy <- function(policy) {
     "usable_chain_slots", "maximum_active_cmdstan_chains",
     "maximum_cmdstan_process_slots",
     "cpu_threads_per_active_chain", "numerical_library_threads", "main_chains",
-    "retry_chains", "pathfinder_processes", "pathfinder_chain_slots",
+    "main_parallel_chains", "retry_chains", "retry_parallel_chains",
+    "pathfinder_processes", "pathfinder_chain_slots",
     "pathfinder_num_paths", "kfold_chains", "kfold_parallel_chains",
-    "confirmation_chains", "proposed_outer_concurrency",
+    "confirmation_chains", "confirmation_parallel_chains",
+    "proposed_outer_concurrency",
     "maximum_concurrent_kfold_fits", "controller_worker_limit",
     "retries_share_chain_budget", "environment_thread_caps",
     "result_root_ownership_policy", "scheduler_poll_interval_seconds",
@@ -223,8 +247,11 @@ validate_v021_resource_policy <- function(policy) {
     stop("Policy scheduler, retry, or ownership settings are invalid.")
   validate_v021_single_thread_environment(policy$environment_thread_caps)
   expected_operations <- .v021_operation_table(
-    policy$main_chains, policy$retry_chains, policy$pathfinder_processes,
-    policy$kfold_chains, policy$kfold_parallel_chains, policy$confirmation_chains
+    policy$main_chains, policy$main_parallel_chains,
+    policy$retry_chains, policy$retry_parallel_chains,
+    policy$pathfinder_processes,
+    policy$kfold_chains, policy$kfold_parallel_chains,
+    policy$confirmation_chains, policy$confirmation_parallel_chains
   )
   if (!identical(policy$operation_slots, expected_operations))
     stop("Operation-slot table contradicts the policy.")
@@ -233,9 +260,11 @@ validate_v021_resource_policy <- function(policy) {
   if (policy$pathfinder_processes != 1L || policy$pathfinder_num_paths != 8L)
     stop("Policy contradicts inspected canonical Pathfinder behavior.")
   if (policy$retry_chains != policy$main_chains ||
+      policy$retry_parallel_chains != policy$main_parallel_chains ||
       policy$kfold_chains != policy$main_chains ||
       policy$kfold_parallel_chains != 1L ||
-      policy$confirmation_chains != policy$main_chains)
+      policy$confirmation_chains != policy$main_chains ||
+      policy$confirmation_parallel_chains != policy$main_parallel_chains)
     stop("Policy contradicts canonical main, retry, K-fold, or confirmation chain behavior.")
   if (policy$proposed_outer_concurrency *
       max(policy$operation_slots$simultaneous_chain_slots,
@@ -900,9 +929,12 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
           c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")), integer(1))
   peak <- max(counts)
   process_peak <- max(process_counts)
+  main_slot_row <- policy$operation_slots[
+    policy$operation_slots$operation == "main_fit", , drop = FALSE]
   configured_launch_chain_ceiling <- min(
     policy$maximum_active_cmdstan_chains,
-    policy$proposed_outer_concurrency * policy$main_chains)
+    policy$proposed_outer_concurrency *
+      main_slot_row$simultaneous_chain_slots[[1L]])
   complete <- all(vapply(classified, function(x) {
     terminal <- if ("capture_state" %in% names(x))
       x$capture_state %in% c("vanished_during_capture", "zombie_process")

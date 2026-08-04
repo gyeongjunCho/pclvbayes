@@ -883,7 +883,7 @@ test_that("diagnose recognition accepts canonical controller-owned utility", {
 
 test_that("the policy records the exact 16-thread, 4-reserved, 12-slot contract", {
   policy <- build_v021_resource_policy()
-  expect_identical(policy$policy_schema, "v021_resource_policy_v3")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
   expect_identical(policy$logical_host_threads, 16L)
   expect_identical(policy$reserved_host_threads, 4L)
   expect_identical(policy$usable_chain_slots, 12L)
@@ -918,7 +918,8 @@ test_that("malformed and contradictory resource policies are rejected", {
   policy$pathfinder_processes <- 0L
   policy$operation_slots$cmdstan_process_slots[[3L]] <- 0L
   expect_error(validate_v021_resource_policy(policy), "Pathfinder")
-  expect_error(build_v021_resource_policy(retry_chains = 2L), "canonical")
+  expect_error(build_v021_resource_policy(retry_chains = 2L),
+               "canonical|Parallel chains")
 })
 
 test_that("four-chain directions derive at most three concurrent fits", {

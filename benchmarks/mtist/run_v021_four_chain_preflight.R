@@ -604,7 +604,7 @@ write_tsv(data.frame(
   maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
   maximum_cmdstan_process_slots = policy$maximum_cmdstan_process_slots,
   chains_per_fit = policy$main_chains,
-  parallel_chains_per_fit = policy$main_chains,
+  parallel_chains_per_fit = policy$main_parallel_chains,
   threads_per_chain = policy$cpu_threads_per_active_chain,
   maximum_concurrent_fits = policy$proposed_outer_concurrency), "resource_policy.tsv")
 write_tsv(data.frame(variable = names(thread_environment), value = unname(thread_environment)),

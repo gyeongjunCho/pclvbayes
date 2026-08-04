@@ -22,8 +22,9 @@ source(testthat::test_path("../../benchmarks/mtist/v021_full_100_species.R"))
 
 test_that("canonical policy derives the twelve-chain capacity contract", {
   policy <- build_v021_resource_policy()
-  expect_identical(policy$policy_schema, "v021_resource_policy_v3")
+  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
   expect_identical(policy$main_chains, 4L)
+  expect_identical(policy$main_parallel_chains, 4L)
   expect_identical(policy$kfold_chains, 4L)
   expect_identical(policy$kfold_parallel_chains, 1L)
   expect_identical(policy$logical_host_threads, 16L)
@@ -32,6 +33,8 @@ test_that("canonical policy derives the twelve-chain capacity contract", {
   expect_identical(policy$proposed_outer_concurrency, 3L)
   expect_identical(policy$maximum_concurrent_kfold_fits, 1L)
   expect_identical(policy$controller_worker_limit, 3L)
+  expect_identical(policy$retry_parallel_chains, 4L)
+  expect_identical(policy$confirmation_parallel_chains, 4L)
   expect_true(policy$retries_share_chain_budget)
   expect_true(all(policy$environment_thread_caps == "1"))
   expect_identical(v021_job_demand(policy, "main_fit"), 4L)
@@ -45,6 +48,22 @@ test_that("canonical policy derives the twelve-chain capacity contract", {
   expect_error(build_v021_resource_policy(main_chains = 4.5), "integer")
   expect_silent(assert_v021_truth_free_schema(policy, "resource policy"))
   expect_identical(v021_resource_policy_hash(policy), v021_resource_policy_hash(policy))
+})
+
+test_that("production chain-slot policy derives twelve serial-chain directions", {
+  config <- build_v021_full_config(tempdir())
+  policy <- build_v021_full_resource_policy(config)
+  expect_identical(policy$main_chains, 4L)
+  expect_identical(policy$main_parallel_chains, 1L)
+  expect_identical(policy$proposed_outer_concurrency, 12L)
+  expect_identical(policy$controller_worker_limit, 12L)
+  expect_identical(v021_job_demand(policy, "main_fit"), 1L)
+  expect_identical(v021_job_demand(policy, "retry_fit"), 1L)
+  expect_identical(v021_job_demand(policy, "kfold_fit"), 1L)
+  derivation <- derive_safe_outer_concurrency(
+    policy, build_v021_operation_spec("main_fit", 12L))
+  expect_identical(derivation$projected_active_cmdstan_chains, 12L)
+  expect_identical(derivation$projected_active_cmdstan_processes, 12L)
 })
 
 test_that("reservations share capacity across posterior retry and K-fold work", {
@@ -191,9 +210,10 @@ test_that("dry-run exposes policy without sampling", {
     config, paste0("species_", 0:99),
     list(code_commit = "fixture", benchmark_schema = config$benchmark_schema),
     initialize = FALSE)
-  dry <- prepare_v021_resource_dry_run(prepared, build_v021_resource_policy())
+  dry <- prepare_v021_resource_dry_run(
+    prepared, build_v021_full_resource_policy(config))
   expect_false(dry$sampling_launched)
-  expect_identical(dry$maximum_concurrent_tasks, 3L)
+  expect_identical(dry$maximum_concurrent_tasks, 12L)
   expect_identical(dry$maximum_active_cmdstan_chains, 12L)
   expect_identical(dry$waves[[1L]]$reserved_chain_slots, 12L)
 })

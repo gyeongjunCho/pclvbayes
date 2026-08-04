@@ -12,12 +12,14 @@ test_that("full benchmark configuration is exact and deterministic", {
   b <- build_v021_full_config(tempdir())
   expect_identical(a, b)
   expect_silent(validate_v021_full_config(a))
-  expect_identical(a$benchmark_schema, "v021_full_100_species_v2")
+  expect_identical(a$benchmark_schema, "v021_full_100_species_v3")
   expect_identical(a$chains, 4L)
+  expect_identical(a$main_parallel_chains, 1L)
   expect_identical(a$iter_warmup, 2000L)
   expect_identical(a$iter_sampling, 2000L)
   expect_identical(a$nominal_retained_draws, 8000L)
-  expect_identical(a$maximum_simultaneous_fits, 3L)
+  expect_identical(a$maximum_simultaneous_fits, 12L)
+  expect_identical(a$rolling_window_size, 60L)
   expect_true(a$run_kfold)
   expect_false(a$use_pathfinder)
   expect_identical(a$cpu_affinity, "0-15")
@@ -67,16 +69,20 @@ test_that("three-direction debug preflight permits one incomplete pair only expl
                          runner, fixed = TRUE)))
 })
 
-test_that("policy v3 bounds the full benchmark at three fits", {
-  policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
-  derivation <- validate_v021_preflight_launch_capacity(policy, 3L)
-  expect_identical(policy$policy_schema, "v021_resource_policy_v3")
+test_that("policy v4 runs twelve four-chain directions one chain at a time", {
+  config <- build_v021_full_config(tempdir())
+  policy <- build_v021_full_resource_policy(config)
+  derivation <- validate_v021_preflight_launch_capacity(policy, 12L)
+  expect_identical(policy$policy_schema, "v021_resource_policy_v4")
   expect_identical(policy$logical_host_threads, 16L)
   expect_identical(policy$reserved_host_threads, 4L)
   expect_identical(policy$usable_chain_slots, 12L)
+  expect_identical(policy$main_chains, 4L)
+  expect_identical(policy$main_parallel_chains, 1L)
+  expect_identical(policy$proposed_outer_concurrency, 12L)
   expect_identical(derivation$projected_active_cmdstan_chains, 12L)
   expect_identical(derivation$projected_active_cmdstan_processes, 12L)
-  expect_error(validate_v021_preflight_launch_capacity(policy, 4L), "ceiling")
+  expect_error(validate_v021_preflight_launch_capacity(policy, 13L), "ceiling")
 })
 
 test_that("restart resumes incomplete work without rerunning terminal tasks", {
@@ -137,6 +143,8 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl(".add_predictive_evaluation", runner, fixed = TRUE)))
   expect_true(any(grepl("monitor_v021_process_snapshots", runner, fixed = TRUE)))
   expect_true(any(grepl("worker_compilation_count = 0L", runner, fixed = TRUE)))
+  expect_true(any(grepl("pclvbayes.parallel_chains_override", runner, fixed = TRUE)))
+  expect_true(any(grepl("config$main_parallel_chains", runner, fixed = TRUE)))
   expect_false(any(grepl("cmdstan_model|compile\\(", runner)))
   expect_false(any(grepl("stacking_results|pseudo_BMA|elpd_pointwise", runner)))
 })
@@ -162,7 +170,7 @@ test_that("full dry run uses authoritative state retries and ownership without s
     list(code_commit = "fixture", benchmark_schema = config$benchmark_schema),
     initialize = FALSE)
   audit <- run_v021_full_dry_run_audit(
-    prepared, build_v021_resource_policy(), root, 2L)
+    prepared, build_v021_full_resource_policy(config), root, 2L)
   expect_identical(audit$task_count, 9900L)
   expect_identical(audit$pair_count, 4950L)
   expect_true(audit$first_attempt_failed)
@@ -498,6 +506,32 @@ test_that("runner installs ownership cleanup before releasing workers", {
   )))
 })
 
+test_that("benchmark chain override preserves four total chains and serializes execution", {
+  skip_if_not_installed("pclvbayes")
+  captured <- NULL
+  output_dir <- tempfile("v021-chain-override-")
+  dir.create(output_dir)
+  on.exit(unlink(output_dir, recursive = TRUE), add = TRUE)
+  mod <- list(sample = function(...) {
+    captured <<- list(...)
+    structure(list(), class = "v021_fake_cmdstan_fit")
+  })
+  withr::with_options(
+    list(pclvbayes.parallel_chains_override = 1L),
+    pclvbayes:::.call_sample_silently(
+      mod,
+      list(
+        chains = 4L, parallel_chains = 4L,
+        iter_warmup = 10L, iter_sampling = 10L,
+        output_dir = output_dir, output_basename = "fixture"
+      ),
+      silent = FALSE
+    )
+  )
+  expect_identical(captured$chains, 4L)
+  expect_identical(captured$parallel_chains, 1L)
+})
+
 test_that("intermediate sampler health never claims NA convergence passed", {
   helper <- paste(readLines(testthat::test_path("../../R/pclv_helpers.R"),
                             warn = FALSE), collapse = "\n")
@@ -791,4 +825,3 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
   expect_identical(length(list.files(trace_root,
     pattern = "^v021_full_failure_trace_v1-.*[.]rds$")), 1L)
 })
-

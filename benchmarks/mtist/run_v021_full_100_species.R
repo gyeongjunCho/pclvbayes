@@ -73,14 +73,19 @@ for (path in c(paths$checkpoint_root, paths$monitor_root,
                file.path(paths$output_root, "cmdstan-owned")))
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
 
-policy <- build_v021_resource_policy(proposed_outer_concurrency = 3L)
+policy <- build_v021_full_resource_policy(config)
 validate_v021_resource_policy(policy)
 derivation <- derive_safe_outer_concurrency(
-  policy, build_v021_operation_spec("main_fit", 3L))
-if (!identical(policy$policy_schema, "v021_resource_policy_v3") ||
+  policy,
+  build_v021_operation_spec("main_fit", config$maximum_simultaneous_fits))
+if (!identical(policy$policy_schema, "v021_resource_policy_v4") ||
+    !identical(policy$main_chains, 4L) ||
+    !identical(policy$main_parallel_chains, 1L) ||
+    !identical(policy$proposed_outer_concurrency, 12L) ||
+    !identical(derivation$per_fit_simultaneous_chain_slots, 1L) ||
     !identical(derivation$projected_active_cmdstan_chains, 12L) ||
     !identical(derivation$projected_active_cmdstan_processes, 12L))
-  stop("V021-06 requires the verified policy-v3 12-chain/12-slot contract.")
+  stop("V021-06 requires the verified policy-v4 12x1 chain-slot contract.")
 thread_environment <- v021_single_thread_environment()
 validate_v021_single_thread_environment(thread_environment)
 
@@ -247,7 +252,7 @@ controls[c(
 controls[c("chains", "iter_warmup", "iter_sampling", "seed", "progress",
            "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R")] <- list(
   config$chains, config$iter_warmup, config$iter_sampling, config$seed,
-  "none", 3L, 1L, 5L, 1L)
+  "none", config$maximum_simultaneous_fits, 1L, 5L, 1L)
 preexisting_executable <- normalizePath(file.path(repo, "inst", "stan", "pclv"),
                                         mustWork = TRUE)
 preexisting_info <- unclass(file.info(preexisting_executable)[c("size", "mtime")])
@@ -266,9 +271,11 @@ if (!identical(executable, preexisting_executable) ||
 launch_record$executable_path <- executable
 launch_record$worker_compilation_count <- 0L
 launch_record$scheduler <- list(
-  strategy = "rolling_window",
+  strategy = "chain_slot_rolling_window",
+  chains_per_direction = as.integer(config$chains),
+  parallel_chains_per_direction = as.integer(config$main_parallel_chains),
   maximum_active_main_fits = as.integer(config$maximum_simultaneous_fits),
-  window_size = as.integer(10L * config$maximum_simultaneous_fits),
+  window_size = as.integer(config$rolling_window_size),
   polling_seconds = 0.05)
 .v021_atomic_save_rds(launch_record, file.path(paths$output_root, "launch_record.rds"))
 approved_runtime <- build_v021_runtime_context(runtime$ctx)
@@ -279,7 +286,7 @@ durable_peaks <- recover_v021_monitor_peaks(paths$output_root, policy, executabl
 peak_chains <- durable_peaks$chains
 peak_slots <- durable_peaks$processes
 batch_number <- 0L
-rolling_window_size <- as.integer(10L * config$maximum_simultaneous_fits)
+rolling_window_size <- as.integer(config$rolling_window_size)
 trace_root <- file.path(paths$output_root, "failure_traces")
 parent_trace <- new_v021_failure_trace_context(trace_root, "parent")
 
@@ -546,7 +553,11 @@ run_batch <- function(indices) {
       while (!file.exists(gate_file)) Sys.sleep(0.01)
       set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution")
       run_v021_traced_child(function() {
-        value <- with_v021_single_thread_environment(jobs[[j]])
+        value <- withr::with_options(
+          list(pclvbayes.parallel_chains_override =
+                 as.integer(config$main_parallel_chains)),
+          with_v021_single_thread_environment(jobs[[j]])
+        )
         set_v021_failure_trace_phase(
           worker_traces[[j]], "worker_execution", completed = TRUE)
         value
