@@ -414,3 +414,4 @@ case "${1:-help}" in
     ;;
   *) die "unknown action: $1" ;;
 esac
+# Chain-slot rolling: 4 total chains, 1 parallel chain, 12 active fits.
