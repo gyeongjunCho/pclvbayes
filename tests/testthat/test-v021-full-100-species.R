@@ -12,7 +12,7 @@ test_that("full benchmark configuration is exact and deterministic", {
   b <- build_v021_full_config(tempdir())
   expect_identical(a, b)
   expect_silent(validate_v021_full_config(a))
-  expect_identical(a$benchmark_schema, "v021_full_100_species_v4")
+  expect_identical(a$benchmark_schema, "v021_full_100_species_v5")
   expect_identical(a$chains, 4L)
   expect_identical(a$main_parallel_chains, 1L)
   expect_identical(a$kfold_parallel_chains, 1L)
@@ -150,15 +150,16 @@ test_that("runner is truth-free, checkpointed, monitored, and compilation-free",
   expect_true(any(grepl("initialize_v021_execution_root", runner, fixed = TRUE)))
   expect_true(any(grepl("write_v021_task_status_atomic", runner, fixed = TRUE)))
   expect_true(any(grepl("write_v021_attempt_ledger_atomic", runner, fixed = TRUE)))
-  expect_true(any(grepl(".add_predictive_evaluation", runner, fixed = TRUE)))
+  expect_true(any(grepl("run_v021_predictive_fold_task", runner, fixed = TRUE)))
+  expect_false(any(grepl(".add_predictive_evaluation", runner, fixed = TRUE)))
   expect_true(any(grepl("monitor_v021_process_snapshots", runner, fixed = TRUE)))
   expect_true(any(grepl("worker_compilation_count = 0L", runner, fixed = TRUE)))
   expect_true(any(grepl("pclvbayes.parallel_chains_override", runner, fixed = TRUE)))
   expect_true(any(grepl("config$main_parallel_chains", runner, fixed = TRUE)))
-  expect_true(any(grepl("kfold_chain_slot_rolling", runner, fixed = TRUE)))
+  expect_true(any(grepl("kfold_global_fold_slot_rolling", runner, fixed = TRUE)))
   expect_true(any(grepl("config$maximum_simultaneous_kfold_fits",
                          runner, fixed = TRUE)))
-  expect_true(any(grepl("predictive_fit_worker", runner, fixed = TRUE)))
+  expect_true(any(grepl("predictive_fold_worker", runner, fixed = TRUE)))
   expect_true(any(grepl("run_predictive_rolling", runner, fixed = TRUE)))
   expect_true(any(grepl("main_kfold_overlap = FALSE", runner, fixed = TRUE)))
   main_monitor_collect <- grep(
@@ -738,6 +739,84 @@ test_that("collected monitor exit accepts PID reuse as the original child being 
   expect_identical(calls, 1L)
 })
 
+
+test_that("predictive fold queue flattens directions before applying the slot cap", {
+  make_result <- function(tag) list(
+    diagnostic_failure = list(NULL),
+    .predictive_context = list(
+      mod = NULL, stan_list = list(),
+      pair_in = data.frame(
+        subject = rep(sprintf("s%02d", 1:10), each = 2L),
+        time = rep(1:2, 10), y = seq_len(20), xi = seq_len(20),
+        xj = rev(seq_len(20))),
+      sample_args = list(seed = 100L), split_seed = 700L,
+      sampling_seed = 100L, silent_sampler = TRUE,
+      n_workers_kfold = 1L, max_retries = 0L, min_pairs = 1L,
+      K = 5L, R = 1L, pair_tag = tag, progress = "none"))
+  plans <- lapply(seq_len(4L), function(index) {
+    prepare_v021_predictive_fold_plan(
+      make_result(sprintf("d%d", index)), index,
+      sprintf("direction-%06d", index))
+  })
+  queued <- build_v021_predictive_fold_queue(plans)
+  expect_length(queued$tasks, 20L)
+  expect_identical(
+    vapply(queued$tasks, `[[`, integer(1), "position"),
+    rep(1:4, each = 5L))
+  expect_identical(
+    vapply(queued$tasks[1:5], `[[`, integer(1), "fold"), 1:5)
+  expect_identical(anyDuplicated(vapply(
+    queued$tasks, `[[`, character(1), "fold_identity")), 0L)
+  policy <- build_v021_full_resource_policy(build_v021_full_config(tempdir()))
+  capacity <- derive_safe_outer_concurrency(
+    policy, build_v021_operation_spec("kfold_fit", 12L))
+  expect_identical(capacity$projected_active_cmdstan_chains, 12L)
+})
+
+test_that("fold-level predictive aggregation matches canonical sequential evaluation", {
+  subjects <- rep(sprintf("subject-%02d", 1:8), each = 2L)
+  main_result <- list(
+    diagnostic_failure = list(NULL),
+    .predictive_context = list(
+      mod = NULL, stan_list = list(),
+      pair_in = data.frame(
+        subject = subjects, time = rep(1:2, 8),
+        y = seq_along(subjects), xi = seq_along(subjects),
+        xj = rev(seq_along(subjects))),
+      sample_args = list(seed = 321L), split_seed = 654L,
+      sampling_seed = 321L, silent_sampler = TRUE,
+      n_workers_kfold = 1L, max_retries = 0L, min_pairs = 1L,
+      K = 4L, R = 1L, pair_tag = "source->target",
+      progress = "none"))
+
+  testthat::local_mocked_bindings(
+    .fold_fit_and_score = function(
+        mod, stan_list_base, sample_args_base, pair_in,
+        train_subjects, test_subjects, silent_sampler, max_retries,
+        freeze_retry_hypers, seed_override, min_pairs) {
+      held_out <- as.character(test_subjects)
+      values <- stats::setNames(
+        as.numeric(seed_override) / 1000 + seq_along(held_out), held_out)
+      list(
+        elpd = values,
+        elpd_ppd = values / 2,
+        n_obs = stats::setNames(rep(2L, length(held_out)), held_out),
+        fold_diag = list(
+          n_retries = 0L, nu_mean = 5, ebfmi_min = 1,
+          worst_rhat = 1, min_ess_bulk = 1000,
+          treedepth_hits = 0L, n_divergent = 0L))
+    },
+    .package = "pclvbayes"
+  )
+
+  expected <- pclvbayes:::.add_predictive_evaluation(main_result)
+  plan <- prepare_v021_predictive_fold_plan(
+    main_result, 1L, "direction-000001")
+  fold_results <- lapply(plan$tasks, run_v021_predictive_fold_task)
+  observed <- finalize_v021_predictive_direction(plan, fold_results)
+  expect_identical(observed, expected)
+})
+
 test_that("runner uses one scoped monitor collection before predictive children", {
   runner <- paste(
     readLines(testthat::test_path(
@@ -755,7 +834,7 @@ test_that("runner uses one scoped monitor collection before predictive children"
     fixed = TRUE
   )[[1L]]
   predictive_at <- regexpr(
-    "pclvbayes:::.add_predictive_evaluation(input_result)",
+    "run_v021_predictive_fold_task(task)",
     runner,
     fixed = TRUE
   )[[1L]]

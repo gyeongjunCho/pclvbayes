@@ -284,8 +284,9 @@ launch_record$scheduler <- list(
   chains_per_direction = as.integer(config$chains),
   parallel_chains_per_direction = as.integer(config$main_parallel_chains),
   maximum_active_main_fits = as.integer(config$maximum_simultaneous_fits),
-  predictive_strategy = "kfold_chain_slot_rolling",
-  kfold_parallel_chains_per_direction =
+  predictive_strategy = "kfold_global_fold_slot_rolling",
+  predictive_scheduling_unit = "direction_repetition_fold",
+  kfold_parallel_chains_per_fold =
     as.integer(config$kfold_parallel_chains),
   maximum_active_kfold_fits =
     as.integer(config$maximum_simultaneous_kfold_fits),
@@ -914,8 +915,25 @@ run_batch <- function(indices) {
       if (!length(valid_positions))
         return(list(results = results, elapsed = rep(0, length(indices))))
 
+      direction_plans <- lapply(valid_positions, function(j) {
+        i <- indices[[j]]
+        prepare_v021_predictive_fold_plan(
+          results[[j]], j, manifest$direction_id[[i]])
+      })
+      queued <- build_v021_predictive_fold_queue(direction_plans)
+      direction_plans <- queued$plans
+      fold_tasks <- queued$tasks
+      predictive_results <- results
+      predictive_elapsed <- rep(0, length(indices))
+      for (plan in direction_plans)
+        predictive_results[[plan$position]] <- plan$result
+
+      if (!length(fold_tasks))
+        return(list(results = predictive_results,
+                    elapsed = predictive_elapsed))
+
       maximum_predictive <- min(
-        length(valid_positions),
+        length(fold_tasks),
         as.integer(config$maximum_simultaneous_kfold_fits)
       )
       derive_safe_outer_concurrency(
@@ -932,8 +950,7 @@ run_batch <- function(indices) {
       predictive_final_file <- file.path(
         paths$monitor_root, paste0(predictive_batch_id, ".rds"))
       predictive_latest_file <- file.path(paths$monitor_root, "latest.rds")
-      predictive_results <- results
-      predictive_elapsed <- rep(0, length(indices))
+      fold_results <- vector("list", length(fold_tasks))
       predictive_meta <- new.env(hash = TRUE, parent = emptyenv())
       predictive_registry <- NULL
       predictive_ownership <- NULL
@@ -941,8 +958,7 @@ run_batch <- function(indices) {
       predictive_cleanup_installed <- FALSE
 
       # Fail closed even if setup fails before durable predictive ownership is
-      # installed. All spawned children are still behind private gate files at
-      # this point, so direct-child signaling is sufficient for early teardown.
+      # installed. Every fold child is initially held behind a private gate.
       on.exit({
         if (!predictive_cleanup_installed) {
           jobs <- predictive_job_tracker$jobs
@@ -957,10 +973,11 @@ run_batch <- function(indices) {
             predictive_job_tracker, predictive_monitor_job_tracker),
             silent = TRUE)
           try({
-            owned_ids <- manifest$direction_id[indices[valid_positions]]
+            fold_ids <- vapply(
+              fold_tasks, `[[`, character(1), "fold_identity")
             active <- active_reservations$state == "reserved" &
               active_reservations$job_type == "kfold_fit" &
-              active_reservations$task_identity %in% owned_ids
+              active_reservations$task_identity %in% fold_ids
             active_reservations$state[active] <<- "worker_terminated"
             write_v021_reservations_atomic(
               active_reservations, reservation_path, policy)
@@ -968,54 +985,55 @@ run_batch <- function(indices) {
         }
       }, add = TRUE)
 
-      predictive_traces <- lapply(valid_positions, function(j) {
-        i <- indices[[j]]
+      predictive_traces <- lapply(seq_along(fold_tasks), function(q) {
+        task <- fold_tasks[[q]]
+        i <- indices[[task$position]]
         new_v021_failure_trace_context(
-          trace_root, "predictive_worker", predictive_batch_id,
-          manifest$task_id[[i]], manifest$direction_id[[i]])
+          trace_root, "predictive_fold_worker", predictive_batch_id,
+          manifest$task_id[[i]], task$fold_identity)
       })
-      names(predictive_traces) <- as.character(valid_positions)
 
-      reserve_predictive <- function(j) {
-        i <- indices[[j]]
+      reserve_predictive <- function(q) {
+        task <- fold_tasks[[q]]
+        i <- indices[[task$position]]
         attempt_number <- v021_task_attempt_number(
           execution_status, tasks$direction_index[[i]])
         active_reservations <<- reserve_v021_capacity(
-          active_reservations, policy, manifest$direction_id[[i]],
+          active_reservations, policy, task$fold_identity,
           attempt_number, "kfold_fit")
         write_v021_reservations_atomic(
           active_reservations, reservation_path, policy)
       }
 
-      release_predictive <- function(j) {
-        i <- indices[[j]]
+      release_predictive <- function(q) {
+        task <- fold_tasks[[q]]
+        i <- indices[[task$position]]
         attempt_number <- v021_task_attempt_number(
           execution_status, tasks$direction_index[[i]])
         active_reservations <<- release_v021_capacity(
-          active_reservations, policy, manifest$direction_id[[i]],
+          active_reservations, policy, task$fold_identity,
           attempt_number, "kfold_fit", worker_terminated = TRUE)
         write_v021_reservations_atomic(
           active_reservations, reservation_path, policy)
       }
 
-      spawn_predictive_job <- function(j) {
-        i <- indices[[j]]
-        gate_file <- tempfile("v021-full-kfold-start-")
-        trace <- predictive_traces[[as.character(j)]]
-        input_result <- predictive_results[[j]]
+      spawn_predictive_job <- function(q) {
+        task <- fold_tasks[[q]]
+        gate_file <- tempfile("v021-full-kfold-fold-start-")
+        trace <- predictive_traces[[q]]
         job <- parallel::mcparallel({
           while (!file.exists(gate_file)) Sys.sleep(0.01)
-          set_v021_failure_trace_phase(trace, "predictive_worker_execution")
+          set_v021_failure_trace_phase(trace, "predictive_fold_execution")
           run_v021_traced_child(function() {
             value <- withr::with_options(
               list(pclvbayes.parallel_chains_override =
                      as.integer(config$kfold_parallel_chains)),
               with_v021_single_thread_environment(function() {
-                pclvbayes:::.add_predictive_evaluation(input_result)
+                run_v021_predictive_fold_task(task)
               })
             )
             set_v021_failure_trace_phase(
-              trace, "predictive_worker_execution", completed = TRUE)
+              trace, "predictive_fold_execution", completed = TRUE)
             value
           }, trace)
         }, silent = TRUE)
@@ -1024,33 +1042,34 @@ run_batch <- function(indices) {
         pid_key <- as.character(pid)
         predictive_job_tracker$jobs[[pid_key]] <- job
         predictive_meta[[pid_key]] <- list(
-          position = as.integer(j),
+          task_index = as.integer(q),
+          direction_position = as.integer(task$position),
           start_elapsed = proc.time()[["elapsed"]])
         list(
           gate_file = gate_file,
           registry = register_v021_preflight_worker(
-            pid, parent_pid, "predictive_fit_worker", predictive_batch_id,
-            manifest$direction_id[[i]])
+            pid, parent_pid, "predictive_fold_worker", predictive_batch_id,
+            task$fold_identity)
         )
       }
 
-      initial_count <- min(length(valid_positions), maximum_predictive)
-      initial_positions <- valid_positions[seq_len(initial_count)]
+      initial_count <- min(length(fold_tasks), maximum_predictive)
+      initial_indices <- seq_len(initial_count)
       initial_spawned <- vector("list", initial_count)
-      for (k in seq_along(initial_positions)) {
-        j <- initial_positions[[k]]
-        reserve_predictive(j)
-        initial_spawned[[k]] <- spawn_predictive_job(j)
+      for (k in seq_along(initial_indices)) {
+        q <- initial_indices[[k]]
+        reserve_predictive(q)
+        initial_spawned[[k]] <- spawn_predictive_job(q)
       }
-      predictive_fit_registry <- do.call(
+      predictive_fold_registry <- do.call(
         rbind, lapply(initial_spawned, function(value) value$registry))
-      predictive_registry <- predictive_fit_registry
+      predictive_registry <- predictive_fold_registry
 
       predictive_cleanup_path <- file.path(
         paths$output_root, "cleanup_audits",
         paste0(predictive_batch_id, ".rds"))
       predictive_ownership <- new_v021_batch_ownership(
-        predictive_batch_id, parent_pid, predictive_fit_registry,
+        predictive_batch_id, parent_pid, predictive_fold_registry,
         executable, paths$output_root, predictive_cleanup_path)
 
       persist_predictive_registry <- function() {
@@ -1105,10 +1124,11 @@ run_batch <- function(indices) {
             conditionMessage(cleanup_result))
 
         release_result <- tryCatch({
-          owned_ids <- manifest$direction_id[indices[valid_positions]]
+          fold_ids <- vapply(
+            fold_tasks, `[[`, character(1), "fold_identity")
           active <- active_reservations$state == "reserved" &
             active_reservations$job_type == "kfold_fit" &
-            active_reservations$task_identity %in% owned_ids
+            active_reservations$task_identity %in% fold_ids
           active_reservations$state[active] <<- "worker_terminated"
           write_v021_reservations_atomic(
             active_reservations, reservation_path, policy)
@@ -1128,7 +1148,7 @@ run_batch <- function(indices) {
             readRDS(predictive_registry_file),
             error = function(e) predictive_registry)
         fit_rows <- registry_now[
-          registry_now$worker_role == "predictive_fit_worker",
+          registry_now$worker_role == "predictive_fold_worker",
           , drop = FALSE]
         if (!nrow(fit_rows)) return(invisible(TRUE))
 
@@ -1238,14 +1258,14 @@ run_batch <- function(indices) {
         predictive_registry, predictive_monitor_registry)
       persist_predictive_registry()
 
-      launch_registered_predictive <- function(j) {
-        reserve_predictive(j)
-        spawned <- spawn_predictive_job(j)
+      launch_registered_predictive <- function(q) {
+        reserve_predictive(q)
+        spawned <- spawn_predictive_job(q)
         predictive_registry <<- rbind(
           predictive_registry, spawned$registry)
         persist_predictive_registry()
         if (!file.create(spawned$gate_file))
-          stop("Failed to release a registered predictive worker.")
+          stop("Failed to release a registered predictive fold worker.")
         invisible(TRUE)
       }
 
@@ -1253,18 +1273,18 @@ run_batch <- function(indices) {
         stop("Failed to start the predictive resource monitor.")
       for (spawned in initial_spawned)
         if (!file.create(spawned$gate_file))
-          stop("Failed to release an initial predictive worker.")
+          stop("Failed to release an initial predictive fold worker.")
 
-      next_position <- initial_count + 1L
+      next_task <- initial_count + 1L
       repeat {
         while (length(predictive_job_tracker$jobs) < maximum_predictive &&
-               next_position <= length(valid_positions)) {
-          launch_registered_predictive(valid_positions[[next_position]])
-          next_position <- next_position + 1L
+               next_task <= length(fold_tasks)) {
+          launch_registered_predictive(next_task)
+          next_task <- next_task + 1L
         }
 
         if (!length(predictive_job_tracker$jobs) &&
-            next_position > length(valid_positions))
+            next_task > length(fold_tasks))
           break
 
         collected <- collect_ready_jobs(predictive_job_tracker)
@@ -1277,13 +1297,15 @@ run_batch <- function(indices) {
           meta <- predictive_meta[[pid_key]]
           if (is.null(meta))
             stop(
-              "Collected predictive child was not present in active metadata.")
-          j <- as.integer(meta$position)
-          predictive_results[[j]] <- collected[[pid_key]]
-          predictive_elapsed[[j]] <-
-            proc.time()[["elapsed"]] - as.numeric(meta$start_elapsed)
+              "Collected predictive fold child was absent from active metadata.")
+          q <- as.integer(meta$task_index)
+          fold_results[[q]] <- collected[[pid_key]]
+          elapsed <- proc.time()[["elapsed"]] -
+            as.numeric(meta$start_elapsed)
+          predictive_elapsed[[as.integer(meta$direction_position)]] <-
+            predictive_elapsed[[as.integer(meta$direction_position)]] + elapsed
           rm(list = pid_key, envir = predictive_meta)
-          release_predictive(j)
+          release_predictive(q)
         }
       }
 
@@ -1322,11 +1344,19 @@ run_batch <- function(indices) {
         peak_slots,
         predictive_monitor$observed_peak_active_cmdstan_processes)
 
+      for (plan in direction_plans) {
+        if (isTRUE(plan$eligible)) {
+          predictive_results[[plan$position]] <-
+            finalize_v021_predictive_direction(
+              plan, fold_results[plan$queue_indices])
+        }
+      }
       list(results = predictive_results, elapsed = predictive_elapsed)
     }
 
     # The main monitor is fully collected before predictive workers are forked.
-    # K-fold directions then run as a separate 12x1 rolling phase. Durable
+    # K-fold fold fits then run as one global 12x1 rolling phase across
+    # direction, repetition, and fold. Durable
     # artifacts remain finalized in canonical direction order.
     predictive <- run_predictive_rolling()
     results <- predictive$results

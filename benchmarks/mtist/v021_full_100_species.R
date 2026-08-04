@@ -1,6 +1,6 @@
 # Benchmark-only full 100-species execution contract for ROADMAP V021-06.
 
-v021_full_schema <- "v021_full_100_species_v4"
+v021_full_schema <- "v021_full_100_species_v5"
 v021_full_status_schema <- "v021_full_100_species_status_v1"
 v021_full_failure_trace_schema <- "v021_full_failure_trace_v1"
 v021_full_cleanup_audit_schema <- "v021_full_cleanup_audit_v1"
@@ -218,6 +218,427 @@ with_v021_predictive_reservation <- function(
   list(result = value, reservations = current)
 }
 
+
+# Build exact repeated-K-fold tasks for one directed main-posterior result.
+# The scientific split, fold seed, fit, and aggregation contracts mirror
+# pclvbayes:::.repkfold_eval(); only the execution topology is moved to the
+# benchmark controller so fold fits from different directions share one
+# global 12-slot queue.
+prepare_v021_predictive_fold_plan <- function(main_result, position,
+                                               direction_id) {
+  if (!is.numeric(position) || length(position) != 1L ||
+      is.na(position) || position < 1L ||
+      position != as.integer(position))
+    stop("Predictive direction position must be one positive integer.")
+  if (!is.character(direction_id) || length(direction_id) != 1L ||
+      is.na(direction_id) || !nzchar(direction_id))
+    stop("Predictive direction identity must be one non-empty string.")
+  if (inherits(main_result, c("try-error", "pclv_failure",
+                              "v021_traced_child_error")))
+    stop("Only successful main-posterior results can build predictive folds.")
+
+  predictive <- main_result$.predictive_context
+  if (is.null(predictive))
+    stop("Main-posterior result lacks predictive context.")
+  result <- main_result
+  result$.predictive_context <- NULL
+
+  diagnostic_failure <- result$diagnostic_failure
+  if (is.list(diagnostic_failure) && length(diagnostic_failure) >= 1L &&
+      !is.null(diagnostic_failure[[1L]])) {
+    return(list(
+      position = as.integer(position), direction_id = direction_id,
+      eligible = FALSE, result = result, predictive = predictive,
+      splits_df = NULL, subject_ids = character(),
+      subject_holdout_counts = integer(), tasks = list(),
+      queue_indices = integer()
+    ))
+  }
+
+  required <- c(
+    "mod", "stan_list", "pair_in", "sample_args", "split_seed",
+    "sampling_seed", "silent_sampler", "max_retries", "min_pairs",
+    "K", "R", "pair_tag", "progress"
+  )
+  if (!is.list(predictive) || !all(required %in% names(predictive)))
+    stop("Predictive context is incomplete for fold-level scheduling.")
+  if (!is.data.frame(predictive$pair_in) ||
+      !"subject" %in% names(predictive$pair_in))
+    stop("Predictive pair input lacks subject identities.")
+
+  K <- as.integer(predictive$K)
+  R <- as.integer(predictive$R)
+  if (length(K) != 1L || is.na(K) || K < 1L ||
+      length(R) != 1L || is.na(R) || R < 1L)
+    stop("Predictive K and R must be positive integers.")
+
+  sample_args <- predictive$sample_args
+  sample_args$seed <- as.integer(predictive$sampling_seed)
+  sample_args$step_size <- NULL
+  sample_args$inv_metric <- NULL
+  sample_args$metric_file <- NULL
+
+  splits <- pclvbayes:::.make_repkfold_splits(
+    predictive$pair_in$subject, K, R, predictive$split_seed)
+  rows <- vector("list", K * R)
+  tasks <- vector("list", K * R)
+  task_index <- 0L
+  base_seed <- if (!is.null(sample_args$seed))
+    as.integer(sample_args$seed) else as.integer(predictive$split_seed)
+  if (is.na(base_seed)) base_seed <- 1L
+
+  for (r in seq_len(R)) {
+    folds <- splits[[r]]
+    for (k in seq_len(K)) {
+      task_index <- task_index + 1L
+      train_subjects <- folds[[k]]$train_subjects
+      test_subjects <- folds[[k]]$test_subjects
+      fold_identity <- sprintf(
+        "%s-r%02d-k%02d", direction_id, as.integer(r), as.integer(k))
+      rows[[task_index]] <- data.frame(
+        r = as.integer(r), k = as.integer(k),
+        test_subjects = I(list(test_subjects))
+      )
+      tasks[[task_index]] <- list(
+        position = as.integer(position),
+        direction_id = direction_id,
+        fold_identity = fold_identity,
+        repetition = as.integer(r), fold = as.integer(k),
+        train_subjects = train_subjects, test_subjects = test_subjects,
+        seed = as.integer(base_seed + 1000L * r + k),
+        mod = predictive$mod,
+        stan_list = predictive$stan_list,
+        sample_args = sample_args,
+        pair_in = predictive$pair_in,
+        silent_sampler = predictive$silent_sampler,
+        max_retries = predictive$max_retries,
+        min_pairs = predictive$min_pairs
+      )
+    }
+  }
+
+  splits_df <- do.call(rbind, rows)
+  subjects <- sort(
+    unique(as.character(predictive$pair_in$subject)), method = "radix")
+  counts <- table(unlist(splits_df$test_subjects, use.names = FALSE))
+  holdout_counts <- as.integer(counts[subjects])
+  holdout_counts[is.na(holdout_counts)] <- 0L
+  names(holdout_counts) <- subjects
+
+  list(
+    position = as.integer(position), direction_id = direction_id,
+    eligible = TRUE, result = result, predictive = predictive,
+    splits_df = splits_df, subject_ids = subjects,
+    subject_holdout_counts = holdout_counts,
+    tasks = tasks, queue_indices = integer()
+  )
+}
+
+build_v021_predictive_fold_queue <- function(plans) {
+  if (!is.list(plans)) stop("Predictive direction plans must be a list.")
+  queue <- list()
+  updated <- plans
+  for (plan_index in seq_along(updated)) {
+    plan <- updated[[plan_index]]
+    if (!is.list(plan) || is.null(plan$tasks) || is.null(plan$eligible))
+      stop("Invalid predictive direction plan.")
+    if (!isTRUE(plan$eligible)) {
+      updated[[plan_index]]$queue_indices <- integer()
+      next
+    }
+    begin <- length(queue) + 1L
+    queue <- c(queue, plan$tasks)
+    finish <- length(queue)
+    updated[[plan_index]]$queue_indices <- seq.int(begin, finish)
+  }
+  identities <- vapply(queue, `[[`, character(1), "fold_identity")
+  if (length(identities) && (anyNA(identities) || anyDuplicated(identities)))
+    stop("Predictive fold queue identities must be unique.")
+  list(plans = updated, tasks = queue)
+}
+
+run_v021_predictive_fold_task <- function(task) {
+  required <- c(
+    "repetition", "fold", "train_subjects", "test_subjects", "seed",
+    "mod", "stan_list", "sample_args", "pair_in", "silent_sampler",
+    "max_retries", "min_pairs"
+  )
+  if (!is.list(task) || !all(required %in% names(task)))
+    stop("Invalid predictive fold task.")
+
+  result <- pclvbayes:::.fold_fit_and_score(
+    mod = task$mod,
+    stan_list_base = task$stan_list,
+    sample_args_base = task$sample_args,
+    pair_in = task$pair_in,
+    train_subjects = task$train_subjects,
+    test_subjects = task$test_subjects,
+    silent_sampler = task$silent_sampler,
+    max_retries = task$max_retries,
+    freeze_retry_hypers = TRUE,
+    seed_override = task$seed,
+    min_pairs = task$min_pairs
+  )
+  if (is.null(result)) {
+    result <- pclvbayes:::.pclv_failure(
+      "kfold_scoring", "fold_evaluation_failed",
+      list(predictor = NA_character_))
+  }
+  if (inherits(result, "pclv_failure")) {
+    if (is.null(result$ok) || is.null(result$details)) {
+      legacy_details <- result[setdiff(
+        names(result), c("ok", "stage", "reason", "details"))]
+      result <- pclvbayes:::.pclv_failure(
+        result$stage, result$reason, legacy_details)
+    }
+    if (is.null(result$predictor)) result$predictor <- NA_character_
+    result$repetition <- task$repetition
+    result$fold <- task$fold
+    result$test_subjects <- task$test_subjects
+    result$details$predictor <- result$predictor
+    result$details$repetition <- task$repetition
+    result$details$fold <- task$fold
+    result$details$test_subjects <- task$test_subjects
+  }
+  result
+}
+
+.v021_predictive_worker_failure <- function(plan, value) {
+  message <- if (inherits(value, "v021_traced_child_error") &&
+                 !is.null(value$condition_message)) {
+    as.character(value$condition_message)
+  } else if (inherits(value, "try-error")) {
+    as.character(value)
+  } else if (inherits(value, "error")) {
+    conditionMessage(value)
+  } else {
+    "invalid predictive fold worker result"
+  }
+  pclvbayes:::.pclv_failure(
+    "kfold_evaluation", "unexpected_kfold_error",
+    list(
+      message = message,
+      pair_tag = plan$predictive$pair_tag,
+      K = plan$predictive$K, R = plan$predictive$R,
+      split_seed = plan$predictive$split_seed,
+      sampling_seed = plan$predictive$sampling_seed
+    )
+  )
+}
+
+aggregate_v021_predictive_fold_results <- function(plan, fold_results) {
+  if (!is.list(plan) || !isTRUE(plan$eligible) || !is.list(fold_results) ||
+      length(fold_results) != length(plan$tasks))
+    stop("Predictive fold results do not match their direction plan.")
+
+  invalid <- vapply(fold_results, function(value) {
+    inherits(value, c("try-error", "v021_traced_child_error", "error"))
+  }, logical(1))
+  if (any(invalid))
+    return(.v021_predictive_worker_failure(
+      plan, fold_results[[which(invalid)[[1L]]]]))
+
+  subs <- sort(unique(plan$predictive$pair_in$subject))
+  agg <- setNames(numeric(length(subs)), subs)
+  cnt <- setNames(integer(length(subs)), subs)
+  agg_ppd <- setNames(numeric(length(subs)), subs)
+  cnt_ppd <- setNames(integer(length(subs)), subs)
+  fail_cnt <- setNames(integer(length(subs)), subs)
+  successful_obs <- setNames(integer(length(subs)), subs)
+  fold_diag_df <- list()
+  fold_failures <- list()
+  n_ok <- 0L
+  n_fail <- 0L
+
+  for (element in fold_results) {
+    if (inherits(element, "pclv_failure")) {
+      n_fail <- n_fail + 1L
+      fold_failures[[length(fold_failures) + 1L]] <- element
+      failed_subjects <- intersect(element$test_subjects, subs)
+      fail_cnt[failed_subjects] <- fail_cnt[failed_subjects] + 1L
+    } else {
+      if (!is.list(element) || is.null(element$elpd) ||
+          is.null(element$fold_diag))
+        return(.v021_predictive_worker_failure(plan, element))
+      n_ok <- n_ok + 1L
+      idx <- names(element$elpd)
+      agg[idx] <- agg[idx] + element$elpd
+      cnt[idx] <- cnt[idx] + 1L
+      if (!is.null(element$elpd_ppd)) {
+        agg_ppd[idx] <- agg_ppd[idx] + element$elpd_ppd
+        cnt_ppd[idx] <- cnt_ppd[idx] + 1L
+      }
+      if (!is.null(element$n_obs)) {
+        obs_idx <- intersect(names(element$n_obs), subs)
+        successful_obs[obs_idx] <- successful_obs[obs_idx] +
+          as.integer(element$n_obs[obs_idx])
+      }
+      fold_diag_df[[length(fold_diag_df) + 1L]] <- data.frame(
+        n_retries = element$fold_diag$n_retries,
+        nu_mean = element$fold_diag$nu_mean,
+        ebfmi_min = element$fold_diag$ebfmi_min,
+        worst_rhat = element$fold_diag$worst_rhat,
+        min_ess_bulk = element$fold_diag$min_ess_bulk,
+        treedepth_hits = element$fold_diag$treedepth_hits,
+        n_divergent = element$fold_diag$n_divergent
+      )
+    }
+  }
+
+  elpd_subject <- rep(NA_real_, length(subs)); names(elpd_subject) <- subs
+  has_elpd <- cnt > 0L
+  elpd_subject[has_elpd] <- agg[has_elpd] / cnt[has_elpd]
+  elpd_subject_ppd <- rep(NA_real_, length(subs)); names(elpd_subject_ppd) <- subs
+  has_ppd <- cnt_ppd > 0L
+  elpd_subject_ppd[has_ppd] <- agg_ppd[has_ppd] / cnt_ppd[has_ppd]
+  elpd_mean <- if (length(elpd_subject)) {
+    value <- mean(elpd_subject[is.finite(elpd_subject)], na.rm = TRUE)
+    if (is.finite(value)) value else NA_real_
+  } else NA_real_
+  elpd_mean_ppd <- if (length(elpd_subject_ppd)) {
+    value <- mean(
+      elpd_subject_ppd[is.finite(elpd_subject_ppd)], na.rm = TRUE)
+    if (is.finite(value)) value else NA_real_
+  } else NA_real_
+
+  fold_diag <- if (length(fold_diag_df)) do.call(rbind, fold_diag_df) else
+    data.frame(
+      n_retries = integer(), nu_mean = double(), ebfmi_min = double(),
+      worst_rhat = double(), min_ess_bulk = double(),
+      treedepth_hits = integer(), n_divergent = integer()
+    )
+  retry_total <- if (nrow(fold_diag))
+    sum(fold_diag$n_retries, na.rm = TRUE) else 0L
+  retry_mean <- if (nrow(fold_diag))
+    mean(fold_diag$n_retries, na.rm = TRUE) else NA_real_
+  nu_fold_means <- if (nrow(fold_diag)) fold_diag$nu_mean else numeric()
+
+  list(
+    type = "repeated-kfold",
+    K = as.integer(plan$predictive$K),
+    R = as.integer(plan$predictive$R),
+    elpd_subject = elpd_subject,
+    elpd_subject_ppd = elpd_subject_ppd,
+    elpd_mean = elpd_mean,
+    elpd_mean_ppd = elpd_mean_ppd,
+    elpd_method = "student-t-scale-mixture-kalman-ou-q16",
+    n_folds_ok = n_ok,
+    n_folds_fail = n_fail,
+    splits_df = plan$splits_df,
+    subject_ids = plan$subject_ids,
+    subject_test_counts = successful_obs,
+    subject_holdout_counts = plan$subject_holdout_counts,
+    subject_success_counts = cnt,
+    subject_failure_counts = fail_cnt,
+    total_successful_evaluations = sum(cnt),
+    fold_diag = fold_diag,
+    retry_total = retry_total,
+    retry_mean = retry_mean,
+    nu_fold_means = nu_fold_means,
+    failures = fold_failures
+  )
+}
+
+.v021_apply_predictive_failure <- function(main_result, predictive, failure) {
+  main_result$kfold <- NULL
+  main_result$kfold_mean <- NA_real_
+  main_result$kfold_method <- NA_character_
+  main_result$kfold_outer_rounds <- 1L
+  main_result$kfold_failed <- TRUE
+  main_result$kfold_n_folds_ok <- 0L
+  main_result$kfold_n_folds_fail <- NA_integer_
+  main_result$kfold_subject <- list(NULL)
+  main_result$kfold_subject_ppd <- list(NULL)
+  main_result$kfold_subject_ids <- list(NULL)
+  main_result$kfold_subject_counts <- list(NULL)
+  main_result$kfold_subject_success <- list(NULL)
+  main_result$kfold_subject_fail <- list(NULL)
+  main_result$kfold_success_total <- 0L
+  main_result$kfold_failures <- list(failure)
+  main_result$kfold_splits <- list(NULL)
+  main_result$kfold_seed_used <- as.integer(predictive$split_seed)
+  main_result$kfold_K <- as.integer(predictive$K)
+  main_result$kfold_R <- as.integer(predictive$R)
+  main_result$kfold_sd <- NA_real_
+  main_result$kfold_se <- NA_real_
+  main_result$kfold_n_subjects <- 0L
+  main_result$kfold_retry_total <- NA_integer_
+  main_result$kfold_retry_mean <- NA_real_
+  main_result$kfold_nu_fold_means <- list(NULL)
+  main_result
+}
+
+finalize_v021_predictive_direction <- function(plan, fold_results = list()) {
+  if (!is.list(plan) || is.null(plan$result) || is.null(plan$eligible))
+    stop("Invalid predictive direction plan.")
+  if (!isTRUE(plan$eligible)) return(plan$result)
+
+  kfold <- tryCatch(
+    aggregate_v021_predictive_fold_results(plan, fold_results),
+    error = function(error) pclvbayes:::.pclv_failure(
+      "kfold_evaluation", "unexpected_kfold_error",
+      list(
+        message = conditionMessage(error),
+        pair_tag = plan$predictive$pair_tag,
+        K = plan$predictive$K, R = plan$predictive$R,
+        split_seed = plan$predictive$split_seed,
+        sampling_seed = plan$predictive$sampling_seed
+      )
+    )
+  )
+  if (inherits(kfold, "pclv_failure"))
+    return(.v021_apply_predictive_failure(
+      plan$result, plan$predictive, kfold))
+  if (!is.list(kfold) || is.null(kfold$elpd_subject) ||
+      is.null(kfold$elpd_method) || is.null(kfold$n_folds_ok) ||
+      is.null(kfold$n_folds_fail)) {
+    failure <- pclvbayes:::.pclv_failure(
+      "kfold_evaluation", "invalid_kfold_result",
+      list(pair_tag = plan$predictive$pair_tag))
+    return(.v021_apply_predictive_failure(
+      plan$result, plan$predictive, failure))
+  }
+
+  finite_elpd <- is.finite(kfold$elpd_subject)
+  n_finite_subjects <- sum(finite_elpd)
+  kfold_sd <- if (n_finite_subjects >= 2L)
+    stats::sd(kfold$elpd_subject[finite_elpd]) else NA_real_
+  kfold_se <- if (n_finite_subjects >= 2L)
+    kfold_sd / sqrt(n_finite_subjects) else NA_real_
+  result <- plan$result
+  result$kfold <- kfold
+  result$kfold_mean <- if (is.null(kfold$elpd_mean))
+    NA_real_ else as.numeric(kfold$elpd_mean)
+  result$kfold_method <- as.character(kfold$elpd_method)
+  result$kfold_outer_rounds <- 1L
+  result$kfold_failed <- isTRUE(kfold$n_folds_fail > 0L)
+  result$kfold_n_folds_ok <- as.integer(kfold$n_folds_ok)
+  result$kfold_n_folds_fail <- as.integer(kfold$n_folds_fail)
+  result$kfold_subject <- list(kfold$elpd_subject)
+  result$kfold_subject_ppd <- list(kfold$elpd_subject_ppd)
+  result$kfold_subject_ids <- list(names(kfold$elpd_subject))
+  result$kfold_subject_counts <- list(kfold$subject_test_counts)
+  result$kfold_subject_success <- list(kfold$subject_success_counts)
+  result$kfold_subject_fail <- list(kfold$subject_failure_counts)
+  result$kfold_success_total <- as.integer(
+    kfold$total_successful_evaluations)
+  result$kfold_failures <- list(kfold$failures)
+  result$kfold_splits <- list(kfold$splits_df)
+  result$kfold_seed_used <- as.integer(plan$predictive$split_seed)
+  result$kfold_K <- as.integer(kfold$K)
+  result$kfold_R <- as.integer(kfold$R)
+  result$kfold_sd <- kfold_sd
+  result$kfold_se <- kfold_se
+  result$kfold_n_subjects <- as.integer(n_finite_subjects)
+  result$kfold_retry_total <- if (is.null(kfold$retry_total))
+    NA_integer_ else as.integer(kfold$retry_total)
+  result$kfold_retry_mean <- if (is.null(kfold$retry_mean))
+    NA_real_ else as.numeric(kfold$retry_mean)
+  result$kfold_nu_fold_means <- list(
+    if (is.null(kfold$nu_fold_means)) NULL else kfold$nu_fold_means)
+  result
+}
+
 build_v021_full_config <- function(output_root) {
   if (!is.character(output_root) || length(output_root) != 1L || is.na(output_root) ||
       !nzchar(output_root)) stop("output_root must be one path.")
@@ -407,6 +828,8 @@ build_v021_full_execution_manifest <- function(config, taxa, provenance) {
       iter_warmup = config$iter_warmup, iter_sampling = config$iter_sampling),
     kfold_config = list(
       K = 5L, R = 1L, enabled = config$run_kfold,
+      scheduler = "global_direction_repetition_fold_queue",
+      scheduling_unit = "fold_fit",
       parallel_chains = config$kfold_parallel_chains,
       maximum_concurrent_fits = config$maximum_simultaneous_kfold_fits),
     predictive_config = list(identity = config$predictive_config_id),
@@ -546,8 +969,9 @@ run_v021_full_dry_run_audit <- function(prepared, policy, result_root,
     ownership_released = !dir.exists(v021_ownership_path(result_root)),
     kfold_planning = list(
       priority = "canonical completed-main direction order",
-      scheduler = "kfold_chain_slot_rolling",
+      scheduler = "kfold_global_fold_slot_rolling",
       parallel_chains = policy$kfold_parallel_chains,
+      scheduling_unit = "direction_repetition_fold",
       maximum_concurrent_fits = policy$maximum_concurrent_kfold_fits,
       shared_budget = TRUE, main_kfold_overlap = FALSE),
     obsolete_weight_fields_absent = TRUE,

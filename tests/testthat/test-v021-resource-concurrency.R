@@ -50,7 +50,7 @@ test_that("canonical policy derives the twelve-chain capacity contract", {
   expect_identical(v021_resource_policy_hash(policy), v021_resource_policy_hash(policy))
 })
 
-test_that("production chain-slot policy derives twelve serial-chain directions", {
+test_that("production policy derives twelve serial-chain fold fits", {
   config <- build_v021_full_config(tempdir())
   policy <- build_v021_full_resource_policy(config)
   expect_identical(policy$main_chains, 4L)
@@ -222,4 +222,16 @@ test_that("dry-run exposes policy without sampling", {
   expect_identical(dry$maximum_concurrent_tasks, 12L)
   expect_identical(dry$maximum_active_cmdstan_chains, 12L)
   expect_identical(dry$waves[[1L]]$reserved_chain_slots, 12L)
+})
+
+test_that("predictive scheduler reserves fold identities rather than direction identities", {
+  runner <- paste(readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE),
+    collapse = "\n")
+  expect_match(runner, "build_v021_predictive_fold_queue", fixed = TRUE)
+  expect_match(runner, "run_v021_predictive_fold_task", fixed = TRUE)
+  expect_match(runner, "task$fold_identity", fixed = TRUE)
+  expect_match(runner, "predictive_fold_worker", fixed = TRUE)
+  expect_false(grepl(
+    "pclvbayes:::.add_predictive_evaluation", runner, fixed = TRUE))
 })
