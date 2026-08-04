@@ -432,20 +432,70 @@ test_that("cleanup never changes completed checkpoint content", {
 test_that("runner installs ownership cleanup before releasing workers", {
   runner <- readLines(testthat::test_path(
     "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE)
-  ownership_line <- grep("new_v021_batch_ownership", runner, fixed = TRUE)[[1L]]
-  guard_line <- grep("on.exit({", runner, fixed = TRUE)[[1L]]
-  release_line <- grep("file.create(start_file)", runner, fixed = TRUE)[[1L]]
-  collect_line <- grep("collect_v021_tracked_jobs(fit_job_tracker)",
-                       runner, fixed = TRUE)[[1L]]
+
+  ownership_line <- grep(
+    "new_v021_batch_ownership", runner, fixed = TRUE)[[1L]]
+
+  guard_lines <- grep("on.exit({", runner, fixed = TRUE)
+  guard_line <- guard_lines[guard_lines > ownership_line][[1L]]
+
+  # Initial workers are forked behind private gate files. They must not be
+  # released until ownership exists and the cleanup guard has been installed.
+  initial_release_loop_line <- grep(
+    "for (spawned in initial_spawned)", runner, fixed = TRUE)[[1L]]
+
+  gate_release_lines <- grep(
+    "file.create(spawned$gate_file)", runner, fixed = TRUE)
+
+  initial_release_line <- gate_release_lines[
+    gate_release_lines > initial_release_loop_line
+  ][[1L]]
+
+  collect_line <- grep(
+    "collected <- collect_ready_jobs(fit_job_tracker)",
+    runner, fixed = TRUE
+  )[[1L]]
+
   expect_lt(ownership_line, guard_line)
-  expect_lt(guard_line, release_line)
-  expect_lt(release_line, collect_line)
-  expect_true(any(grepl("SIGKILL and uncatchable parent termination", runner,
-                         fixed = TRUE)) ||
-              any(grepl("SIGKILL and uncatchable parent termination",
-                        readLines(testthat::test_path(
-                          "../../benchmarks/mtist/v021_full_100_species.R")),
-                        fixed = TRUE)))
+  expect_lt(guard_line, initial_release_loop_line)
+  expect_lt(initial_release_loop_line, initial_release_line)
+  expect_lt(initial_release_line, collect_line)
+
+  # Every subsequently rolled worker must be registered and durably persisted
+  # before its private gate is released.
+  rolling_launch_line <- grep(
+    "launch_registered_fit <- function(j)", runner, fixed = TRUE)[[1L]]
+
+  rolling_spawn_lines <- grep(
+    "spawned <- spawn_fit_job(j)", runner, fixed = TRUE)
+  rolling_spawn_line <- rolling_spawn_lines[
+    rolling_spawn_lines > rolling_launch_line
+  ][[1L]]
+
+  rolling_persist_lines <- grep(
+    "persist_registry()", runner, fixed = TRUE)
+  rolling_persist_line <- rolling_persist_lines[
+    rolling_persist_lines > rolling_spawn_line
+  ][[1L]]
+
+  rolling_release_line <- gate_release_lines[
+    gate_release_lines > rolling_persist_line
+  ][[1L]]
+
+  expect_lt(rolling_launch_line, rolling_spawn_line)
+  expect_lt(rolling_spawn_line, rolling_persist_line)
+  expect_lt(rolling_persist_line, rolling_release_line)
+
+  expect_true(any(grepl(
+    "SIGKILL and uncatchable parent termination",
+    runner,
+    fixed = TRUE
+  )) || any(grepl(
+    "SIGKILL and uncatchable parent termination",
+    readLines(testthat::test_path(
+      "../../benchmarks/mtist/v021_full_100_species.R")),
+    fixed = TRUE
+  )))
 })
 
 test_that("intermediate sampler health never claims NA convergence passed", {

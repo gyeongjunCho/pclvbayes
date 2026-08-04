@@ -265,6 +265,11 @@ if (!identical(executable, preexisting_executable) ||
   stop("V021-06 executable reuse was not established before worker launch.")
 launch_record$executable_path <- executable
 launch_record$worker_compilation_count <- 0L
+launch_record$scheduler <- list(
+  strategy = "rolling_window",
+  maximum_active_main_fits = as.integer(config$maximum_simultaneous_fits),
+  window_size = as.integer(10L * config$maximum_simultaneous_fits),
+  polling_seconds = 0.05)
 .v021_atomic_save_rds(launch_record, file.path(paths$output_root, "launch_record.rds"))
 approved_runtime <- build_v021_runtime_context(runtime$ctx)
 inference_config <- controls[intersect(names(controls), v021_inference_config_fields)]
@@ -274,6 +279,7 @@ durable_peaks <- recover_v021_monitor_peaks(paths$output_root, policy, executabl
 peak_chains <- durable_peaks$chains
 peak_slots <- durable_peaks$processes
 batch_number <- 0L
+rolling_window_size <- as.integer(10L * config$maximum_simultaneous_fits)
 trace_root <- file.path(paths$output_root, "failure_traces")
 parent_trace <- new_v021_failure_trace_context(trace_root, "parent")
 
@@ -457,65 +463,151 @@ store_outcome <- function(i, result, elapsed) {
 }
 
 run_batch <- function(indices) {
+  if (!length(indices)) return(invisible(TRUE))
+
   set_v021_failure_trace_phase(parent_trace, "batch_launch")
   validate_v021_controller_ownership(
     controller_ownership, paths$output_root,
     prepared_execution$manifest$manifest_hash,
     prepared_execution$manifest$configuration_hash)
-  validate_v021_preflight_launch_capacity(policy, length(indices))
+
+  maximum_active <- as.integer(config$maximum_simultaneous_fits)
+  validate_v021_preflight_launch_capacity(
+    policy, min(length(indices), maximum_active))
+
   batch_number <<- batch_number + 1L
   batch_id <- sprintf("batch-%05d", batch_number)
   parent_trace$batch_id <- batch_id
   parent_trace$task_ids <- as.integer(manifest$task_id[indices])
   parent_trace$direction_ids <- as.character(manifest$direction_id[indices])
-  for (i in indices) {
-    attempt_number <- v021_task_attempt_number(
-      execution_status, tasks$direction_index[[i]], next_attempt = TRUE)
-    active_reservations <<- reserve_v021_capacity(
-      active_reservations, policy, manifest$direction_id[[i]],
-      attempt_number, "main_fit")
-  }
-  write_v021_reservations_atomic(active_reservations, reservation_path, policy)
-  mark_running(indices)
-  set_v021_failure_trace_phase(parent_trace, "batch_launch", completed = TRUE)
+
   specs <- lapply(indices, function(i)
     build_v021_inference_spec(study, inference_config, tasks[i, , drop = FALSE]))
   jobs <- lapply(specs, make_v021_confirmation_fit_closure,
     runtime_context = approved_runtime,
     fit_direction = pclvbayes:::.fit_direction_main_posterior)
-  started <- proc.time()[["elapsed"]]
+  worker_traces <- lapply(seq_along(indices), function(j)
+    new_v021_failure_trace_context(
+      trace_root, "outer_worker", batch_id,
+      manifest$task_id[[indices[[j]]]], manifest$direction_id[[indices[[j]]]]))
+
+  results <- vector("list", length(indices))
+  elapsed_by_position <- rep(NA_real_, length(indices))
   stop_file <- tempfile("v021-full-monitor-stop-")
-  start_file <- tempfile("v021-full-fit-start-")
   monitor_start_file <- tempfile("v021-full-monitor-start-")
   registry_file <- tempfile("v021-full-registry-", fileext = ".rds")
   final_file <- file.path(paths$monitor_root, paste0(batch_id, ".rds"))
   latest_file <- file.path(paths$monitor_root, "latest.rds")
   parent_pid <- Sys.getpid()
-  worker_traces <- lapply(seq_along(indices), function(j)
-    new_v021_failure_trace_context(
-      trace_root, "outer_worker", batch_id,
-      manifest$task_id[[indices[[j]]]], manifest$direction_id[[indices[[j]]]]))
-  fit_jobs <- lapply(seq_along(indices), function(j) parallel::mcparallel({
-    while (!file.exists(start_file)) Sys.sleep(0.01)
-    set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution")
-    run_v021_traced_child(function() {
-      value <- with_v021_single_thread_environment(jobs[[j]])
-      set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution",
-                                   completed = TRUE)
-      value
-    }, worker_traces[[j]])
-  }, silent = TRUE))
-  fit_pids <- vapply(fit_jobs, function(job) as.integer(job$pid), integer(1))
-  fit_registry <- do.call(rbind, lapply(seq_along(fit_pids), function(j)
-    register_v021_preflight_worker(
-      fit_pids[[j]], parent_pid, "direction_fit_worker", batch_id,
-      manifest$direction_id[[indices[[j]]]])))
-  cleanup_path <- file.path(paths$output_root, "cleanup_audits",
-                            paste0(batch_id, ".rds"))
+
+  fit_job_tracker <- new_v021_child_job_tracker()
+  monitor_job_tracker <- new_v021_child_job_tracker()
+  active_meta <- new.env(hash = TRUE, parent = emptyenv())
+
+  collect_ready_jobs <- function(tracker) {
+    if (!is.environment(tracker) || is.null(tracker$jobs))
+      stop("Invalid V021 child-job tracker.")
+
+    tracked <- tracker$jobs
+    if (!length(tracked)) return(list())
+
+    collected <- parallel::mccollect(tracked, wait = FALSE)
+    if (is.null(collected) || !length(collected))
+      return(list())
+    if (!is.list(collected) || is.null(names(collected)) ||
+        anyNA(names(collected)) || any(!nzchar(names(collected))))
+      stop("Ready V021 child results must be a PID-named list.")
+
+    tracked_pids <- vapply(
+      tracked, function(job) as.integer(job$pid), integer(1))
+    collected_pids <- suppressWarnings(as.integer(names(collected)))
+    if (anyNA(collected_pids) || anyDuplicated(collected_pids) ||
+        any(!collected_pids %in% tracked_pids))
+      stop("Ready V021 child results did not match tracked child PIDs.")
+
+    tracker$jobs <- tracked[!tracked_pids %in% collected_pids]
+    collected
+  }
+
+  reserve_and_mark <- function(j) {
+    i <- indices[[j]]
+    attempt_number <- v021_task_attempt_number(
+      execution_status, tasks$direction_index[[i]], next_attempt = TRUE)
+    active_reservations <<- reserve_v021_capacity(
+      active_reservations, policy, manifest$direction_id[[i]],
+      attempt_number, "main_fit")
+    write_v021_reservations_atomic(active_reservations, reservation_path, policy)
+    mark_running(i)
+  }
+
+  spawn_fit_job <- function(j) {
+    gate_file <- tempfile("v021-full-fit-start-")
+    job <- parallel::mcparallel({
+      while (!file.exists(gate_file)) Sys.sleep(0.01)
+      set_v021_failure_trace_phase(worker_traces[[j]], "worker_execution")
+      run_v021_traced_child(function() {
+        value <- with_v021_single_thread_environment(jobs[[j]])
+        set_v021_failure_trace_phase(
+          worker_traces[[j]], "worker_execution", completed = TRUE)
+        value
+      }, worker_traces[[j]])
+    }, silent = TRUE)
+
+    pid <- as.integer(job$pid)
+    pid_key <- as.character(pid)
+    fit_job_tracker$jobs[[pid_key]] <- job
+    active_meta[[pid_key]] <- list(
+      position = as.integer(j),
+      start_elapsed = proc.time()[["elapsed"]])
+
+    list(
+      gate_file = gate_file,
+      registry = register_v021_preflight_worker(
+        pid, parent_pid, "direction_fit_worker", batch_id,
+        manifest$direction_id[[indices[[j]]]])
+    )
+  }
+
+  initial_count <- min(length(indices), maximum_active)
+  initial_spawned <- vector("list", initial_count)
+  for (j in seq_len(initial_count)) {
+    reserve_and_mark(j)
+    initial_spawned[[j]] <- spawn_fit_job(j)
+  }
+  fit_registry <- do.call(
+    rbind, lapply(initial_spawned, function(value) value$registry))
+
+  cleanup_path <- file.path(
+    paths$output_root, "cleanup_audits", paste0(batch_id, ".rds"))
   ownership <- new_v021_batch_ownership(
     batch_id, parent_pid, fit_registry, executable, paths$output_root, cleanup_path)
   parent_trace$cleanup_audit_path <- cleanup_path
   batch_exit_condition <- NULL
+
+  registry <- fit_registry
+  persist_registry <- function() {
+    validate_v021_worker_registry(registry)
+    updated_ownership <- ownership
+    updated_ownership$worker_registry <- registry
+    ownership <<- updated_ownership
+    .v021_atomic_save_rds(registry, registry_file)
+    .v021_atomic_save_rds(
+      registry,
+      file.path(
+        paths$output_root, "worker_registries", paste0(batch_id, ".rds")))
+    .v021_atomic_save_rds(list(
+      ownership_schema = "v021_full_batch_ownership_v1",
+      batch_id = batch_id,
+      parent_pid = as.integer(parent_pid),
+      known_model_executable = executable,
+      output_root = paths$output_root,
+      worker_registry = registry,
+      registration_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)),
+      file.path(
+        paths$output_root, "batch_ownership", paste0(batch_id, ".rds")))
+    invisible(TRUE)
+  }
+
   runtime_inventory_reader <- function() {
     snapshot <- capture_v021_preflight_process_snapshot(parent_pid, executable)
     classify_v021_process_snapshot(
@@ -524,195 +616,306 @@ run_batch <- function(indices) {
   runtime_alive_reader <- function(pids, start_times) {
     if (!length(pids)) return(integer())
     keep <- vapply(seq_along(pids), function(k) {
-      stat <- tryCatch(readLines(file.path("/proc", pids[[k]], "stat"),
-                                 warn = FALSE, n = 1L),
-                       error = function(e) character())
+      stat <- tryCatch(
+        readLines(
+          file.path("/proc", pids[[k]], "stat"), warn = FALSE, n = 1L),
+        error = function(e) character())
       if (!length(stat)) return(FALSE)
-      parsed <- tryCatch(.v021_parse_linux_stat(stat, pids[[k]]), error = identity)
-      !inherits(parsed, "error") && identical(parsed$start_time, start_times[[k]]) &&
+      parsed <- tryCatch(
+        .v021_parse_linux_stat(stat, pids[[k]]), error = identity)
+      !inherits(parsed, "error") &&
+        identical(parsed$start_time, start_times[[k]]) &&
         !identical(parsed$process_state, "Z")
     }, logical(1))
     as.integer(pids[keep])
   }
   runtime_signaler <- function(pids, signal) {
-    option <- switch(signal, SIGINT = "-INT", SIGTERM = "-TERM",
-                     stop("Unsupported cleanup signal."))
+    option <- switch(
+      signal,
+      SIGINT = "-INT",
+      SIGTERM = "-TERM",
+      stop("Unsupported cleanup signal."))
     invisible(lapply(as.integer(pids), function(pid)
-      system2("kill", c(option, as.character(pid)), stdout = FALSE, stderr = FALSE)))
+      system2(
+        "kill", c(option, as.character(pid)),
+        stdout = FALSE, stderr = FALSE)))
   }
-  fit_job_tracker <- new_v021_child_job_tracker(fit_jobs)
-  monitor_job_tracker <- new_v021_child_job_tracker()
   runtime_reaper <- function()
     reap_v021_uncollected_jobs(fit_job_tracker, monitor_job_tracker)
+
   on.exit({
-    cleanup_result <- tryCatch(cleanup_v021_owned_batch(
-      ownership, batch_exit_condition, "parent", parent_trace$phase,
-      runtime_inventory_reader, runtime_signaler, runtime_alive_reader,
-      runtime_reaper), error = identity)
+    cleanup_result <- tryCatch(
+      cleanup_v021_owned_batch(
+        ownership, batch_exit_condition, "parent", parent_trace$phase,
+        runtime_inventory_reader, runtime_signaler, runtime_alive_reader,
+        runtime_reaper),
+      error = identity)
     if (inherits(cleanup_result, "error"))
       message("V021 batch cleanup failure: ", conditionMessage(cleanup_result))
+
     release_result <- tryCatch({
       owned_ids <- manifest$direction_id[indices]
       active <- active_reservations$state == "reserved" &
         active_reservations$task_identity %in% owned_ids
       active_reservations$state[active] <<- "worker_terminated"
-      write_v021_reservations_atomic(active_reservations, reservation_path, policy)
+      write_v021_reservations_atomic(
+        active_reservations, reservation_path, policy)
       TRUE
     }, error = identity)
     if (inherits(release_result, "error"))
-      message("V021 batch reservation cleanup failure: ", conditionMessage(release_result))
+      message(
+        "V021 batch reservation cleanup failure: ",
+        conditionMessage(release_result))
   }, add = TRUE)
-  stop_owned <- function(snapshot) {
-    owned <- fit_pids
+
+  stop_owned <- function(snapshot, registry_snapshot = NULL) {
+    registry_now <- registry_snapshot
+    if (is.null(registry_now))
+      registry_now <- tryCatch(
+        readRDS(registry_file), error = function(e) registry)
+    fit_rows <- registry_now[
+      registry_now$worker_role == "direction_fit_worker", , drop = FALSE]
+    if (!nrow(fit_rows)) return(invisible(TRUE))
+
+    matched <- match(snapshot$pid, fit_rows$pid)
+    same_identity <- !is.na(matched) &
+      as.character(snapshot$start_time) ==
+        as.character(fit_rows$start_time[matched])
+    owned <- as.integer(snapshot$pid[same_identity])
+
     repeat {
       children <- snapshot$pid[snapshot$ppid %in% owned]
       expanded <- unique(c(owned, children))
       if (identical(sort(expanded), sort(owned))) break
       owned <- expanded
     }
-    for (pid in rev(owned)) system2("kill", c("-INT", as.character(pid)))
+    for (pid in rev(owned))
+      system2(
+        "kill", c("-INT", as.character(pid)),
+        stdout = FALSE, stderr = FALSE)
+    invisible(TRUE)
   }
+
   monitor_trace <- new_v021_failure_trace_context(
     trace_root, "monitor_child", batch_id,
     manifest$task_id[indices], manifest$direction_id[indices])
   monitor_job <- parallel::mcparallel(run_v021_traced_child(function() {
     while (!file.exists(monitor_start_file)) Sys.sleep(0.01)
-    registry <- readRDS(registry_file)
     snapshots <- list()
+    last_registry <- readRDS(registry_file)
+
     repeat {
       set_v021_failure_trace_phase(monitor_trace, "monitor_polling")
-      snap <- tryCatch(capture_v021_preflight_process_snapshot(parent_pid, executable),
-                       error = identity)
-      if (inherits(snap, "error")) {
-        payload <- list(error = conditionMessage(snap), snapshots = snapshots)
+      registry_read <- tryCatch(readRDS(registry_file), error = identity)
+      if (!inherits(registry_read, "error"))
+        last_registry <- registry_read
+      snap <- tryCatch(
+        capture_v021_preflight_process_snapshot(parent_pid, executable),
+        error = identity)
+
+      if (inherits(registry_read, "error") || inherits(snap, "error")) {
+        reason <- if (inherits(registry_read, "error"))
+          conditionMessage(registry_read) else conditionMessage(snap)
+        payload <- list(error = reason, snapshots = snapshots)
         .v021_atomic_save_rds(payload, latest_file)
         .v021_atomic_save_rds(payload, final_file)
-        if (length(snapshots)) stop_owned(tail(snapshots, 1L)[[1L]])
+        if (!inherits(snap, "error"))
+          stop_owned(snap, last_registry)
+        else if (length(snapshots))
+          stop_owned(tail(snapshots, 1L)[[1L]], last_registry)
         break
       }
+
+      registry_now <- registry_read
       snapshots[[length(snapshots) + 1L]] <- snap
       monitor <- monitor_v021_process_snapshots(
-        list(snap), policy, parent_pid, executable, worker_registry = registry)
-      payload <- list(snapshot = snap, latest_monitor = monitor, batch_id = batch_id)
+        list(snap), policy, parent_pid, executable,
+        worker_registry = registry_now)
+      payload <- list(
+        snapshot = snap, latest_monitor = monitor, batch_id = batch_id)
       .v021_atomic_save_rds(payload, latest_file)
+
       if (!identical(monitor$monitoring_state, "verified") ||
           !identical(monitor$compliance_status, "compliant")) {
         payload$snapshots <- snapshots
         payload$error <- monitor$reason %||% "resource_ceiling_exceeded"
         .v021_atomic_save_rds(payload, latest_file)
         .v021_atomic_save_rds(payload, final_file)
-        stop_owned(snap)
+        stop_owned(snap, registry_now)
         break
       }
-      set_v021_failure_trace_phase(monitor_trace, "monitor_polling", completed = TRUE)
+
+      set_v021_failure_trace_phase(
+        monitor_trace, "monitor_polling", completed = TRUE)
       if (file.exists(stop_file)) {
         set_v021_failure_trace_phase(monitor_trace, "monitor_shutdown")
         payload$snapshots <- snapshots
         .v021_atomic_save_rds(payload, final_file)
-        set_v021_failure_trace_phase(monitor_trace, "monitor_shutdown",
-                                     completed = TRUE)
+        set_v021_failure_trace_phase(
+          monitor_trace, "monitor_shutdown", completed = TRUE)
         break
       }
       Sys.sleep(1)
     }
     TRUE
   }, monitor_trace), silent = TRUE)
-  monitor_job_tracker$jobs <- list(monitor_job)
+  monitor_job_tracker$jobs <- setNames(
+    list(monitor_job), as.character(monitor_job$pid))
   monitor_registry <- register_v021_preflight_worker(
     as.integer(monitor_job$pid), parent_pid, "resource_monitor", batch_id,
     paste0(batch_id, "-monitor"))
-  registry <- rbind(fit_registry, monitor_registry)
-  validate_v021_worker_registry(registry)
-  ownership$worker_registry <- registry
-  .v021_atomic_save_rds(registry, registry_file)
-  .v021_atomic_save_rds(registry, file.path(paths$output_root, "worker_registries",
-                                            paste0(batch_id, ".rds")))
-  .v021_atomic_save_rds(list(
-    ownership_schema = "v021_full_batch_ownership_v1",
-    batch_id = batch_id,
-    parent_pid = as.integer(parent_pid),
-    known_model_executable = executable,
-    output_root = paths$output_root,
-    worker_registry = registry,
-    registration_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)),
-    file.path(paths$output_root, "batch_ownership", paste0(batch_id, ".rds")))
+  registry <- rbind(registry, monitor_registry)
+  persist_registry()
+
+  launch_registered_fit <- function(j) {
+    reserve_and_mark(j)
+    spawned <- spawn_fit_job(j)
+    registry <<- rbind(registry, spawned$registry)
+    persist_registry()
+    if (!file.create(spawned$gate_file))
+      stop("Failed to release a registered rolling fit worker.")
+    invisible(TRUE)
+  }
+
   record_batch_condition <- function(condition) {
     batch_exit_condition <<- condition
     if (file.exists(latest_file))
-      parent_trace$monitor_state <- tryCatch(readRDS(latest_file), error = function(e)
-        list(read_error = conditionMessage(e)))
+      parent_trace$monitor_state <- tryCatch(
+        readRDS(latest_file),
+        error = function(e) list(read_error = conditionMessage(e)))
   }
-  tryCatch({
-    file.create(monitor_start_file)
-    file.create(start_file)
-  set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
-  results <- unname(collect_v021_tracked_jobs(fit_job_tracker))
-  for (i in indices) {
-    attempt_number <- v021_task_attempt_number(
-      execution_status, tasks$direction_index[[i]])
-    active_reservations <<- release_v021_capacity(
-      active_reservations, policy, manifest$direction_id[[i]],
-      attempt_number, "main_fit", worker_terminated = TRUE)
-  }
-  write_v021_reservations_atomic(active_reservations, reservation_path, policy)
-  set_v021_failure_trace_phase(parent_trace, "fit_return_handling", completed = TRUE)
-  # Close the concurrent-main-fit monitor before spawning any controller-side
-  # K-fold process. Forked K-fold utilities must not inherit the monitor pipe.
-  file.create(stop_file)
-  set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
-  monitor_collected <- unname(
-    collect_v021_tracked_jobs(monitor_job_tracker)
-  )
-  if (length(monitor_collected) != 1L)
-    stop("Monitor child did not return exactly one collected result.")
-  monitor_result <- monitor_collected[[1L]]
-  if (inherits(monitor_result, "v021_traced_child_error"))
-    stop(monitor_result$condition_message)
 
-  # The scoped collection above is the single authoritative reap operation.
-  # Do not mutate parallel's private child registry or collect unrelated jobs.
-  wait_v021_collected_child_exit(
-    as.integer(monitor_job$pid),
-    expected_start_time = as.character(monitor_registry$start_time[[1L]])
-  )
-  set_v021_failure_trace_phase(parent_trace, "monitor_shutdown", completed = TRUE)
-  payload <- readRDS(final_file)
-  parent_trace$monitor_state <- payload$latest_monitor %||% payload$error %||% NULL
-  if (!is.null(payload$error)) stop("Live process monitor failed: ", payload$error)
-  batch_monitor <- monitor_v021_process_snapshots(
-    payload$snapshots, policy, parent_pid, executable, worker_registry = registry)
-  validate_v021_preflight_monitor(batch_monitor, policy)
-  peak_chains <<- max(peak_chains, batch_monitor$observed_peak_active_cmdstan_chains)
-  peak_slots <<- max(peak_slots, batch_monitor$observed_peak_active_cmdstan_processes)
-  # Main fits finish as one canonical batch. Predictive evaluation then follows
-  # direction order, one eligible direction at a time, under the shared budget.
-  evaluate_predictive <- function(i, result) {
-    direction_id <- manifest$direction_id[[i]]
-    attempt_number <- v021_task_attempt_number(
-      execution_status, tasks$direction_index[[i]])
-    evaluated <- with_v021_predictive_reservation(
-      result, active_reservations, policy, direction_id, attempt_number,
-      evaluator = pclvbayes:::.add_predictive_evaluation,
-      persist = function(value) {
-        active_reservations <<- value
-        write_v021_reservations_atomic(value, reservation_path, policy)
-      })
-    active_reservations <<- evaluated$reservations
-    evaluated$result
-  }
-  for (j in seq_along(indices)) {
-    if (inherits(results[[j]], c("try-error", "pclv_failure", "v021_traced_child_error")))
-      next
-    i <- indices[[j]]
-    results[[j]] <- evaluate_predictive(i, results[[j]])
-  }
-  elapsed <- (proc.time()[["elapsed"]] - started) / length(indices)
-  for (j in seq_along(indices)) store_outcome(indices[[j]], results[[j]], elapsed)
-  update_status()
+  tryCatch({
+    if (!file.create(monitor_start_file))
+      stop("Failed to start the rolling resource monitor.")
+    for (spawned in initial_spawned)
+      if (!file.create(spawned$gate_file))
+        stop("Failed to release an initial rolling fit worker.")
+    set_v021_failure_trace_phase(parent_trace, "batch_launch", completed = TRUE)
+
+    set_v021_failure_trace_phase(parent_trace, "fit_return_handling")
+    next_position <- initial_count + 1L
+
+    repeat {
+      while (length(fit_job_tracker$jobs) < maximum_active &&
+             next_position <= length(indices)) {
+        launch_registered_fit(next_position)
+        next_position <- next_position + 1L
+      }
+
+      if (!length(fit_job_tracker$jobs) &&
+          next_position > length(indices))
+        break
+
+      collected <- collect_ready_jobs(fit_job_tracker)
+      if (!length(collected)) {
+        Sys.sleep(0.05)
+        next
+      }
+
+      collected_pids <- names(collected)
+      for (k in seq_along(collected)) {
+        pid_key <- collected_pids[[k]]
+        meta <- active_meta[[pid_key]]
+        if (is.null(meta))
+          stop("Collected rolling child was not present in active metadata.")
+
+        j <- as.integer(meta$position)
+        i <- indices[[j]]
+        results[j] <- list(collected[[k]])
+        elapsed_by_position[[j]] <-
+          proc.time()[["elapsed"]] - as.numeric(meta$start_elapsed)
+        rm(list = pid_key, envir = active_meta)
+
+        attempt_number <- v021_task_attempt_number(
+          execution_status, tasks$direction_index[[i]])
+        active_reservations <<- release_v021_capacity(
+          active_reservations, policy, manifest$direction_id[[i]],
+          attempt_number, "main_fit", worker_terminated = TRUE)
+        write_v021_reservations_atomic(
+          active_reservations, reservation_path, policy)
+      }
+    }
+
+    set_v021_failure_trace_phase(
+      parent_trace, "fit_return_handling", completed = TRUE)
+
+    # Predictive evaluation is still controller-side and sequential. Stop the
+    # monitor first so K-fold forks cannot inherit the monitor pipe.
+    if (!file.create(stop_file))
+      stop("Failed to request rolling monitor shutdown.")
+    set_v021_failure_trace_phase(parent_trace, "monitor_shutdown")
+    monitor_collected <- unname(
+      collect_v021_tracked_jobs(monitor_job_tracker))
+    if (length(monitor_collected) != 1L)
+      stop("Monitor child did not return exactly one collected result.")
+    monitor_result <- monitor_collected[[1L]]
+    if (inherits(monitor_result, "v021_traced_child_error"))
+      stop(monitor_result$condition_message)
+
+    wait_v021_collected_child_exit(
+      as.integer(monitor_job$pid),
+      expected_start_time = as.character(monitor_registry$start_time[[1L]]))
+    set_v021_failure_trace_phase(
+      parent_trace, "monitor_shutdown", completed = TRUE)
+
+    payload <- readRDS(final_file)
+    parent_trace$monitor_state <-
+      payload$latest_monitor %||% payload$error %||% NULL
+    if (!is.null(payload$error))
+      stop("Live process monitor failed: ", payload$error)
+
+    batch_monitor <- monitor_v021_process_snapshots(
+      payload$snapshots, policy, parent_pid, executable,
+      worker_registry = registry)
+    validate_v021_preflight_monitor(batch_monitor, policy)
+    peak_chains <<- max(
+      peak_chains, batch_monitor$observed_peak_active_cmdstan_chains)
+    peak_slots <<- max(
+      peak_slots, batch_monitor$observed_peak_active_cmdstan_processes)
+
+    evaluate_predictive <- function(i, result) {
+      direction_id <- manifest$direction_id[[i]]
+      attempt_number <- v021_task_attempt_number(
+        execution_status, tasks$direction_index[[i]])
+      evaluated <- with_v021_predictive_reservation(
+        result, active_reservations, policy, direction_id, attempt_number,
+        evaluator = pclvbayes:::.add_predictive_evaluation,
+        persist = function(value) {
+          active_reservations <<- value
+          write_v021_reservations_atomic(
+            value, reservation_path, policy)
+        })
+      active_reservations <<- evaluated$reservations
+      evaluated$result
+    }
+
+    # Preserve canonical direction order for predictive evaluation and durable
+    # artifact finalization, regardless of rolling main-fit completion order.
+    for (j in seq_along(indices)) {
+      i <- indices[[j]]
+      result <- results[[j]]
+      elapsed <- elapsed_by_position[[j]]
+      if (!is.finite(elapsed)) elapsed <- 0
+
+      if (!inherits(
+          result,
+          c("try-error", "pclv_failure", "v021_traced_child_error"))) {
+        predictive_started <- proc.time()[["elapsed"]]
+        result <- evaluate_predictive(i, result)
+        elapsed <- elapsed +
+          (proc.time()[["elapsed"]] - predictive_started)
+      }
+
+      store_outcome(i, result, elapsed)
+      results[j] <- list(NULL)
+      update_status()
+    }
   }, error = function(condition)
        record_and_resignal_v021_condition(condition, record_batch_condition),
      interrupt = function(condition)
        record_and_resignal_v021_condition(condition, record_batch_condition))
+
   invisible(TRUE)
 }
 
@@ -746,7 +949,7 @@ execution_error <- tryCatch(
         if (!length(runnable_ordinals)) break
         runnable_indices <- match(runnable_ordinals, manifest$direction_index)
         if (anyNA(runnable_indices)) stop("V021-03 runnable task identity mismatch.")
-        run_batch(head(runnable_indices, config$maximum_simultaneous_fits))
+        run_batch(head(runnable_indices, rolling_window_size))
       }
     }), error = function(condition)
          record_and_resignal_v021_condition(condition, record_execution_condition),
@@ -797,4 +1000,3 @@ cat("V021-06 completed.\n")
 }
 
 run_v021_full_100_species()
-
