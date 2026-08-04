@@ -114,12 +114,23 @@ wait_v021_collected_child_exit <- function(
 
     if (!is.list(identity) ||
         is.null(identity$start_time) ||
-        length(identity$start_time) != 1L)
+        length(identity$start_time) != 1L ||
+        is.na(identity$start_time) ||
+        !nzchar(as.character(identity$start_time)) ||
+        is.null(identity$process_state) ||
+        length(identity$process_state) != 1L ||
+        is.na(identity$process_state) ||
+        !nzchar(as.character(identity$process_state)))
       stop("Invalid collected-child process identity.")
 
     # The PID may have been reused after the monitor exited. A different
     # start-time identity is not the collected child and must not fail the run.
     if (!identical(as.character(identity$start_time), expected_start_time))
+      return(invisible(TRUE))
+
+    # A zombie has already terminated. It may remain briefly visible in /proc
+    # until its parent completes reaping, but it is not a live child.
+    if (identical(as.character(identity$process_state), "Z"))
       return(invisible(TRUE))
 
     if (clock() >= deadline)

@@ -556,7 +556,7 @@ test_that("collected monitor exit waits without mutating child bookkeeping", {
   identity_reader <- function(pid) {
     checks <<- checks + 1L
     if (checks < 3L) {
-      list(pid = pid, start_time = "12345", process_state = "Z", readable = TRUE)
+      list(pid = pid, start_time = "12345", process_state = "S", readable = TRUE)
     } else {
       NULL
     }
@@ -590,6 +590,29 @@ test_that("collected monitor exit waits without mutating child bookkeeping", {
     ),
     "start time"
   )
+})
+
+test_that("collected zombie monitor is treated as terminated", {
+  sleeps <- numeric()
+
+  expect_true(wait_v021_collected_child_exit(
+    123L,
+    expected_start_time = "12345",
+    identity_reader = function(pid) {
+      list(
+        pid = pid,
+        start_time = "12345",
+        process_state = "Z",
+        readable = TRUE
+      )
+    },
+    sleep = function(seconds) {
+      sleeps <<- c(sleeps, seconds)
+    },
+    clock = function() 0
+  ))
+
+  expect_identical(sleeps, numeric())
 })
 
 test_that("collected monitor exit accepts PID reuse as the original child being gone", {
