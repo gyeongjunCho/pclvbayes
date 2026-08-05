@@ -2433,8 +2433,8 @@
     sa$init <- NULL
   }
 
-  # ★ 폴드 학습은 항상 체인 병렬 끔 (outer/메인 run과 중첩 병렬 방지)
-  sa$parallel_chains <- 1L
+  # Fold-task 병렬화는 바깥 스케줄러가 제한한다. 각 fold 내부에서는
+  # main fit과 동일하게 모든 MCMC chain을 병렬 실행한다.
   sa$chains <- if (is.null(sa$chains))
     4L
   else {
@@ -2448,6 +2448,8 @@
     else
       4L
   }
+
+  sa$parallel_chains <- sa$chains
 
   tryfit <- .sample_with_retry(
     mod        = mod,
