@@ -711,6 +711,18 @@ with_v021_single_thread_environment <- function(code) {
   })
 }
 
+.v021_argv_matches_known_model <- function(argv, known_model_executables) {
+  if (!is.character(known_model_executables) || anyNA(known_model_executables))
+    stop("Known model executables must be a non-missing character vector.")
+  known <- unique(basename(known_model_executables[nzchar(known_model_executables)]))
+  if (!length(known) || !is.character(argv) || !length(argv) ||
+      is.na(argv[[1L]]) || !nzchar(argv[[1L]]))
+    return(FALSE)
+  argv0 <- argv[[1L]]
+  argv0 %in% known_model_executables ||
+    argv0 %in% c(known, paste0("./", known))
+}
+
 .v021_process_ancestry <- function(records, pid, root_pid) {
   path <- as.integer(pid)
   seen <- integer()
@@ -865,9 +877,6 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   if (!"argv" %in% names(out)) out$argv <- I(argv)
   sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
   pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
-  known_executable <- out$executable %in% known_model_executables
-  sample_process <- known_executable & sample_argument
-  pathfinder_process <- known_executable & pathfinder_argument
   r_process <- grepl("(^|/)(R|Rscript)([[:space:]]|$)", out$command)
   parent_index <- match(out$ppid, out$pid)
   valid_parent <- !is.na(parent_index)
@@ -875,7 +884,24 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   parent_is_r_worker[valid_parent] <- r_process[parent_index[valid_parent]] &
     out$pid[parent_index[valid_parent]] != root_pid
   parent_is_registered_worker[valid_parent] <- registered[parent_index[valid_parent]]
-  canonical_diagnose_executable <- grepl(
+  parent_is_controller <- rep(FALSE, nrow(out))
+  parent_is_controller[valid_parent] <-
+    out$pid[parent_index[valid_parent]] == root_pid &
+    r_process[parent_index[valid_parent]]
+  known_executable <- !is.na(out$executable) & nzchar(out$executable) &
+    out$executable %in% known_model_executables
+  known_model_argv <- vapply(
+    argv, .v021_argv_matches_known_model, logical(1),
+    known_model_executables = known_model_executables)
+  # Linux may briefly return NA for /proc/<pid>/exe even while cmdline and
+  # process identity remain readable. Accept the exact canonical model basename
+  # only when it is launched by the controller or one of its R workers.
+  known_model_from_argv <- known_model_argv &
+    (parent_is_controller | parent_is_r_worker | parent_is_registered_worker)
+  sample_process <- (known_executable | known_model_from_argv) & sample_argument
+  pathfinder_process <- (known_executable | known_model_from_argv) &
+    pathfinder_argument
+  canonical_diagnose_executable <- !is.na(out$executable) & grepl(
     "/cmdstan-[^/]+/bin/diagnose$", out$executable)
   canonical_diagnose_argv <- vapply(argv, function(x) {
     length(x) >= 2L && identical(x[[1L]], "bin/diagnose") &&
@@ -886,8 +912,6 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
     registered_diagnostic_identity <- out$readable & out$capture_state == "captured" &
       !is.na(out$start_time) & grepl("^[0-9]+$", out$start_time) &
       out$process_state %in% .v021_linux_non_zombie_states
-  parent_is_controller <- valid_parent &
-    out$pid[parent_index] == root_pid & r_process[parent_index]
   diagnostic_process <- out$is_descendant & canonical_diagnose_executable &
     canonical_diagnose_argv & (parent_is_controller | parent_is_r_worker |
       (parent_is_registered_worker & registered_diagnostic_identity))
@@ -1090,14 +1114,29 @@ capture_v021_linux_process_snapshot <- function(
         .v021_decode_linux_cmdline(raw)
       }, error = identity)
       executable <- tryCatch(executable_reader(file.path(pid_dir, "exe")), error = identity)
-      capture_ok <- !inherits(cmd_result, "error") && !inherits(executable, "error") &&
-        is.character(executable) && length(executable) == 1L && nzchar(executable)
+      cmdline_ok <- !inherits(cmd_result, "error") && is.list(cmd_result) &&
+        is.character(cmd_result$argv) && length(cmd_result$argv) > 0L &&
+        !anyNA(cmd_result$argv) && nzchar(cmd_result$argv[[1L]])
+      executable_ok <- !inherits(executable, "error") &&
+        is.character(executable) && length(executable) == 1L &&
+        !is.na(executable) && nzchar(executable)
+      known_model_from_argv <- cmdline_ok &&
+        .v021_argv_matches_known_model(
+          cmd_result$argv, known_model_executables) &&
+        any(cmd_result$argv %in% c("method=sample", "method=pathfinder"))
+      capture_ok <- cmdline_ok && (executable_ok || known_model_from_argv)
       recheck <- .v021_recheck_linux_process(pid_dir, pid, inventory$start_time[[i]],
                                              path_exists, stat_reader)
       if (!identical(recheck$state, "identity_stable")) break
       if (capture_ok) {
         recheck$state <- "captured"
-        recheck$reason <- if (attempt) "readable_on_recapture" else "readable_initial_capture"
+        if (known_model_from_argv && !executable_ok) {
+          recheck$reason <- if (attempt)
+            "known_model_argv_on_recapture" else "known_model_argv_initial_capture"
+        } else {
+          recheck$reason <- if (attempt)
+            "readable_on_recapture" else "readable_initial_capture"
+        }
         break
       }
       if (attempt == .v021_procfs_recapture_attempts) {
@@ -1108,7 +1147,8 @@ capture_v021_linux_process_snapshot <- function(
     readable <- identical(recheck$state, "captured")
     argv <- if (readable) cmd_result$argv else character()
     command <- if (readable) cmd_result$command else ""
-    executable <- if (readable) executable else ""
+    executable <- if (readable && exists("executable_ok", inherits = FALSE) &&
+                      isTRUE(executable_ok)) executable else ""
     potential <- any(grepl("^method=", argv)) || executable %in% known_model_executables ||
       grepl("cmdstan", command, ignore.case = TRUE)
     data.frame(timestamp = as.character(timestamp), discovery_time = discovery_time,
@@ -1226,3 +1266,4 @@ evaluate_v021_resource_preflight <- function(policy, operation_spec,
   .v021_preflight_result("passed", character(), policy, derivation, monitor,
                          thread_environment)
 }
+

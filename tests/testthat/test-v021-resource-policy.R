@@ -804,6 +804,103 @@ test_that("argv classification recognizes known operations and rejects impostors
   expect_identical(classified$classification[[2L]], "other_descendant")
 })
 
+test_that("known model argv classifies a live chain when procfs exe is unavailable", {
+  root <- data.frame(
+    timestamp = "2026-08-05T00:00:00Z", pid = 100L, ppid = 1L,
+    command = "Rscript production.R",
+    argv = I(list(c("Rscript", "production.R"))),
+    executable = "/usr/bin/R", potential_cmdstan = FALSE, readable = TRUE)
+  worker <- data.frame(
+    timestamp = "2026-08-05T00:00:00Z", pid = 200L, ppid = 100L,
+    command = "R --worker", argv = I(list(c("R", "--worker"))),
+    executable = "/usr/lib/R/bin/exec/R", potential_cmdstan = FALSE,
+    readable = TRUE)
+  chain_argv <- c(
+    "./pclv", "id=3", "random", "seed=20581803", "data",
+    "file=/tmp/standata.json", "output",
+    "file=/results/cmdstan-owned/run/glv_pairwise-3.csv",
+    "method=sample", "num_samples=2000", "num_warmup=2000",
+    "algorithm=hmc", "metric=diag_e", "engine=nuts", "max_depth=14")
+  chain <- data.frame(
+    timestamp = "2026-08-05T00:00:00Z", pid = 300L, ppid = 200L,
+    command = paste(chain_argv, collapse = " "), argv = I(list(chain_argv)),
+    executable = NA_character_, potential_cmdstan = TRUE, readable = TRUE)
+  snapshot <- rbind(root, worker, chain)
+
+  classified <- classify_v021_process_snapshot(
+    snapshot, 100L, known_model_executables = "/models/pclv")
+  expect_identical(
+    classified$classification[classified$pid == 300L], "cmdstan_chain")
+
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 1L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 1L)
+
+  impostor <- snapshot
+  impostor$argv[[3L]][[1L]] <- "./not-pclv"
+  impostor$command[[3L]] <- paste(impostor$argv[[3L]], collapse = " ")
+  classified <- classify_v021_process_snapshot(
+    impostor, 100L, known_model_executables = "/models/pclv")
+  expect_identical(
+    classified$classification[classified$pid == 300L],
+    "unknown_potential_cmdstan")
+})
+
+test_that("procfs capture retains canonical sample argv when readlink returns NA", {
+  root <- tempfile("v021-proc-na-exe-")
+  dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  for (pid in c("100", "200", "300")) dir.create(file.path(root, pid))
+
+  stat_reader <- function(path) {
+    pid <- basename(dirname(path))
+    switch(pid,
+      `100` = proc_stat(100L, 1L, "1000"),
+      `200` = proc_stat(200L, 100L, "2000"),
+      `300` = proc_stat(300L, 200L, "3000"),
+      stop("unexpected pid"))
+  }
+  cmdline_reader <- function(path) {
+    pid <- basename(dirname(path))
+    switch(pid,
+      `100` = raw_cmdline(c("Rscript", "production.R")),
+      `200` = raw_cmdline(c("R", "--worker")),
+      `300` = raw_cmdline(c(
+        "./pclv", "id=3", "random", "seed=20581803",
+        "output", "file=/results/cmdstan-owned/run/chain-3.csv",
+        "method=sample", "num_samples=2000", "num_warmup=2000")),
+      stop("unexpected pid"))
+  }
+  executable_reader <- function(path) {
+    pid <- basename(dirname(path))
+    switch(pid,
+      `100` = "/usr/bin/R",
+      `200` = "/usr/lib/R/bin/exec/R",
+      `300` = NA_character_,
+      stop("unexpected pid"))
+  }
+
+  snapshot <- capture_v021_linux_process_snapshot(
+    root_pid = 100L, known_model_executables = "/models/pclv",
+    proc_root = root, pid_lister = function(root) c("100", "200", "300"),
+    path_exists = dir.exists, stat_reader = stat_reader,
+    cmdline_reader = cmdline_reader, executable_reader = executable_reader,
+    sleep = function(seconds) stop("canonical argv fallback should not retry"))
+  chain <- snapshot[snapshot$pid == 300L, , drop = FALSE]
+  expect_identical(chain$capture_state, "captured")
+  expect_identical(chain$resolution_reason, "known_model_argv_initial_capture")
+  expect_identical(chain$executable, "")
+  expect_identical(chain$argv[[1L]][[1L]], "./pclv")
+
+  classified <- classify_v021_process_snapshot(
+    snapshot, 100L, known_model_executables = "/models/pclv")
+  expect_identical(
+    classified$classification[classified$pid == 300L], "cmdstan_chain")
+})
+
 test_that("an attempt3-shaped eight-chain snapshot is verified without sampling", {
   root <- snapshot_with_argv(c("R", "--worker"), executable = "/usr/lib/R/bin/exec/R",
                              pid = 200L, potential_cmdstan = FALSE)
@@ -1223,3 +1320,4 @@ test_that("resource helpers neither modify inference values nor invoke sampling"
     "../../benchmarks/mtist/v021_resource_policy.R"), warn = FALSE)
   expect_false(any(grepl("cmdstan_model\\(|\\$sample\\(|\\$pathfinder\\(", helper_source)))
 })
+
