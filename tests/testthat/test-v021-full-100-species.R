@@ -945,10 +945,18 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
 
 
 
-test_that("restart manifest identity canonicalizes relative checkpoint paths", {
+test_that("restart manifest identity canonicalizes relative checkpoint paths for pending files", {
   root <- tempfile("v021-manifest-path-")
   dir.create(root, recursive = TRUE)
-  checkpoint_root <- file.path(root, "checkpoints")
+  old <- getwd()
+  on.exit(setwd(old), add = TRUE)
+  setwd(root)
+
+  relative_checkpoint_root <- file.path("relative-result", "checkpoints")
+  dir.create(relative_checkpoint_root, recursive = TRUE)
+  absolute_checkpoint_root <- normalizePath(
+    relative_checkpoint_root, winslash = "/", mustWork = TRUE
+  )
   tasks <- data.frame(
     task_id = c(1L, 1L),
     direction_index = c(1L, 2L),
@@ -957,24 +965,22 @@ test_that("restart manifest identity canonicalizes relative checkpoint paths", {
     seed = c(101L, 102L),
     stringsAsFactors = FALSE
   )
-  requested <- build_v021_checkpoint_manifest(tasks, 4L, checkpoint_root)
-  stored <- requested
-  stored$output_location <- file.path(
-    "relative-result", "checkpoints", basename(stored$output_location)
+  stored <- build_v021_checkpoint_manifest(
+    tasks, 4L, relative_checkpoint_root
+  )
+  requested <- build_v021_checkpoint_manifest(
+    tasks, 4L, absolute_checkpoint_root
   )
 
-  old <- getwd()
-  on.exit(setwd(old), add = TRUE)
-  setwd(root)
-  requested$output_location <- normalizePath(
-    stored$output_location, winslash = "/", mustWork = FALSE
-  )
-
+  expect_false(any(file.exists(stored$output_location)))
+  expect_false(identical(stored$output_location, requested$output_location))
   expect_silent(compare_v021_checkpoint_manifest_identity(stored, requested))
 
+  other_checkpoint_root <- file.path(root, "other-checkpoints")
+  dir.create(other_checkpoint_root)
   changed <- requested
   changed$output_location[[1L]] <- file.path(
-    root, "other-checkpoints", basename(changed$output_location[[1L]])
+    other_checkpoint_root, basename(changed$output_location[[1L]])
   )
   expect_error(
     compare_v021_checkpoint_manifest_identity(stored, changed),

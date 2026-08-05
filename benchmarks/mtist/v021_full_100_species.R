@@ -749,7 +749,15 @@ compare_v021_checkpoint_manifest_identity <- function(stored, requested) {
   canonical_path <- function(path) {
     if (!is.character(path) || anyNA(path) || any(!nzchar(path)))
       stop("V021-06 restart manifest contains an invalid output_location.")
-    normalizePath(path, winslash = "/", mustWork = FALSE)
+    parent <- dirname(path)
+    canonical_parent <- vapply(
+      parent,
+      function(directory) normalizePath(
+        directory, winslash = "/", mustWork = TRUE
+      ),
+      character(1)
+    )
+    unname(file.path(canonical_parent, basename(path)))
   }
   stored_path <- canonical_path(stored$output_location)
   requested_path <- canonical_path(requested$output_location)
