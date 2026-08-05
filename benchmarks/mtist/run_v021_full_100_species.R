@@ -261,10 +261,7 @@ if (file.exists(paths$manifest)) {
   validate_v021_full_config(saved_config)
   compare_v021_full_restart_configs(saved_config, config)
   manifest <- read_v021_checkpoint_manifest(paths$manifest)
-  identity <- c("task_id", "pair_id", "direction_id", "direction_index",
-                "target", "source", "seed", "chain_seeds", "output_location")
-  if (!identical(manifest[identity], expected_manifest[identity]))
-    stop("V021-06 restart manifest identity changed.")
+  compare_v021_checkpoint_manifest_identity(manifest, expected_manifest)
   restart <- validate_v021_full_restart_states(manifest)
   manifest <- restart$manifest
   write_v021_manifest_atomic(manifest, paths$manifest)

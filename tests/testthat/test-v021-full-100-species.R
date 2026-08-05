@@ -944,6 +944,45 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
 })
 
 
+
+test_that("restart manifest identity canonicalizes relative checkpoint paths", {
+  root <- tempfile("v021-manifest-path-")
+  dir.create(root, recursive = TRUE)
+  checkpoint_root <- file.path(root, "checkpoints")
+  tasks <- data.frame(
+    task_id = c(1L, 1L),
+    direction_index = c(1L, 2L),
+    target = c("species_1", "species_2"),
+    source = c("species_2", "species_1"),
+    seed = c(101L, 102L),
+    stringsAsFactors = FALSE
+  )
+  requested <- build_v021_checkpoint_manifest(tasks, 4L, checkpoint_root)
+  stored <- requested
+  stored$output_location <- file.path(
+    "relative-result", "checkpoints", basename(stored$output_location)
+  )
+
+  old <- getwd()
+  on.exit(setwd(old), add = TRUE)
+  setwd(root)
+  requested$output_location <- normalizePath(
+    stored$output_location, winslash = "/", mustWork = FALSE
+  )
+
+  expect_silent(compare_v021_checkpoint_manifest_identity(stored, requested))
+
+  changed <- requested
+  changed$output_location[[1L]] <- file.path(
+    root, "other-checkpoints", basename(changed$output_location[[1L]])
+  )
+  expect_error(
+    compare_v021_checkpoint_manifest_identity(stored, changed),
+    "output_location",
+    fixed = TRUE
+  )
+})
+
 test_that("restart configuration comparison is fieldwise and canonicalizes output roots", {
   root <- tempfile("v021-restart-config-")
   dir.create(root)
@@ -1054,6 +1093,7 @@ test_that("runner and control script require explicit operational-hotfix restart
   expect_match(runner, "PCLV_V021_OPERATIONAL_HOTFIX_RESUME", fixed = TRUE)
   expect_match(runner, "write_v021_operational_resume_bridge", fixed = TRUE)
   expect_match(runner, "compare_v021_full_restart_configs", fixed = TRUE)
+  expect_match(runner, "compare_v021_checkpoint_manifest_identity", fixed = TRUE)
   expect_false(grepl(
     "if (!identical(saved_config, config))", runner, fixed = TRUE
   ))

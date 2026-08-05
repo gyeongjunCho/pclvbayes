@@ -725,6 +725,40 @@ canonicalize_v021_full_restart_config <- function(config) {
   canonical
 }
 
+
+compare_v021_checkpoint_manifest_identity <- function(stored, requested) {
+  validate_v021_checkpoint_manifest(stored)
+  validate_v021_checkpoint_manifest(requested)
+
+  identity <- c(
+    "task_id", "pair_id", "direction_id", "direction_index",
+    "target", "source", "seed", "chain_seeds"
+  )
+  mismatch <- identity[!vapply(
+    identity,
+    function(name) identical(stored[[name]], requested[[name]]),
+    logical(1)
+  )]
+  if (length(mismatch))
+    stop(
+      "V021-06 restart manifest identity changed: ",
+      paste(mismatch, collapse = ", "),
+      "."
+    )
+
+  canonical_path <- function(path) {
+    if (!is.character(path) || anyNA(path) || any(!nzchar(path)))
+      stop("V021-06 restart manifest contains an invalid output_location.")
+    normalizePath(path, winslash = "/", mustWork = FALSE)
+  }
+  stored_path <- canonical_path(stored$output_location)
+  requested_path <- canonical_path(requested$output_location)
+  if (!identical(stored_path, requested_path))
+    stop("V021-06 restart manifest identity changed: output_location.")
+
+  invisible(TRUE)
+}
+
 compare_v021_full_restart_configs <- function(stored, requested) {
   stored <- canonicalize_v021_full_restart_config(stored)
   requested <- canonicalize_v021_full_restart_config(requested)
