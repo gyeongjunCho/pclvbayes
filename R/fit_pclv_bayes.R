@@ -76,10 +76,11 @@
 #'
 #' **Parallelism & progress**
 #' - The **outer pair loop** can run in parallel with `n_workers_outer > 1` (PSOCK via **future/furrr**).
-#' - **K-fold** can run in parallel with `n_workers_kfold > 1`. To avoid nested parallelism,
-#'   when `n_workers_outer > 1` the effective K-fold workers are forced to **1**.
-#' - If **progressr** is installed and `progress = "bar"`, progress bars are shown for both outer
-#'   pairs and K-fold tasks; otherwise it falls back silently.
+#' - Repeated K-fold fold tasks run sequentially within each directed fit to
+#'   avoid nested process-level parallelism.
+#' - Main and K-fold fits run their MCMC chains in parallel.
+#' - If **progressr** is installed and `progress = "bar"`, outer-pair progress
+#'   is displayed; otherwise execution falls back silently.
 #'
 #' **Interpretation**
 #' - For edges, prioritize **posterior-supported pair-to-rest directions** (PSP/LFSR
@@ -115,9 +116,8 @@
 #' @param kfold_K Number of folds K; default \code{5}.
 #' @param kfold_R Number of repetitions R; default \code{3}.
 #' @param kfold_seed Seed used only for repeated K-fold subject splits; defaults to \code{seed}. The same value is applied across all pair directions, while fold sampler seeds remain direction-specific.
-#' @param n_workers_kfold Number of parallel workers for K-fold; default \code{1}.
-#' @param n_workers_outer Number of parallel workers for the outer pair loop; default \code{1}.
-#' If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested parallelism.
+#' @param n_workers_outer Number of parallel workers for the outer pair loop;
+#' default \code{1}.
 #'
 #'
 #' @return
@@ -142,7 +142,6 @@
 #'   # Pathfinder initialization is fixed by the private v0.2 policy.
 #'   chains = 4, iter_warmup = 1000, iter_sampling = 1500,
 #'   n_workers_outer = 4,   # outer pair loop in parallel
-#'   n_workers_kfold = 1,   # k-fold parallel disabled when outer > 1
 #'   progress = "bar"
 #' )
 #' }
@@ -163,7 +162,6 @@ fit_pclv_bayes <- function(
   max_treedepth = 14,
   progress = c("bar", "verbose", "none"),
   n_workers_outer = 1L,
-  n_workers_kfold = 1L,
   kfold_K = 5,
   kfold_R = 3,
   kfold_seed = seed
@@ -186,6 +184,7 @@ fit_pclv_bayes <- function(
   progress_every <- 1L
   silent_sampler <- FALSE
   max_retries <- 3L
+  n_workers_kfold <- 1L
   use_pathfinder_init <- TRUE
   pf_num_paths <- 8L
   pf_draws <- 1000L
@@ -198,7 +197,8 @@ fit_pclv_bayes <- function(
     "eps", "zero_mode_alr", "minpos_alpha", "minpos_base", "eps_fixed",
     "lib_eps_c", "rest_floor_frac", "smooth_scale", "alr_spline_df",
     "alr_spline_spar", "alr_spline_cv", "metric", "quiet", "progress_every",
-    "silent_sampler", "max_retries", "use_pathfinder_init", "pf_num_paths",
+    "silent_sampler", "max_retries", "n_workers_kfold",
+    "use_pathfinder_init", "pf_num_paths",
     "pf_draws", "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample"
   )
   validated <- .validate_fit_pclv_inputs(
@@ -218,7 +218,9 @@ fit_pclv_bayes <- function(
   runtime <- .prepare_fit_runtime(validated)
   if (.is_pclv_failure(runtime)) return(runtime)
   ctx <- runtime$ctx
-  n_workers_kfold_eff <- if (n_workers_outer > 1L) 1L else n_workers_kfold
+  # K-fold task-level parallelism is a private fixed policy. Individual
+  # fold fits still execute their requested MCMC chains in parallel.
+  n_workers_kfold_eff <- n_workers_kfold
   ctx$n_workers_kfold_eff <- n_workers_kfold_eff
   has_progressr <- requireNamespace("progressr", quietly = TRUE)
 
