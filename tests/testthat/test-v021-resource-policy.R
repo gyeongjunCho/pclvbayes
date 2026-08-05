@@ -422,6 +422,64 @@ test_that("bounded identity-preserving recapture resolves transient procfs state
   expect_identical(reused$disappearance_reason[reused$pid == 200L], "pid_reused")
 })
 
+test_that("stable unreadable live children retain executable identity and conservative accounting", {
+  root <- tempfile("v021-proc-retained-exe-")
+  dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  for (pid in c("100", "200", "300")) dir.create(file.path(root, pid))
+
+  stat_reader <- function(path) {
+    pid <- basename(dirname(path))
+    switch(pid,
+      `100` = proc_stat(100L, 1L, "1000"),
+      `200` = proc_stat(200L, 100L, "2000", "R"),
+      `300` = proc_stat(300L, 200L, "3000"),
+      stop("unexpected pid"))
+  }
+  snapshot <- capture_v021_linux_process_snapshot(
+    100L, known_model_executables = "/models/pclv", proc_root = root,
+    pid_lister = function(root) c("100", "200", "300"),
+    path_exists = function(path) TRUE, stat_reader = stat_reader,
+    cmdline_reader = function(path) {
+      pid <- basename(dirname(path))
+      switch(pid,
+        `100` = raw_cmdline(c("Rscript", "production.R")),
+        `200` = raw_cmdline(c("R", "--worker")),
+        `300` = stop("transient cmdline"),
+        stop("unexpected pid"))
+    },
+    executable_reader = function(path) {
+      pid <- basename(dirname(path))
+      switch(pid,
+        `100` = "/usr/bin/R",
+        `200` = "/usr/lib/R/bin/exec/R",
+        `300` = "/models/pclv",
+        stop("unexpected pid"))
+    }, sleep = function(seconds) invisible(NULL),
+    clock = function() "2026-08-05T00:00:00Z")
+
+  child <- snapshot[snapshot$pid == 300L, , drop = FALSE]
+  expect_identical(child$capture_state, "unreadable_live")
+  expect_identical(child$executable, "/models/pclv")
+  expect_true(child$potential_cmdstan)
+  expect_identical(child$argv[[1L]], character())
+  expect_identical(child$capture_retry_count, .v021_procfs_recapture_attempts)
+
+  registry <- build_v021_worker_registry(
+    200L, "2000", 100L, "predictive_fold_worker", "batch-01", "fold-1",
+    "2026-08-05T00:00:00Z")
+  monitor <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  record <- monitor$records[monitor$records$pid == 300L, , drop = FALSE]
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(record$classification, "conservative_cmdstan_slot")
+  expect_true(record$is_active_cmdstan_chain)
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 1L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 1L)
+})
+
 test_that("persistent live recapture failure remains unverified", {
   persistent <- capture_recapture_fixture("persistent")
   row <- persistent$snapshot[persistent$snapshot$pid == 200L, , drop = FALSE]
@@ -520,7 +578,7 @@ test_that("registered worker identity and ancestry mismatches fail closed", {
   expect_match(missing_identity$reason, "requires procfs identity")
 })
 
-test_that("registered worker exception never applies to unreadable CmdStan descendants", {
+test_that("identity-audited unreadable sampling descendants consume conservative slots", {
   snapshot <- capture_recapture_fixture("persistent")$snapshot
   snapshot$process_state[snapshot$pid == 200L] <- "R"
   snapshot$initial_process_state[snapshot$pid == 200L] <- "R"
@@ -533,8 +591,87 @@ test_that("registered worker exception never applies to unreadable CmdStan desce
   monitor <- monitor_v021_process_snapshots(
     list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv",
     worker_registry = registry)
-  expect_identical(monitor$monitoring_state, "monitoring_error")
-  expect_match(monitor$reason, "Malformed decoded process argv")
+  record <- monitor$records[monitor$records$pid == 301L, , drop = FALSE]
+  expect_identical(monitor$monitoring_state, "verified")
+  expect_identical(monitor$compliance_status, "compliant")
+  expect_identical(record$classification, "conservative_cmdstan_slot")
+  expect_true(record$is_active_cmdstan_chain)
+  expect_identical(record$capture_state, "unreadable_live")
+  expect_identical(record$resolution_reason, "recapture_limit_exhausted")
+  expect_identical(monitor$observed_peak_active_cmdstan_chains, 1L)
+  expect_identical(monitor$observed_peak_active_cmdstan_processes, 1L)
+
+  unregistered <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv")
+  expect_identical(unregistered$monitoring_state, "monitoring_error")
+  expect_match(unregistered$reason, "Malformed decoded process argv")
+
+  nonsampling_registry <- registry
+  nonsampling_registry$worker_role <- "predictive_resource_monitor"
+  nonsampling <- monitor_v021_process_snapshots(
+    list(snapshot), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = nonsampling_registry)
+  expect_identical(nonsampling$monitoring_state, "monitoring_error")
+  expect_match(nonsampling$reason, "Malformed decoded process argv")
+
+  incomplete_audit <- snapshot
+  incomplete_row <- which(incomplete_audit$pid == 301L)
+  incomplete_audit$capture_retry_count[incomplete_row] <- 1L
+  incomplete_audit$capture_retry_timestamps[[incomplete_row]] <-
+    incomplete_audit$capture_retry_timestamps[[incomplete_row]][1L]
+  incomplete <- monitor_v021_process_snapshots(
+    list(incomplete_audit), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  expect_identical(incomplete$monitoring_state, "monitoring_error")
+  expect_match(incomplete$reason, "Malformed decoded process argv")
+
+  wrong_resolution <- snapshot
+  wrong_resolution$resolution_reason[wrong_resolution$pid == 301L] <-
+    "identity_recheck_unreadable"
+  unresolved <- monitor_v021_process_snapshots(
+    list(wrong_resolution), build_v021_resource_policy(), 100L, "/models/pclv",
+    worker_registry = registry)
+  expect_identical(unresolved$monitoring_state, "monitoring_error")
+  expect_match(unresolved$reason, "Malformed decoded process argv")
+})
+
+test_that("conservative unreadable descendants cannot hide slot oversubscription", {
+  base <- capture_recapture_fixture("persistent")$snapshot
+  base$process_state[base$pid == 200L] <- "R"
+  base$initial_process_state[base$pid == 200L] <- "R"
+  base$final_process_state[base$pid == 200L] <- "R"
+  registry <- attempt9_worker_registry(base)
+
+  add_unreadable <- function(snapshot, count) {
+    template <- snapshot[snapshot$pid == 200L, , drop = FALSE]
+    rows <- do.call(rbind, lapply(seq_len(count), function(i) {
+      row <- template
+      row$pid <- 300L + i
+      row$ppid <- 200L
+      row$start_time <- as.character(3000L + i)
+      row$potential_cmdstan <- TRUE
+      row
+    }))
+    rbind(snapshot, rows)
+  }
+
+  at_ceiling <- monitor_v021_process_snapshots(
+    list(add_unreadable(base, 12L)), build_v021_resource_policy(), 100L,
+    "/models/pclv", worker_registry = registry)
+  expect_identical(at_ceiling$monitoring_state, "verified")
+  expect_identical(at_ceiling$compliance_status, "compliant")
+  expect_identical(at_ceiling$observed_peak_active_cmdstan_chains, 12L)
+  expect_identical(at_ceiling$observed_peak_active_cmdstan_processes, 12L)
+  expect_equal(
+    sum(at_ceiling$records$classification == "conservative_cmdstan_slot"), 12L)
+
+  exceeded <- monitor_v021_process_snapshots(
+    list(add_unreadable(base, 13L)), build_v021_resource_policy(), 100L,
+    "/models/pclv", worker_registry = registry)
+  expect_identical(exceeded$monitoring_state, "verified")
+  expect_identical(exceeded$compliance_status, "exceeded")
+  expect_identical(exceeded$observed_peak_active_cmdstan_chains, 13L)
+  expect_identical(exceeded$observed_peak_active_cmdstan_processes, 13L)
 })
 
 test_that("attempt9-shaped registered worker snapshot is verified and compliant", {

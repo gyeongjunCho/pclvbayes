@@ -21,6 +21,9 @@ v021_operation_types <- c(
 .v021_procfs_recapture_attempts <- 2L
 .v021_procfs_recapture_delay_seconds <- 0.01
 .v021_linux_non_zombie_states <- c("R", "S", "D", "T", "t", "X", "x", "K", "W", "P", "I")
+.v021_registered_sampling_worker_roles <- c(
+  "direction_fit_worker", "predictive_fold_worker"
+)
 .v021_worker_registry_fields <- c(
   "pid", "start_time", "expected_ppid", "worker_role", "batch_id", "task_id",
   "registration_timestamp"
@@ -873,10 +876,7 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   registered_unreadable <- registered
   if ("capture_state" %in% names(out))
     registered_unreadable <- registered & out$capture_state == "unreadable_live"
-  argv <- .v021_snapshot_argv(out, allow_empty = registered_unreadable)
-  if (!"argv" %in% names(out)) out$argv <- I(argv)
-  sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
-  pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
+
   r_process <- grepl("(^|/)(R|Rscript)([[:space:]]|$)", out$command)
   parent_index <- match(out$ppid, out$pid)
   valid_parent <- !is.na(parent_index)
@@ -884,6 +884,43 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   parent_is_r_worker[valid_parent] <- r_process[parent_index[valid_parent]] &
     out$pid[parent_index[valid_parent]] != root_pid
   parent_is_registered_worker[valid_parent] <- registered[parent_index[valid_parent]]
+
+  registered_role <- rep(NA_character_, nrow(out))
+  if (any(registered))
+    registered_role[registered] <- worker_registry$worker_role[registry_match[registered]]
+  parent_is_registered_sampling_worker <- rep(FALSE, nrow(out))
+  parent_is_registered_sampling_worker[valid_parent] <-
+    parent_is_registered_worker[valid_parent] &
+    registered_role[parent_index[valid_parent]] %in%
+      .v021_registered_sampling_worker_roles
+
+  # A short-lived exec/exit transition can leave a stable, non-zombie child with
+  # unreadable cmdline bytes even after the bounded recapture loop.  This is
+  # accepted only for a direct child of an identity-verified sampling worker and
+  # only when the complete retry audit proves that recapture was exhausted.
+  # The child is not ignored: it is charged conservatively as both one active
+  # CmdStan chain slot and one CmdStan process slot.
+  retry_audited <- all(c(
+    "process_state", "capture_state", "capture_retry_count", "resolution_reason"
+  ) %in% names(out))
+  conservative_unreadable <- rep(FALSE, nrow(out))
+  if (retry_audited) {
+    conservative_unreadable <- out$is_descendant & !registered &
+      out$capture_state == "unreadable_live" & !out$readable &
+      !is.na(out$process_state) &
+      out$process_state %in% .v021_linux_non_zombie_states &
+      out$capture_retry_count == .v021_procfs_recapture_attempts &
+      out$resolution_reason == "recapture_limit_exhausted" &
+      parent_is_registered_sampling_worker
+    if (anyNA(conservative_unreadable))
+      stop("Invalid conservative procfs accounting state.")
+  }
+
+  argv <- .v021_snapshot_argv(
+    out, allow_empty = registered_unreadable | conservative_unreadable)
+  if (!"argv" %in% names(out)) out$argv <- I(argv)
+  sample_argument <- vapply(argv, function(x) "method=sample" %in% x, logical(1))
+  pathfinder_argument <- vapply(argv, function(x) "method=pathfinder" %in% x, logical(1))
   parent_is_controller <- rep(FALSE, nrow(out))
   parent_is_controller[valid_parent] <-
     out$pid[parent_index[valid_parent]] == root_pid &
@@ -927,10 +964,13 @@ classify_v021_process_snapshot <- function(snapshot, root_pid,
   out$classification[out$is_descendant & pathfinder_process] <- "pathfinder_process"
   out$classification[out$is_descendant & sample_process] <- "cmdstan_chain"
   out$classification[diagnostic_process] <- "cmdstan_diagnostic"
+  out$classification[conservative_unreadable] <- "conservative_cmdstan_slot"
   unknown <- out$is_descendant & (out$potential_cmdstan | known_executable) &
-    !sample_process & !pathfinder_process & !diagnostic_process
+    !sample_process & !pathfinder_process & !diagnostic_process &
+    !conservative_unreadable
   out$classification[unknown] <- "unknown_potential_cmdstan"
-  out$is_active_cmdstan_chain <- out$classification == "cmdstan_chain"
+  out$is_active_cmdstan_chain <- out$classification %in%
+    c("cmdstan_chain", "conservative_cmdstan_slot")
   out$operation <- NA_character_
   out$task_id <- NA_character_
   out$direction_id <- NA_character_
@@ -984,8 +1024,10 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
   records <- do.call(rbind, classified)
   counts <- vapply(classified, function(x) sum(x$is_active_cmdstan_chain), integer(1))
   process_counts <- vapply(classified, function(x)
-    sum(x$classification %in%
-          c("cmdstan_chain", "pathfinder_process", "cmdstan_diagnostic")), integer(1))
+    sum(x$classification %in% c(
+      "cmdstan_chain", "conservative_cmdstan_slot", "pathfinder_process",
+      "cmdstan_diagnostic"
+    )), integer(1))
   peak <- max(counts)
   process_peak <- max(process_counts)
   main_slot_row <- policy$operation_slots[
@@ -1004,7 +1046,9 @@ monitor_v021_process_snapshots <- function(snapshots, policy, root_pid,
     terminal <- if ("capture_state" %in% names(x))
       x$capture_state %in% c("vanished_during_capture", "zombie_process")
     else rep(FALSE, nrow(x))
-    all(x$readable | terminal | x$classification == "registered_outer_worker")
+    all(x$readable | terminal | x$classification %in% c(
+      "registered_outer_worker", "conservative_cmdstan_slot"
+    ))
   }, logical(1)))
   unknown <- any(records$classification == "unknown_potential_cmdstan")
   state <- if (!complete || unknown) "unverified_process_tree" else "verified"
@@ -1147,8 +1191,13 @@ capture_v021_linux_process_snapshot <- function(
     readable <- identical(recheck$state, "captured")
     argv <- if (readable) cmd_result$argv else character()
     command <- if (readable) cmd_result$command else ""
-    executable <- if (readable && exists("executable_ok", inherits = FALSE) &&
-                      isTRUE(executable_ok)) executable else ""
+    # Keep an independently verified /proc/<pid>/exe identity for a stable live
+    # process even when cmdline recapture is exhausted.  Terminal and ambiguous
+    # identities remain blank, preserving the existing fail-closed contract.
+    executable <- if (
+      recheck$state %in% c("captured", "unreadable_live") &&
+        exists("executable_ok", inherits = FALSE) && isTRUE(executable_ok)
+    ) executable else ""
     potential <- any(grepl("^method=", argv)) || executable %in% known_model_executables ||
       grepl("cmdstan", command, ignore.case = TRUE)
     data.frame(timestamp = as.character(timestamp), discovery_time = discovery_time,
