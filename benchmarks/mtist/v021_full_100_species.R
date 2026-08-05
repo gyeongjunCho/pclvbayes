@@ -836,11 +836,240 @@ build_v021_full_execution_manifest <- function(config, taxa, provenance) {
     provenance = provenance)
 }
 
-prepare_v021_full_execution <- function(config, taxa, provenance,
-                                         initialize = FALSE) {
-  manifest <- build_v021_full_execution_manifest(config, taxa, provenance)
+
+v021_operational_resume_bridge_schema <-
+  "v021_operational_resume_bridge_v1"
+
+v021_operational_resume_allowed_paths <- function() {
+  c(
+    "benchmarks/mtist/run_v021_full_100_species.R",
+    "benchmarks/mtist/v021_resource_policy.R",
+    "benchmarks/mtist/v021_full_100_species.R",
+    "benchmarks/mtist/v021_full_100_species_v5_ctl.sh",
+    "tests/testthat/test-v021-full-100-species.R",
+    "tests/testthat/test-v021-resource-policy.R",
+    "tests/testthat/test-v021-resource-concurrency.R"
+  )
+}
+
+.v021_git_capture <- function(repository_root, arguments) {
+  repository_root <- normalizePath(repository_root, mustWork = TRUE)
+  output <- suppressWarnings(system2(
+    "git", c("-C", repository_root, arguments),
+    stdout = TRUE, stderr = TRUE
+  ))
+  status <- attr(output, "status")
+  if (is.null(status)) status <- 0L
+  list(output = as.character(output), status = as.integer(status))
+}
+
+.v021_one_commit <- function(value, name) {
+  if (!is.character(value) || length(value) != 1L || is.na(value) ||
+      !grepl("^[0-9a-f]{40}$", value))
+    stop(name, " must be one full lowercase Git commit SHA.")
+  value
+}
+
+validate_v021_operational_resume_bridge <- function(bridge) {
+  fields <- c(
+    "bridge_schema", "authorization", "canonical_manifest_hash",
+    "canonical_configuration_hash", "canonical_commit", "runtime_commit",
+    "requested_manifest_hash", "unchanged_manifest_fields", "changed_files",
+    "changed_file_status", "allowed_paths", "created_timestamp", "bridge_hash"
+  )
+  if (!is.list(bridge) || !identical(names(bridge), fields) ||
+      !identical(bridge$bridge_schema, v021_operational_resume_bridge_schema) ||
+      !identical(bridge$authorization, "operational_hotfix_only"))
+    stop("Invalid V021 operational-resume bridge schema.")
+  for (name in c("canonical_manifest_hash", "canonical_configuration_hash",
+                 "requested_manifest_hash", "created_timestamp")) {
+    if (!is.character(bridge[[name]]) || length(bridge[[name]]) != 1L ||
+        is.na(bridge[[name]]) || !nzchar(bridge[[name]]))
+      stop("Operational-resume bridge has invalid ", name, ".")
+  }
+  .v021_one_commit(bridge$canonical_commit, "canonical_commit")
+  .v021_one_commit(bridge$runtime_commit, "runtime_commit")
+  if (!is.character(bridge$unchanged_manifest_fields) ||
+      !length(bridge$unchanged_manifest_fields) ||
+      !is.character(bridge$changed_files) || !length(bridge$changed_files) ||
+      anyNA(bridge$changed_files) || any(!nzchar(bridge$changed_files)) ||
+      anyDuplicated(bridge$changed_files) ||
+      !is.character(bridge$changed_file_status) ||
+      length(bridge$changed_file_status) != length(bridge$changed_files) ||
+      any(!bridge$changed_file_status %in% c("A", "M")) ||
+      !is.character(bridge$allowed_paths) || !length(bridge$allowed_paths) ||
+      any(!bridge$changed_files %in% bridge$allowed_paths))
+    stop("Operational-resume bridge contains invalid changed-file evidence.")
+  expected_hash <- v021_sha256(bridge[setdiff(fields, "bridge_hash")])
+  if (!identical(bridge$bridge_hash, expected_hash))
+    stop("Operational-resume bridge hash mismatch.")
+  invisible(TRUE)
+}
+
+build_v021_operational_resume_bridge <- function(
+    stored, requested, repository_root, runtime_commit,
+    created_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
+    allowed_paths = v021_operational_resume_allowed_paths()) {
+  validate_v021_execution_manifest(stored)
+  validate_v021_execution_manifest(requested)
+  repository_root <- normalizePath(repository_root, mustWork = TRUE)
+  runtime_commit <- .v021_one_commit(runtime_commit, "runtime_commit")
+
+  immutable_fields <- c(
+    "manifest_schema", "dataset_id", "taxa_order", "unordered_pair_count",
+    "directed_task_count", "configuration", "configuration_hash", "tasks"
+  )
+  immutable_mismatch <- immutable_fields[!vapply(
+    immutable_fields,
+    function(name) identical(stored[[name]], requested[[name]]),
+    logical(1)
+  )]
+  if (length(immutable_mismatch))
+    stop(
+      "Operational resume rejected scientific manifest changes: ",
+      paste(immutable_mismatch, collapse = ", "), "."
+    )
+
+  stored_provenance <- stored$provenance
+  requested_provenance <- requested$provenance
+  if (!is.list(stored_provenance) || !is.list(requested_provenance) ||
+      is.null(stored_provenance$code_commit) ||
+      is.null(requested_provenance$code_commit))
+    stop("Operational resume requires code_commit provenance.")
+  canonical_commit <- .v021_one_commit(
+    stored_provenance$code_commit, "canonical provenance code_commit")
+  requested_commit <- .v021_one_commit(
+    requested_provenance$code_commit, "requested provenance code_commit")
+  if (!identical(requested_commit, runtime_commit))
+    stop("Requested manifest commit does not match the runtime commit.")
+  stored_provenance$code_commit <- NULL
+  requested_provenance$code_commit <- NULL
+  if (!identical(stored_provenance, requested_provenance))
+    stop("Operational resume rejected non-commit provenance changes.")
+
+  head <- .v021_git_capture(repository_root, c("rev-parse", "HEAD"))
+  if (head$status != 0L || length(head$output) != 1L ||
+      !identical(trimws(head$output[[1L]]), runtime_commit))
+    stop("Runtime commit is not the repository HEAD.")
+  tracked_status <- .v021_git_capture(
+    repository_root, c("status", "--short", "--untracked-files=no"))
+  if (tracked_status$status != 0L || length(tracked_status$output))
+    stop("Operational resume requires a clean tracked working tree.")
+
+  ancestor <- .v021_git_capture(
+    repository_root,
+    c("merge-base", "--is-ancestor", canonical_commit, runtime_commit)
+  )
+  if (ancestor$status != 0L)
+    stop("Canonical manifest commit is not an ancestor of runtime HEAD.")
+
+  diff <- .v021_git_capture(
+    repository_root,
+    c("diff", "--name-status", "--no-renames",
+      paste0(canonical_commit, "..", runtime_commit), "--")
+  )
+  if (diff$status != 0L)
+    stop("Could not inspect operational-hotfix changed files.")
+  lines <- diff$output[nzchar(diff$output)]
+  if (!length(lines))
+    stop("Operational resume requested without an auditable code difference.")
+  split <- strsplit(lines, "\t", fixed = TRUE)
+  if (any(lengths(split) != 2L))
+    stop("Operational-hotfix Git diff has an unsupported name-status shape.")
+  statuses <- vapply(split, `[[`, character(1), 1L)
+  changed_files <- vapply(split, `[[`, character(1), 2L)
+  if (any(!statuses %in% c("A", "M")))
+    stop("Operational resume rejects deleted, renamed, or type-changed files.")
+  if (anyDuplicated(changed_files) || any(!changed_files %in% allowed_paths)) {
+    rejected <- setdiff(changed_files, allowed_paths)
+    stop(
+      "Operational resume rejected non-allowlisted changes: ",
+      paste(rejected, collapse = ", "), "."
+    )
+  }
+
+  body <- list(
+    bridge_schema = v021_operational_resume_bridge_schema,
+    authorization = "operational_hotfix_only",
+    canonical_manifest_hash = stored$manifest_hash,
+    canonical_configuration_hash = stored$configuration_hash,
+    canonical_commit = canonical_commit,
+    runtime_commit = runtime_commit,
+    requested_manifest_hash = requested$manifest_hash,
+    unchanged_manifest_fields = immutable_fields,
+    changed_files = changed_files,
+    changed_file_status = statuses,
+    allowed_paths = allowed_paths,
+    created_timestamp = as.character(created_timestamp)
+  )
+  bridge <- c(body, list(bridge_hash = v021_sha256(body)))
+  validate_v021_operational_resume_bridge(bridge)
+  bridge
+}
+
+write_v021_operational_resume_bridge <- function(bridge, result_root) {
+  validate_v021_operational_resume_bridge(bridge)
+  result_root <- normalizePath(result_root, mustWork = TRUE)
+  bridge_root <- file.path(result_root, "operational_resume_bridges")
+  dir.create(bridge_root, recursive = TRUE, showWarnings = FALSE)
+  stamp <- gsub("[^0-9]", "", bridge$created_timestamp)
+  if (!nzchar(stamp)) stamp <- "timestamp-unavailable"
+  path <- file.path(
+    bridge_root,
+    sprintf(
+      "bridge-%s-%s-%s.rds", stamp,
+      substr(bridge$runtime_commit, 1L, 12L),
+      substr(bridge$bridge_hash, 1L, 12L)
+    )
+  )
+  if (file.exists(path)) {
+    existing <- tryCatch(readRDS(path), error = identity)
+    if (inherits(existing, "error"))
+      stop("Existing operational-resume bridge is unreadable.")
+    validate_v021_operational_resume_bridge(existing)
+    if (!identical(existing$bridge_hash, bridge$bridge_hash))
+      stop("Operational-resume bridge path conflicts with existing evidence.")
+    return(invisible(path))
+  }
+  .v021_atomic_save_rds(bridge, path)
+  invisible(path)
+}
+
+prepare_v021_full_execution <- function(
+    config, taxa, provenance, initialize = FALSE,
+    operational_resume = FALSE, repository_root = NULL,
+    runtime_commit = NULL,
+    bridge_timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE)) {
+  requested_manifest <- build_v021_full_execution_manifest(
+    config, taxa, provenance)
+  manifest <- requested_manifest
   paths <- v021_execution_paths(config$output_root)
-  if (isTRUE(initialize)) initialize_v021_execution_root(manifest, config$output_root)
+  bridge <- NULL
+
+  if (file.exists(paths$manifest)) {
+    stored <- read_v021_execution_manifest(paths$manifest)
+    if (isTRUE(operational_resume) &&
+        !identical(stored$manifest_hash, requested_manifest$manifest_hash)) {
+      if (is.null(repository_root) || is.null(runtime_commit))
+        stop("Operational resume requires repository_root and runtime_commit.")
+      bridge <- build_v021_operational_resume_bridge(
+        stored = stored,
+        requested = requested_manifest,
+        repository_root = repository_root,
+        runtime_commit = runtime_commit,
+        created_timestamp = bridge_timestamp
+      )
+      manifest <- stored
+    } else {
+      compare_v021_execution_manifests(stored, requested_manifest)
+      manifest <- stored
+    }
+  } else if (isTRUE(operational_resume)) {
+    stop("Operational resume requires an existing canonical result root.")
+  }
+
+  if (isTRUE(initialize))
+    initialize_v021_execution_root(manifest, config$output_root)
   if (file.exists(paths$manifest)) {
     plan <- plan_v021_execution_resume(
       manifest, config$output_root, config$maximum_task_attempts,
@@ -852,9 +1081,14 @@ prepare_v021_full_execution <- function(config, taxa, provenance,
       runnable_indices = seq_len(nrow(manifest$tasks)), completed_indices = integer(),
       reconciliation_changed = FALSE, paths = paths)
   }
-  list(manifest = manifest, plan = plan,
-       status_summary = compact_v021_execution_status(plan), paths = paths,
-       dry_run = !isTRUE(initialize), sampling_launched = FALSE)
+  list(
+    manifest = manifest,
+    requested_manifest = requested_manifest,
+    operational_resume_bridge = bridge,
+    plan = plan,
+    status_summary = compact_v021_execution_status(plan), paths = paths,
+    dry_run = !isTRUE(initialize), sampling_launched = FALSE
+  )
 }
 
 prepare_v021_resource_dry_run <- function(prepared, policy) {

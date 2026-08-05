@@ -28,9 +28,15 @@ if (!identical(v021_current_cpu_affinity(), config$cpu_affinity))
 debug_directions_raw <- trimws(Sys.getenv("PCLV_V021_DEBUG_DIRECTIONS", ""))
 debug_output_root_raw <- trimws(Sys.getenv("PCLV_V021_DEBUG_OUTPUT_ROOT", ""))
 debug_mode <- nzchar(debug_directions_raw)
+operational_hotfix_resume <- identical(
+  tolower(trimws(Sys.getenv("PCLV_V021_OPERATIONAL_HOTFIX_RESUME", "false"))),
+  "true"
+)
 production_output_root <- normalizePath(config$output_root, mustWork = FALSE)
 
 if (debug_mode) {
+  if (isTRUE(operational_hotfix_resume))
+    stop("Operational-hotfix resume is forbidden in debug mode.")
   if (!nzchar(debug_output_root_raw))
     stop("PCLV_V021_DEBUG_OUTPUT_ROOT is required in debug mode.")
 
@@ -108,6 +114,7 @@ launch_record <- list(
   checkpoint_root = paths$checkpoint_root,
   config_path = normalizePath(config_path, mustWork = TRUE),
   resource_policy_schema = policy$policy_schema,
+  operational_hotfix_resume_requested = operational_hotfix_resume,
   logical_host_threads = policy$logical_host_threads,
   reserved_host_threads = policy$reserved_host_threads,
   maximum_active_cmdstan_chains = policy$maximum_active_cmdstan_chains,
@@ -151,7 +158,36 @@ prepared_execution <- prepare_v021_full_execution(
   config, observations$taxa,
   provenance = list(code_commit = git_commit,
                     benchmark_schema = config$benchmark_schema),
-  initialize = FALSE)
+  initialize = FALSE,
+  operational_resume = operational_hotfix_resume,
+  repository_root = repo,
+  runtime_commit = git_commit,
+  bridge_timestamp = launch_record$start_timestamp)
+
+if (!is.null(prepared_execution$operational_resume_bridge)) {
+  operational_bridge_path <- write_v021_operational_resume_bridge(
+    prepared_execution$operational_resume_bridge,
+    paths$output_root
+  )
+  launch_record$operational_resume_bridge_path <- operational_bridge_path
+  launch_record$canonical_code_commit <-
+    prepared_execution$operational_resume_bridge$canonical_commit
+  launch_record$runtime_code_commit <-
+    prepared_execution$operational_resume_bridge$runtime_commit
+  launch_record$canonical_manifest_hash <-
+    prepared_execution$operational_resume_bridge$canonical_manifest_hash
+  .v021_atomic_save_rds(
+    launch_record,
+    file.path(paths$output_root, "launch_record.rds")
+  )
+  message(
+    "Authorized operational-hotfix resume: canonical commit ",
+    prepared_execution$operational_resume_bridge$canonical_commit,
+    "; runtime commit ",
+    prepared_execution$operational_resume_bridge$runtime_commit,
+    "; bridge ", operational_bridge_path
+  )
+}
 
 if (identical(tolower(Sys.getenv("PCLV_V021_MANIFEST_DRY_RUN", "false")), "true")) {
   resource_dry_run <- prepare_v021_resource_dry_run(prepared_execution, policy)

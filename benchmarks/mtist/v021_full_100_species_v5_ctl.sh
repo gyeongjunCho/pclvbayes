@@ -83,14 +83,29 @@ archive_file() {
   test ! -e "$path" || mv "$path" "${path}.preserved.${stamp}"
 }
 
+latest_controller_log() {
+  local candidate
+  candidate="$({
+    test -f "$LOG" && printf '%s %s\n' "$(stat -c %Y "$LOG")" "$LOG"
+    find "$LOG_DIR" -maxdepth 1 -type f \
+      -name 'v021_full_100_species_v5.restart.*.log' \
+      -printf '%T@ %p\n' 2>/dev/null || true
+  } | sort -nr | head -n 1 | cut -d' ' -f2-)"
+  test -n "$candidate" || return 1
+  printf '%s\n' "$candidate"
+}
+
 start_controller() {
   local output_log="$1" metadata="$2" mode="$3"
-  printf '%s_commit\t%s\n%s_time\t%s\ncpu_affinity\t0-15\nactive_chain_cap\t12\nconcurrent_fits\t12\nkfold_concurrent_fits\t12\nkfold_scheduling_unit\tfold_fit\n' \
-    "$mode" "$CURRENT_HEAD" "$mode" "$(date --iso-8601=seconds)" > "$metadata"
+  local operational_hotfix="${4:-false}"
+  printf '%s_commit\t%s\n%s_time\t%s\ncpu_affinity\t0-15\nactive_chain_cap\t12\nconcurrent_fits\t12\nkfold_concurrent_fits\t12\nkfold_scheduling_unit\tfold_fit\noperational_hotfix_resume\t%s\n' \
+    "$mode" "$CURRENT_HEAD" "$mode" "$(date --iso-8601=seconds)" \
+    "$operational_hotfix" > "$metadata"
 
   nohup env \
     MTIST_ROOT=/home/heuklang/mtist \
     PCLV_V021_FULL_CONFIG="$CONFIG" \
+    PCLV_V021_OPERATIONAL_HOTFIX_RESUME="$operational_hotfix" \
     STAN_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 \
     OMP_THREAD_LIMIT=1 \
@@ -120,7 +135,7 @@ action_launch() {
   archive_file "$PIDFILE" "$stamp"
   archive_file "$LOG" "$stamp"
   archive_file "$LAUNCH_META" "$stamp"
-  start_controller "$LOG" "$LAUNCH_META" launch
+  start_controller "$LOG" "$LAUNCH_META" launch false
 }
 
 action_status() {
@@ -148,9 +163,11 @@ action_status() {
   else
     echo "Controller PID: unavailable"
   fi
-  if test -f "$LOG"; then
-    echo "Recent log:"
-    tail -n 30 "$LOG"
+  local current_log=""
+  current_log="$(latest_controller_log 2>/dev/null || true)"
+  if test -n "$current_log" && test -f "$current_log"; then
+    echo "Recent log: $current_log"
+    tail -n 30 "$current_log"
   else
     echo "Log: absent"
   fi
@@ -160,8 +177,12 @@ action_status() {
 }
 
 action_tail() {
-  test -f "$LOG" || die "log does not exist: $LOG"
-  tail -n 100 -f "$LOG"
+  local current_log=""
+  current_log="$(latest_controller_log 2>/dev/null || true)"
+  test -n "$current_log" && test -f "$current_log" ||
+    die "no controller log exists"
+  echo "Following: $current_log"
+  tail -n 100 -f "$current_log"
 }
 
 action_processes() {
@@ -335,11 +356,15 @@ action_orphans() {
 
 action_restart() {
   local reconcile="false"
-  case "${1:-}" in
-    "") ;;
-    --reconcile-stale-lock) reconcile="true" ;;
-    *) die "unknown restart option: $1" ;;
-  esac
+  local operational_hotfix="false"
+  while test "$#" -gt 0; do
+    case "$1" in
+      --reconcile-stale-lock) reconcile="true" ;;
+      --operational-hotfix) operational_hotfix="true" ;;
+      *) die "unknown restart option: $1" ;;
+    esac
+    shift
+  done
   common_start_validation
   test -d "$RESULT_ROOT" || die "restart result root is missing: $RESULT_ROOT"
   local required
@@ -361,7 +386,7 @@ action_restart() {
     matches="$(relevant_processes)"
     test -z "$matches" || die "V021 processes remain active; refusing stale-lock reconciliation: $matches"
     if test "$reconcile" != "true"; then
-      die "stale ownership exists; run: bash $SCRIPT_PATH restart --reconcile-stale-lock"
+      die "stale ownership exists; add --reconcile-stale-lock"
     fi
     V021_RESULT_ROOT="$RESULT_ROOT" Rscript - <<'RS'
 source("/home/heuklang/pclvbayes/benchmarks/mtist/v021_resource_policy.R")
@@ -373,7 +398,7 @@ reconcile_v021_stale_ownership(
 )
 RS
   fi
-  start_controller "$restart_log" "$restart_meta" restart
+  start_controller "$restart_log" "$restart_meta" restart "$operational_hotfix"
 }
 
 action_help() {
@@ -388,7 +413,8 @@ Usage:
   v021_full_100_species_v5_ctl.sh storage
   v021_full_100_species_v5_ctl.sh orphans
   v021_full_100_species_v5_ctl.sh restart
-  v021_full_100_species_v5_ctl.sh restart --reconcile-stale-lock
+  v021_full_100_species_v5_ctl.sh restart --operational-hotfix
+  v021_full_100_species_v5_ctl.sh restart --reconcile-stale-lock --operational-hotfix
   v021_full_100_species_v5_ctl.sh help
 EOF
 }
@@ -399,7 +425,7 @@ fi
 
 case "${1:-help}" in
   launch) shift; test "$#" -eq 0 || die "launch accepts no options"; action_launch ;;
-  restart) shift; test "$#" -le 1 || die "too many restart options"; action_restart "${1:-}" ;;
+  restart) shift; action_restart "$@" ;;
   status) shift; test "$#" -eq 0 || die "status accepts no options"; action_status ;;
   tail) shift; test "$#" -eq 0 || die "tail accepts no options"; action_tail ;;
   processes) shift; test "$#" -eq 0 || die "processes accepts no options"; action_processes ;;

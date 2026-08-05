@@ -942,3 +942,99 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
   expect_identical(length(list.files(trace_root,
     pattern = "^v021_full_failure_trace_v1-.*[.]rds$")), 1L)
 })
+
+
+test_that("operational-hotfix resume preserves the canonical manifest and audits allowlisted descendants", {
+  skip_if_not(nzchar(Sys.which("git")))
+  repo <- tempfile("v021-operational-git-")
+  dir.create(repo)
+  system2("git", c("-C", repo, "init", "-b", "v0.2.1-dev"), stdout = FALSE)
+  system2("git", c("-C", repo, "config", "user.email", "fixture@example.test"))
+  system2("git", c("-C", repo, "config", "user.name", "Fixture"))
+
+  allowed <- "benchmarks/mtist/run_v021_full_100_species.R"
+  dir.create(file.path(repo, dirname(allowed)), recursive = TRUE)
+  writeLines("canonical", file.path(repo, allowed))
+  system2("git", c("-C", repo, "add", allowed))
+  system2("git", c("-C", repo, "commit", "-m", "canonical"), stdout = FALSE)
+  canonical_commit <- system2(
+    "git", c("-C", repo, "rev-parse", "HEAD"), stdout = TRUE)
+  writeLines("operational hotfix", file.path(repo, allowed))
+  system2("git", c("-C", repo, "commit", "-am", "hotfix"), stdout = FALSE)
+  runtime_commit <- system2(
+    "git", c("-C", repo, "rev-parse", "HEAD"), stdout = TRUE)
+
+  make_manifest <- function(commit, posterior_id = "posterior") {
+    build_v021_execution_manifest(
+      dataset_id = "fixture", taxa_order = c("a", "b"),
+      task_table = data.frame(
+        task_id = c(1L, 1L), direction_index = 1:2,
+        target = c("a", "b"), source = c("b", "a"),
+        seed = c(11L, 12L)
+      ),
+      public_seed = 1L, kfold_seed = 2L,
+      preprocessing_config = list(id = "prep"),
+      posterior_config = list(id = posterior_id),
+      kfold_config = list(id = "kfold"),
+      predictive_config = list(id = "predictive"),
+      provenance = list(
+        code_commit = commit,
+        benchmark_schema = "fixture-v1"
+      )
+    )
+  }
+
+  stored <- make_manifest(canonical_commit)
+  requested <- make_manifest(runtime_commit)
+  bridge <- build_v021_operational_resume_bridge(
+    stored, requested, repo, runtime_commit,
+    created_timestamp = "2026-08-05 02:30:00 UTC"
+  )
+  expect_silent(validate_v021_operational_resume_bridge(bridge))
+  expect_identical(bridge$canonical_manifest_hash, stored$manifest_hash)
+  expect_identical(bridge$canonical_commit, canonical_commit)
+  expect_identical(bridge$runtime_commit, runtime_commit)
+  expect_identical(bridge$changed_files, allowed)
+  expect_identical(bridge$changed_file_status, "M")
+
+  result_root <- tempfile("v021-operational-root-")
+  dir.create(result_root)
+  path <- write_v021_operational_resume_bridge(bridge, result_root)
+  expect_true(file.exists(path))
+  expect_identical(readRDS(path)$bridge_hash, bridge$bridge_hash)
+
+  expect_error(
+    build_v021_operational_resume_bridge(
+      stored, make_manifest(runtime_commit, "changed-posterior"),
+      repo, runtime_commit
+    ),
+    "scientific manifest changes"
+  )
+
+  dir.create(file.path(repo, "R"), showWarnings = FALSE)
+  writeLines("scientific change", file.path(repo, "R", "fit_pclv_bayes.R"))
+  system2("git", c("-C", repo, "add", "R/fit_pclv_bayes.R"))
+  system2("git", c("-C", repo, "commit", "-m", "scientific"), stdout = FALSE)
+  unsafe_commit <- system2(
+    "git", c("-C", repo, "rev-parse", "HEAD"), stdout = TRUE)
+  expect_error(
+    build_v021_operational_resume_bridge(
+      stored, make_manifest(unsafe_commit), repo, unsafe_commit
+    ),
+    "non-allowlisted"
+  )
+})
+
+test_that("runner and control script require explicit operational-hotfix restart", {
+  runner <- paste(readLines(testthat::test_path(
+    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE),
+    collapse = "\n")
+  control <- paste(readLines(testthat::test_path(
+    "../../benchmarks/mtist/v021_full_100_species_v5_ctl.sh"), warn = FALSE),
+    collapse = "\n")
+  expect_match(runner, "PCLV_V021_OPERATIONAL_HOTFIX_RESUME", fixed = TRUE)
+  expect_match(runner, "write_v021_operational_resume_bridge", fixed = TRUE)
+  expect_match(control, "--operational-hotfix", fixed = TRUE)
+  expect_match(control, "PCLV_V021_OPERATIONAL_HOTFIX_RESUME", fixed = TRUE)
+  expect_match(control, "latest_controller_log", fixed = TRUE)
+})
