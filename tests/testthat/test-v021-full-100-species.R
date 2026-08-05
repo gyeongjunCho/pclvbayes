@@ -674,6 +674,83 @@ test_that("empty durable monitor history starts with zero recovered peaks", {
   expect_identical(peaks, list(chains = 0L, processes = 0L))
 })
 
+test_that("failed durable monitor evidence is retained but excluded from peak recovery", {
+  root <- tempfile("v021-monitor-recovery-")
+  dir.create(file.path(root, "monitor"), recursive = TRUE)
+  dir.create(file.path(root, "batch_ownership"), recursive = TRUE)
+
+  registry <- build_v021_worker_registry(
+    200L, "2000", 100L, "direction_fit_worker", "batch-00001",
+    "direction-000001", "2026-08-05T00:00:00Z")
+  snapshot <- data.frame(
+    timestamp = rep("2026-08-05T00:00:00Z", 3L),
+    discovery_time = rep("2026-08-05T00:00:00Z", 3L),
+    pid = c(100L, 200L, 300L),
+    ppid = c(1L, 100L, 200L),
+    start_time = c("1000", "2000", "3000"),
+    process_state = rep("S", 3L),
+    initial_process_state = rep("S", 3L),
+    final_process_state = rep("S", 3L),
+    command = c(
+      "Rscript production.R",
+      "R --worker",
+      "/models/pclv method=sample id=1"
+    ),
+    argv = I(list(
+      c("Rscript", "production.R"),
+      c("R", "--worker"),
+      c("/models/pclv", "method=sample", "id=1")
+    )),
+    executable = c("/usr/bin/R", "/usr/lib/R/bin/exec/R", "/models/pclv"),
+    potential_cmdstan = c(FALSE, FALSE, TRUE),
+    readable = rep(TRUE, 3L),
+    capture_state = rep("captured", 3L),
+    disappearance_reason = rep(NA_character_, 3L),
+    zombie_reason = rep(NA_character_, 3L),
+    capture_retry_count = rep(0L, 3L),
+    capture_retry_timestamps = I(rep(list(character()), 3L)),
+    resolution_reason = rep("readable_initial_capture", 3L),
+    stringsAsFactors = FALSE
+  )
+
+  .v021_atomic_save_rds(
+    list(snapshots = list(snapshot)),
+    file.path(root, "monitor", "batch-00001.rds"))
+  .v021_atomic_save_rds(
+    list(parent_pid = 100L, worker_registry = registry),
+    file.path(root, "batch_ownership", "batch-00001.rds"))
+
+  failed_path <- file.path(root, "monitor", "batch-00002-kfold.rds")
+  .v021_atomic_save_rds(
+    list(
+      error = "Malformed decoded process argv.",
+      snapshots = list()
+    ),
+    failed_path)
+
+  expect_message(
+    peaks <- recover_v021_monitor_peaks(
+      root, build_v021_resource_policy(), "/models/pclv"),
+    "Excluding terminally failed durable V021 monitor evidence"
+  )
+  expect_identical(peaks, list(chains = 1L, processes = 1L))
+  expect_true(file.exists(failed_path))
+})
+
+test_that("failed durable monitor exclusions still validate their schema", {
+  root <- tempfile("v021-monitor-recovery-invalid-")
+  dir.create(file.path(root, "monitor"), recursive = TRUE)
+  .v021_atomic_save_rds(
+    list(error = NA_character_, snapshots = list()),
+    file.path(root, "monitor", "batch-00001.rds"))
+
+  expect_error(
+    recover_v021_monitor_peaks(
+      root, build_v021_resource_policy(), "/models/pclv"),
+    "Invalid durable V021 monitor evidence"
+  )
+})
+
 test_that("collected monitor exit waits without mutating child bookkeeping", {
   checks <- 0L
   identity_reader <- function(pid) {

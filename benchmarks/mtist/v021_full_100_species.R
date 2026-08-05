@@ -152,10 +152,27 @@ recover_v021_monitor_peaks <- function(output_root, policy, executable) {
   peaks <- lapply(files, function(path) {
     batch_id <- sub("\\.rds$", "", basename(path))
     payload <- readRDS(path)
+    if (!is.list(payload) || !is.list(payload$snapshots))
+      stop("Invalid durable V021 monitor evidence.")
+
+    # A final monitor payload carrying an explicit error is durable post-mortem
+    # evidence from an aborted batch, not verified peak evidence. Retain the
+    # artifact on disk, but exclude it from restart peak recovery so the same
+    # already-recorded monitor failure cannot permanently block resumption.
+    if (!is.null(payload$error)) {
+      terminal_error <- payload$error
+      if (!is.character(terminal_error) || length(terminal_error) != 1L ||
+          is.na(terminal_error) || !nzchar(terminal_error))
+        stop("Invalid durable V021 monitor evidence.")
+      message(
+        "Excluding terminally failed durable V021 monitor evidence from ",
+        "peak recovery: ", batch_id, ": ", terminal_error)
+      return(NULL)
+    }
+
     ownership <- readRDS(file.path(output_root, "batch_ownership",
                                    paste0(batch_id, ".rds")))
-    if (!is.list(payload) || !is.list(payload$snapshots) ||
-        !length(payload$snapshots) || !is.list(ownership) ||
+    if (!length(payload$snapshots) || !is.list(ownership) ||
         is.null(ownership$parent_pid) || is.null(ownership$worker_registry))
       stop("Invalid durable V021 monitor evidence.")
     monitor <- monitor_v021_process_snapshots(
@@ -165,6 +182,8 @@ recover_v021_monitor_peaks <- function(output_root, policy, executable) {
     c(chains = monitor$observed_peak_active_cmdstan_chains,
       processes = monitor$observed_peak_active_cmdstan_processes)
   })
+  peaks <- Filter(Negate(is.null), peaks)
+  if (!length(peaks)) return(list(chains = 0L, processes = 0L))
   peaks <- do.call(rbind, peaks)
   list(chains = as.integer(max(peaks[, "chains"])),
        processes = as.integer(max(peaks[, "processes"])))
