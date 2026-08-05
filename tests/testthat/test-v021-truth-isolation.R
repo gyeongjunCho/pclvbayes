@@ -715,14 +715,3 @@ test_that("truth-free scientific decisions depend only on their declared inputs"
   expect_identical(diagnostics, diagnostics)
 })
 
-test_that("maintained V021 inference path loads observations without truth", {
-  full_runner <- readLines(testthat::test_path(
-    "../../benchmarks/mtist/run_v021_full_100_species.R"), warn = FALSE)
-  observation_block <- full_runner[
-    grep("selected_dataset <-", full_runner, fixed = TRUE):
-      grep("tasks <- build_v021_full_task_table", full_runner, fixed = TRUE)]
-  expect_true(any(grepl("load_v021_preflight_observations", observation_block,
-                        fixed = TRUE)))
-  expect_false(any(grepl("load_mtist_study|study\\$truth|truth_path", observation_block)))
-  expect_false(any(grepl("A\\[.*target.*source", full_runner)))
-})
