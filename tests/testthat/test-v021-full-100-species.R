@@ -944,6 +944,25 @@ test_that("recording handlers rethrow once while trace, cleanup, and failure pay
 })
 
 
+test_that("restart configuration comparison is fieldwise and canonicalizes output roots", {
+  root <- tempfile("v021-restart-config-")
+  dir.create(root)
+  requested <- build_v021_full_config(root)
+  stored <- requested
+  class(stored) <- "v021_saved_config_fixture"
+  attr(stored, "legacy_serialization_note") <- "ignored container metadata"
+  stored$output_root <- file.path(root, ".")
+
+  expect_silent(compare_v021_full_restart_configs(stored, requested))
+
+  changed <- build_v021_full_config(paste0(root, "-different"))
+  expect_error(
+    compare_v021_full_restart_configs(stored, changed),
+    "output_root", fixed = TRUE
+  )
+})
+
+
 test_that("operational-hotfix resume preserves the canonical manifest and audits allowlisted descendants", {
   skip_if_not(nzchar(Sys.which("git")))
   repo <- tempfile("v021-operational-git-")
@@ -1034,6 +1053,10 @@ test_that("runner and control script require explicit operational-hotfix restart
     collapse = "\n")
   expect_match(runner, "PCLV_V021_OPERATIONAL_HOTFIX_RESUME", fixed = TRUE)
   expect_match(runner, "write_v021_operational_resume_bridge", fixed = TRUE)
+  expect_match(runner, "compare_v021_full_restart_configs", fixed = TRUE)
+  expect_false(grepl(
+    "if (!identical(saved_config, config))", runner, fixed = TRUE
+  ))
   expect_match(control, "--operational-hotfix", fixed = TRUE)
   expect_match(control, "PCLV_V021_OPERATIONAL_HOTFIX_RESUME", fixed = TRUE)
   expect_match(control, "latest_controller_log", fixed = TRUE)

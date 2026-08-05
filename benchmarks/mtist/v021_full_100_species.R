@@ -713,6 +713,37 @@ validate_v021_full_config <- function(config) {
   invisible(TRUE)
 }
 
+canonicalize_v021_full_restart_config <- function(config) {
+  validate_v021_full_config(config)
+  fields <- names(config)
+  canonical <- setNames(lapply(fields, function(name) config[[name]]), fields)
+  output_root <- canonical$output_root
+  if (!is.character(output_root) || length(output_root) != 1L ||
+      is.na(output_root) || !nzchar(output_root))
+    stop("V021-06 restart configuration has an invalid output_root.")
+  canonical$output_root <- normalizePath(output_root, mustWork = FALSE)
+  canonical
+}
+
+compare_v021_full_restart_configs <- function(stored, requested) {
+  stored <- canonicalize_v021_full_restart_config(stored)
+  requested <- canonicalize_v021_full_restart_config(requested)
+  fields <- names(stored)
+  if (!identical(fields, names(requested)))
+    stop("V021-06 restart configuration schema changed.")
+  mismatch <- fields[!vapply(
+    fields,
+    function(name) identical(stored[[name]], requested[[name]]),
+    logical(1)
+  )]
+  if (length(mismatch))
+    stop(
+      "V021-06 restart configuration changed: ",
+      paste(mismatch, collapse = ", "), "."
+    )
+  invisible(TRUE)
+}
+
 build_v021_full_resource_policy <- function(config) {
   validate_v021_full_config(config)
   build_v021_resource_policy(

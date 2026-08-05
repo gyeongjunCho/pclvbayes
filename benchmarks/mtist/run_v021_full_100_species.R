@@ -259,7 +259,7 @@ tasks <- tasks[c("dataset_id", "pair_id", "task_id", "direction_index",
 if (file.exists(paths$manifest)) {
   saved_config <- readRDS(file.path(paths$output_root, "config.rds"))
   validate_v021_full_config(saved_config)
-  if (!identical(saved_config, config)) stop("V021-06 restart configuration changed.")
+  compare_v021_full_restart_configs(saved_config, config)
   manifest <- read_v021_checkpoint_manifest(paths$manifest)
   identity <- c("task_id", "pair_id", "direction_id", "direction_index",
                 "target", "source", "seed", "chain_seeds", "output_location")
