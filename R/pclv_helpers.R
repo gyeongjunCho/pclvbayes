@@ -1289,7 +1289,7 @@
       cv = TRUE,
       all.knots = TRUE,
       control.spar = list(
-        low = 0.1,
+        low = 0.0,
         high = 0.4
         )
     ), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
