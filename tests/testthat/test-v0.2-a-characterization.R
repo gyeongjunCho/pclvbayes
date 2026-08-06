@@ -596,7 +596,7 @@ test_that("v0.2 public fit API is frozen and prototype is absent", {
     "physeq", "subject_col", "time_col", "taxa_vec", "nz_partner_min_frac",
     "min_unique_times", "min_pairs", "chains", "iter_warmup", "iter_sampling",
     "seed", "init", "adapt_delta", "max_treedepth", "progress",
-    "n_workers_outer", "n_workers_kfold", "kfold_K", "kfold_R", "kfold_seed"
+    "n_workers_outer", "kfold_K", "kfold_R", "kfold_seed"
   )
   expect_identical(names(formals(pclvbayes::fit_pclv_bayes)), retained)
   removed <- c("zero_mode_alr", "minpos_alpha", "minpos_base", "smooth_scale",

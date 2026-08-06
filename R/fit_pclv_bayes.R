@@ -184,7 +184,7 @@ fit_pclv_bayes <- function(
   progress_every <- 1L
   silent_sampler <- FALSE
   max_retries <- 3L
-  n_workers_kfold <- 1L
+  n_workers_kfold <- as.integer(chains)
   use_pathfinder_init <- TRUE
   pf_num_paths <- 8L
   pf_draws <- 1000L

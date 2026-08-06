@@ -1283,7 +1283,16 @@
   }
   ord <- order(x); x_ord <- x[ord]; y_ord <- y[ord]
   fit <- tryCatch(
-    withCallingHandlers(stats::smooth.spline(x_ord, y_ord, cv = TRUE, all.knots = TRUE), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
+    withCallingHandlers(stats::smooth.spline(
+      x_ord,
+      y_ord,
+      cv = TRUE,
+      all.knots = TRUE,
+      control.spar = list(
+        low = -0.5,
+        high = 1.2
+      )
+    ), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
     error = function(e) .pclv_failure("spline_smoothing", "cv_spline_failed",
                                       list(message = conditionMessage(e)))
   )
