@@ -1290,7 +1290,7 @@
       all.knots = TRUE,
       control.spar = list(
         low = 0.0,
-        high = 0.4
+        high = 0.25
         )
     ), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
     error = function(e) .pclv_failure("spline_smoothing", "cv_spline_failed",
