@@ -2,6 +2,37 @@ stopifnot(file.exists("DESCRIPTION"))
 
 repo <- normalizePath(getwd())
 
+# -------------------------------------------------------------------------
+# Run configuration: 여기만 수정하면 benchmark와 실제 실행이 함께 바뀜
+# -------------------------------------------------------------------------
+
+dataset_id <- 1L
+
+run_seed <- 20260802L
+
+chains <- 4L
+iter_warmup <- 2000L
+iter_sampling <- 2000L
+
+init <- 0.2
+adapt_delta <- 0.98
+max_treedepth <- 14L
+
+n_workers_outer <- 15L
+
+kfold_K <- 5L
+kfold_R <- 1L
+kfold_seed <- run_seed
+
+nz_partner_min_frac <- 0.15
+min_unique_times <- 3L
+min_pairs <- 4L
+
+
+# -------------------------------------------------------------------------
+# Install current package source into isolated library
+# -------------------------------------------------------------------------
+
 lib <- file.path(
   repo,
   "benchmarks",
@@ -9,11 +40,10 @@ lib <- file.path(
   ".lib-v021-installed"
 )
 
-# 이전 가설치본 제거 후 새로 설치
 unlink(lib, recursive = TRUE, force = TRUE)
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 
-# worker와 CmdStan의 암묵적 다중 스레딩 방지
+# worker / CmdStan / BLAS의 암묵적 다중 스레딩 방지
 Sys.setenv(
   R_LIBS_USER = lib,
   OMP_NUM_THREADS = "1",
@@ -42,26 +72,31 @@ install.packages(
   INSTALL_opts = c("--preclean", "--clean")
 )
 
+unlink(build_dir, recursive = TRUE, force = TRUE)
+
 .libPaths(c(lib, .libPaths()))
 
 library(pclvbayes, lib.loc = lib)
 library(phyloseq)
 
-cat("package version: ",
-    as.character(packageVersion("pclvbayes", lib.loc = lib)), "\n",
-    sep = "")
+cat(
+  "package version: ",
+  as.character(packageVersion("pclvbayes", lib.loc = lib)),
+  "\n",
+  sep = ""
+)
 
-cat("package path:    ",
-    find.package("pclvbayes", lib.loc = lib), "\n",
-    sep = "")
+cat(
+  "package path:    ",
+  find.package("pclvbayes", lib.loc = lib),
+  "\n",
+  sep = ""
+)
 
 
-
-
-
-
-
-dataset_id <- 1L
+# -------------------------------------------------------------------------
+# Load MTIST dataset
+# -------------------------------------------------------------------------
 
 mtist_root <- normalizePath(
   path.expand(Sys.getenv("MTIST_ROOT", unset = "~/mtist")),
@@ -115,7 +150,7 @@ stopifnot(
   )
 )
 
-# MTIST absolute density를 상대풍부도로 변환
+# MTIST absolute density -> relative abundance
 relative <- abundance / rowSums(abundance)
 
 sample_index <- ave(
@@ -162,17 +197,17 @@ stopifnot(
   identical(phyloseq::taxa_names(ps100), species)
 )
 
-ps100
-table(sample_meta$subject)
-range(sample_meta$time)
 
+# -------------------------------------------------------------------------
+# Output / provenance
+# -------------------------------------------------------------------------
 
 out_root <- file.path(
   repo,
   "benchmarks",
   "mtist",
   "results",
-  "v021_installed_package_100_species_v1"
+  "v021_installed_package_100_species_pairparallel_v2"
 )
 
 if (
@@ -190,27 +225,48 @@ git_commit <- trimws(
 
 configuration <- list(
   execution = "installed-package-public-api",
+
   dataset_id = dataset_id,
   dataset_path = normalizePath(dataset_csv),
   dataset_md5 = unname(tools::md5sum(dataset_csv)),
   taxa_count = phyloseq::ntaxa(ps100),
   sample_count = phyloseq::nsamples(ps100),
-  seed = 20260802L,
-  chains = 4L,
-  iter_warmup = 2000L,
-  iter_sampling = 2000L,
-  n_workers_outer = 3L,
-  n_workers_kfold = 1L,
-  kfold_K = 5L,
-  kfold_R = 1L,
-  kfold_seed = 20260802L,
+
+  nz_partner_min_frac = nz_partner_min_frac,
+  min_unique_times = min_unique_times,
+  min_pairs = min_pairs,
+
+  seed = run_seed,
+  init = init,
+  chains = chains,
+  iter_warmup = iter_warmup,
+  iter_sampling = iter_sampling,
+  adapt_delta = adapt_delta,
+  max_treedepth = max_treedepth,
+
+  # Parallel architecture
+  parallel_unit = "unordered_pair",
+  n_workers_outer = n_workers_outer,
+  parallel_chains = 1L,
+
+  kfold_K = kfold_K,
+  kfold_R = kfold_R,
+  kfold_seed = kfold_seed,
+
   package_commit = git_commit,
   package_version = as.character(
     packageVersion("pclvbayes", lib.loc = lib)
   ),
-  package_path = find.package("pclvbayes", lib.loc = lib),
-  cmdstanr_version = as.character(packageVersion("cmdstanr")),
-  cmdstan_version = as.character(cmdstanr::cmdstan_version())
+  package_path = find.package(
+    "pclvbayes",
+    lib.loc = lib
+  ),
+  cmdstanr_version = as.character(
+    packageVersion("cmdstanr")
+  ),
+  cmdstan_version = as.character(
+    cmdstanr::cmdstan_version()
+  )
 )
 
 saveRDS(
@@ -228,14 +284,22 @@ writeLines(
   file.path(out_root, "sessionInfo.txt")
 )
 
-configuration
+print(configuration)
 
 
+# -------------------------------------------------------------------------
+# Run fit
+# -------------------------------------------------------------------------
 
+status_path <- file.path(
+  out_root,
+  "status.rds"
+)
 
-
-status_path <- file.path(out_root, "status.rds")
-result_path <- file.path(out_root, "fit_pclv_bayes_result.rds")
+result_path <- file.path(
+  out_root,
+  "fit_pclv_bayes_result.rds"
+)
 
 started_at <- Sys.time()
 
@@ -256,29 +320,29 @@ fit100 <- tryCatch(
       time_col = "time",
       taxa_vec = species,
 
-      nz_partner_min_frac = 0.15,
-      min_unique_times = 3L,
-      min_pairs = 4L,
+      nz_partner_min_frac = nz_partner_min_frac,
+      min_unique_times = min_unique_times,
+      min_pairs = min_pairs,
 
-      chains = 4L,
+      chains = chains,
+      iter_warmup = iter_warmup,
+      iter_sampling = iter_sampling,
 
-      iter_warmup = 2000L,
-      iter_sampling = 2000L,
-
-      seed = 20260802L,
-      init = 0.2,
-      adapt_delta = 0.98,
-      max_treedepth = 14L,
+      seed = run_seed,
+      init = init,
+      adapt_delta = adapt_delta,
+      max_treedepth = max_treedepth,
 
       progress = "bar",
 
-      n_workers_outer = 3L,
+      n_workers_outer = n_workers_outer,
 
-      kfold_K = 5L,
-      kfold_R = 1L,
-      kfold_seed = 20260802L
+      kfold_K = kfold_K,
+      kfold_R = kfold_R,
+      kfold_seed = kfold_seed
     )
   },
+
   error = function(e) {
     failed_at <- Sys.time()
 
@@ -288,7 +352,11 @@ fit100 <- tryCatch(
         started_at = started_at,
         failed_at = failed_at,
         elapsed_seconds = as.numeric(
-          difftime(failed_at, started_at, units = "secs")
+          difftime(
+            failed_at,
+            started_at,
+            units = "secs"
+          )
         ),
         error_class = class(e),
         error_message = conditionMessage(e),
@@ -302,9 +370,13 @@ fit100 <- tryCatch(
   }
 )
 
+
+# -------------------------------------------------------------------------
+# Preserve result
+# -------------------------------------------------------------------------
+
 completed_at <- Sys.time()
 
-# 먼저 결과를 보존
 saveRDS(
   fit100,
   result_path,
@@ -317,7 +389,11 @@ saveRDS(
     started_at = started_at,
     completed_at = completed_at,
     elapsed_seconds = as.numeric(
-      difftime(completed_at, started_at, units = "secs")
+      difftime(
+        completed_at,
+        started_at,
+        units = "secs"
+      )
     ),
     result_path = result_path,
     result_names = names(fit100),
@@ -328,18 +404,18 @@ saveRDS(
 
 cat(
   "Completed in ",
-  round(as.numeric(difftime(
-    completed_at,
-    started_at,
-    units = "hours"
-  )), 3),
+  round(
+    as.numeric(
+      difftime(
+        completed_at,
+        started_at,
+        units = "hours"
+      )
+    ),
+    3
+  ),
   " hours\n",
   sep = ""
 )
 
 print(names(fit100))
-
-
-
-
-

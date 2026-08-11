@@ -262,6 +262,14 @@ fit_pclv_bayes <- function(
   old_thread_env <- .pclv_force_single_thread_libraries()
   on.exit(.pclv_restore_thread_libraries(old_thread_env), add = TRUE)
 
+  if (!identical(progress, "none")) {
+    cat(
+      "Smoothing relative abundances over time within each subject using ",
+      "CV splines (spar = 0.00–0.25) to preserve observed temporal trends.\n",
+      sep = ""
+    )
+  }
+
   runtime <- .prepare_fit_runtime(validated)
   if (.is_pclv_failure(runtime)) return(runtime)
   ctx <- runtime$ctx
@@ -269,6 +277,11 @@ fit_pclv_bayes <- function(
   # Finish all pair-dependent deterministic preprocessing in the parent before
   # the worker pool starts. This is the one vectorized ALR/lag/delta pass shared
   # by every direction, main fit, and K-fold evaluation.
+
+  if (!identical(progress, "none")) {
+    cat("Computing pairwise triplet-ALRs (i, j, rest).\n")
+  }
+
   pair_precompute <- .precompute_pair_states_vectorized(
     sm_mat = ctx$sm_mat,
     meta_df = ctx$meta_df,
@@ -316,6 +329,11 @@ fit_pclv_bayes <- function(
   # precomputed pair trajectory and is owned by one worker from start to finish.
   tasks <- .make_pair_tasks(taxa_vec, seed, pair_states = pair_states)
   rm(pair_states)
+
+  if (!identical(progress, "none")) {
+    cat("Preprocessing complete. Starting NUTS-HMC sampling.\n")
+  }
+
   run_task <- function(task, mute_logs) {
     .execute_pair_task(
       task = task, taxa_vec = taxa_vec, run_one = .run_one,
