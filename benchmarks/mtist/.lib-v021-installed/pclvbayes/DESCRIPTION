@@ -1,0 +1,38 @@
+Package: pclvbayes
+Title: Bayesian Directed Pair-to-Rest Microbial Dynamics
+Version: 0.2.0
+Authors@R: c(person(given="Gyeongjun", family="Cho",
+    email="chogj88@korea.kr", role=c("aut","cre"),
+    comment=c(ORCID="0000-0001-6820-2969",
+              affiliation="National Institute of Agricultural Sciences",
+              country="Korea, Republic of")),
+    person(given="Rural Development Administration (RDA)", role="cph"),
+    person(given="National Institute of Agricultural Sciences (NAS)", role="cph"))
+Description: Implements Bayesian inference of directed pair-to-rest microbial dynamics for compositional longitudinal microbiome data, supporting qualified interaction screening. Residuals are OU (≈AR(1)) or white-noise with Δt-aware options; includes optional correlation-based screening, tidy edge reshaping, Kalman ELPD for OU, and diagnostics; uses cmdstanr/CmdStan.
+License: file LICENSE
+URL: https://github.com/gyeongjunCho/pglvbayes
+BugReports: https://github.com/gyeongjunCho/pglvbayes/issues
+Depends: R (>= 4.2)
+Imports: cmdstanr, posterior, purrr, furrr, future, dplyr, tibble,
+        matrixStats, phyloseq, tidyr, progressr, metafor, qvalue
+Suggests: progressr, metafor, qvalue, testthat, knitr, rmarkdown,
+        roxygen2
+Config/testthat/edition: 3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+SystemRequirements: CmdStan (install via cmdstanr::install_cmdstan());
+        C++ toolchain (Rtools/CLT/build-essential), GNU make
+BuildVignettes: false
+Config/roxygen2/version: 8.0.0
+NeedsCompilation: no
+Packaged: 2026-08-06 08:14:47 UTC; heuklang
+Author: Gyeongjun Cho [aut, cre] (ORCID:
+    <https://orcid.org/0000-0001-6820-2969>, affiliation: National
+    Institute of Agricultural Sciences, country: Korea, Republic of),
+  Rural Development Administration (RDA) [cph],
+  National Institute of Agricultural Sciences (NAS) [cph]
+Maintainer: Gyeongjun Cho <chogj88@korea.kr>
+Built: R 4.6.1; ; 2026-08-06 08:14:49 UTC; unix
+RemoteType: local
+RemotePkgRef: local::/tmp/Rtmp729inc/pclv-build-6e23b7b04ea28/pclvbayes_0.2.0.tar.gz
+RemoteUrl: /tmp/Rtmp729inc/pclv-build-6e23b7b04ea28/pclvbayes_0.2.0.tar.gz

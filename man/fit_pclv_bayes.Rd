@@ -21,7 +21,6 @@ fit_pclv_bayes(
   max_treedepth = 14,
   progress = c("bar", "verbose", "none"),
   n_workers_outer = 1L,
-  n_workers_kfold = 1L,
   kfold_K = 5,
   kfold_R = 3,
   kfold_seed = seed
@@ -36,8 +35,7 @@ fit_pclv_bayes(
 
 \item{taxa_vec}{Optional character vector of taxa IDs to subset; defaults to all taxa.}
 
-\item{nz_partner_min_frac}{Drop subjects whose partner predictor is non-zero in fewer than this
-fraction of rows; default \code{0.15}.}
+\item{nz_partner_min_frac}{Minimum partner nonzero fraction for eligibility; default \code{0.15}.}
 
 \item{min_unique_times}{Minimum unique times per subject; default \code{3}.}
 
@@ -58,12 +56,11 @@ fraction of rows; default \code{0.15}.}
 \item{max_treedepth}{Maximum HMC tree depth; default \code{14}.}
 
 \item{progress}{Progress output: \code{"bar"}, \code{"verbose"}, or \code{"none"}.
-When \code{"bar"} and \pkg{progressr} is available, outer/K-fold progress bars are displayed.}
+When \code{"bar"} and \pkg{progressr} is available, outer-pair progress is displayed.}
 
-\item{n_workers_outer}{Number of parallel workers for the outer pair loop; default \code{1}.
-If \code{> 1}, K-fold parallelism is automatically disabled to avoid nested parallelism.}
-
-\item{n_workers_kfold}{Number of parallel workers for K-fold; default \code{1}.}
+\item{n_workers_outer}{Number of concurrent unordered-pair workers; default
+\code{1}. Each worker uses one active CmdStan chain at a time, so this value
+directly controls pair-level CPU concurrency and is independent of \code{chains}.}
 
 \item{kfold_K}{Number of folds K; default \code{5}.}
 
@@ -103,7 +100,10 @@ the response is not standardized.
 
 Repeated subject-level K-fold ELPD is always computed. Held-out observations
 are scored with the irregular-time OU Kalman path using a Student-t observation
-likelihood with one posterior-estimated \code{nu > 2} per directed fit. Spline smoothing is selected by cross-validation.
+likelihood with one posterior-estimated \code{nu > 2} per directed fit. Spline smoothing is selected by cross-validation within the fixed Core \code{spar} range 0--0.25.
+Full-community spline smoothing is precomputed once before pair workers are
+launched, and the canonical zero-aware ALR/lag/difference trajectories for
+all unordered pairs are then constructed in one vectorized parent-process pass.
 Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 The validated \code{kfold_seed} is used only to construct subject-level
 split manifests and is shared across pair directions with the same subject
@@ -115,11 +115,19 @@ canonical v0.2 settings; their implementation controls are private.
 
 \strong{Parallelism & progress}
 \itemize{
-\item The \strong{outer pair loop} can run in parallel with \code{n_workers_outer > 1} (PSOCK via \strong{future/furrr}).
-\item \strong{K-fold} can run in parallel with \code{n_workers_kfold > 1}. To avoid nested parallelism,
-when \code{n_workers_outer > 1} the effective K-fold workers are forced to \strong{1}.
-\item If \strong{progressr} is installed and \code{progress = "bar"}, progress bars are shown for both outer
-pairs and K-fold tasks; otherwise it falls back silently.
+\item Pair-level PSOCK workers are the \strong{only process-level parallelism layer}.
+With \code{n_workers_outer = W}, up to \code{W} unordered pairs are processed at once.
+\item One worker owns one unordered pair until both directions, all requested
+MCMC chains, retries, Pathfinder initialization, and all \verb{K x R} predictive
+folds for that pair are complete.
+\item MCMC chains and K-fold tasks execute \strong{sequentially inside each pair worker}.
+Consequently \code{chains} is a statistical setting, while \code{n_workers_outer}
+controls computational concurrency; the worker count need not be a multiple
+of the chain count.
+\item Pathfinder and common implicit BLAS/OpenMP thread pools are restricted to
+one thread per pair worker for the duration of the fit.
+\item If \strong{progressr} is installed and \code{progress = "bar"}, outer-pair progress
+is displayed; otherwise execution falls back silently.
 }
 
 \strong{Interpretation}
@@ -137,6 +145,9 @@ optionally use \strong{ELPD per subject} (from K x R) as supporting evidence. Ag
   if (requireNamespace("progressr", quietly = TRUE)) {
     progressr::handlers(global = TRUE); progressr::handlers("cli")
   }}
+\item \code{n_workers_outer} is the single concurrency control: one worker owns one
+unordered pair and runs all internal work serially. For example, a value of
+15 is valid even when \code{chains = 4}; no multiple-of-four restriction exists.
 \item Reproducibility: seeds are deterministic per pair/fold (\code{seed}, \code{kfold_seed}) and
 \code{furrr::future_map(..., .options = furrr::furrr_options(seed = TRUE))} is used.
 }
@@ -151,10 +162,8 @@ EP_res <- fit_pclv_bayes(
   physeq = EP_phy_obj, subject_col = "plot2", time_col = "week",
   # Pathfinder initialization is fixed by the private v0.2 policy.
   chains = 4, iter_warmup = 1000, iter_sampling = 1500,
-  n_workers_outer = 4,   # outer pair loop in parallel
-  n_workers_kfold = 1,   # k-fold parallel disabled when outer > 1
+  n_workers_outer = 4,   # four unordered pairs processed concurrently
   progress = "bar"
 )
 }
-#' @rdname fit_pclv_bayes
 }

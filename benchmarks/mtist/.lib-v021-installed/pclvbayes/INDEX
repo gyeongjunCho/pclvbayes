@@ -1,0 +1,6 @@
+cor_meta_resid          Pairwise correlations (pair-to-rest ALR or raw
+                        RA) with subject-wise random-effects
+                        meta-analysis
+fit_pclv_bayes          Bayesian directed pair-to-rest fitting with
+                        irregular-time OU residuals
+summarize_bayes_pclv    Summarize Bayesian pcLV results

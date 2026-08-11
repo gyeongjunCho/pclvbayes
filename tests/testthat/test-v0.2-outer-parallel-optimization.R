@@ -26,7 +26,7 @@ test_that("outer dispatcher uses explicit globals and restores its plan", {
   expect_true(captured$options$seed)
   expect_identical(captured$dots$taxa_vec, c("a", "b", "c"))
   expect_identical(captured$dots$core_ctx$mod_exe_file, "/canonical/pclv")
-  expect_identical(captured$dots$scheduling$n_workers_kfold_eff, 1L)
+  expect_false("scheduling" %in% names(captured$dots))
   expect_identical(state$current, "caller")
   expect_length(state$events, 2L)
   expect_identical(state$events[[1L]]$workers, 2L)

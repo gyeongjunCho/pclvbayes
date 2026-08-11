@@ -24,11 +24,11 @@ summarize_bayes_pclv(
 }
 \value{
 A list containing the requested \code{$cross} or \code{$self}
-summary table.
+summary table. The self table includes \code{taxon} and \code{partner}.
 }
 \description{
 Given the result list from \code{fit_pclv_bayes()}, returns a summary table
-for directed cross effects or self effects.
+for directed cross effects or pair-context self effects.
 
 Directed cross coefficients are pair-to-rest dynamic coefficients and are
 not generally absolute direct-gLV effects. Posterior sign support and MCMC
@@ -50,7 +50,16 @@ Diagnostic criteria depend on \code{diag_mode}:
 \code{ebfmi_min >= 0.30}.
 }
 
+Missing diagnostic values fail closed. Results without a diagnostic class
+are marked \code{"diagnostics_unavailable"} unless a historical
+\code{direction_ok_*} field explicitly establishes their status.
+
+Self coefficients are pair-context estimands. The returned self table keeps
+both \code{taxon} and \code{partner}, preventing unrelated pair-specific
+self estimates and diagnostics from being joined by taxon alone.
+
 Indeterminate directions remain explicit and are not interpreted as zero.
+Non-finite coefficient means receive a missing sign rather than \code{"0"}.
 Tables are sorted by \code{bayes_FDR} in ascending order with missing values
 last.
 }

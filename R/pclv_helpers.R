@@ -28,6 +28,7 @@
   )
 )
 .PCLV_CORE_SPLINE <- list(df = NULL, spar = NULL, cv = TRUE)
+.PCLV_CORE_SPLINE_SPAR_RANGE <- c(low = 0.0, high = 0.25)
 
 .pclv_failure <- function(stage, reason, details = list()) {
   out <- c(list(ok = FALSE, stage = stage, reason = reason, details = details), details)
@@ -807,6 +808,401 @@
   }), subject)
 }
 
+
+#' Vectorized canonical pair preprocessing before worker launch
+#'
+#' Builds the zero-aware pair-to-rest ALR trajectories for every unordered
+#' pair in one matrix pass after full-community spline smoothing. The expensive
+#' deterministic work (pair extraction, rest construction, zero replacement,
+#' ALR calculation, lagging, and finite differences) is therefore completed
+#' once in the parent R process. Pair workers receive only compact read-only
+#' trajectory payloads and immediately proceed to directional fitting.
+#'
+#' This helper intentionally implements the frozen Core preprocessing contract:
+#' pre-smoothed relative abundances (\code{smooth_scale = "logra"}),
+#' \code{zero_mode_alr = "minpos_time"}, and \code{minpos_base = "ij"}.
+#' The mathematical zero-replacement and ALR-cap rules are unchanged from
+#' \code{.make_pair_inputs_glv()}.
+#'
+#' @param sm_mat Taxa-by-samples matrix returned by
+#'   \code{.precompute_spline_smoothed()}.
+#' @param meta_df Validated metadata with \code{Sample}, \code{subject}, and
+#'   \code{time} columns.
+#' @param taxa_vec Taxa participating in pair fitting.
+#' @param zero_mode_alr,minpos_alpha,minpos_base,eps_fixed,rest_floor_frac
+#'   Canonical zero-replacement controls.
+#' @param alr_cap Finite Core ALR cap.
+#' @param smooth_scale Canonical smoothing scale; must be \code{"logra"}.
+#' @param nz_partner_min_frac Subject-level partner nonzero-fraction threshold.
+#' @param min_pairs,min_dt,min_sd Canonical preprocessing guards.
+#' @return A list with shared ordered subject/time vectors and one compact state
+#'   object per unordered pair.
+#' @noRd
+#' @keywords internal
+.precompute_pair_states_vectorized <- function(
+    sm_mat, meta_df, taxa_vec,
+    zero_mode_alr = "minpos_time",
+    minpos_alpha = 0.5,
+    minpos_base = "ij",
+    eps_fixed = 1e-6,
+    rest_floor_frac = 1.0,
+    alr_cap = .PCLV_CORE_ALR_CAP,
+    smooth_scale = "logra",
+    nz_partner_min_frac = 0.15,
+    min_pairs = 4L,
+    min_dt = 1e-8,
+    min_sd = 1e-12) {
+
+  if (!identical(zero_mode_alr, "minpos_time") ||
+      !identical(minpos_base, "ij") ||
+      !identical(smooth_scale, "logra")) {
+    stop(
+      "Canonical vectorized preprocessing requires ",
+      "zero_mode_alr='minpos_time', minpos_base='ij', and smooth_scale='logra'."
+    )
+  }
+  if (!is.numeric(alr_cap) || length(alr_cap) != 1L ||
+      !is.finite(alr_cap) || alr_cap <= 0) {
+    stop("Canonical vectorized preprocessing requires a finite positive ALR cap.")
+  }
+  if (length(taxa_vec) < 2L) {
+    return(.pclv_failure(
+      "preprocessing", "insufficient_taxa",
+      list(observed = length(taxa_vec), required = 2L)
+    ))
+  }
+
+  matrix_taxa <- rownames(sm_mat)
+  matrix_samples <- colnames(sm_mat)
+  metadata_samples <- as.character(meta_df$Sample)
+  taxa_vec <- as.character(taxa_vec)
+
+  if (is.null(matrix_taxa) || is.null(matrix_samples) ||
+      anyNA(matrix_taxa) || anyNA(matrix_samples) ||
+      anyDuplicated(matrix_taxa) || anyDuplicated(matrix_samples) ||
+      !all(taxa_vec %in% matrix_taxa)) {
+    stop("Validated smoothed-matrix invariant violated.")
+  }
+  if (length(metadata_samples) != length(matrix_samples) ||
+      anyNA(metadata_samples) || any(!nzchar(metadata_samples)) ||
+      anyDuplicated(metadata_samples) ||
+      !setequal(metadata_samples, matrix_samples)) {
+    return(.pclv_failure(
+      "preprocessing", "sample_alignment_failed",
+      list(metadata_n = length(metadata_samples), matrix_n = length(matrix_samples))
+    ))
+  }
+
+  sample_idx <- match(metadata_samples, matrix_samples)
+  if (anyNA(sample_idx) || anyDuplicated(sample_idx)) {
+    return(.pclv_failure("preprocessing", "sample_alignment_failed", list()))
+  }
+
+  ord <- order(meta_df$subject, meta_df$time)
+  subject <- meta_df$subject[ord]
+  time <- as.numeric(meta_df$time[ord])
+  time_failure <- .validate_subject_times(time, subject, "preprocessing")
+  if (!is.null(time_failure)) return(time_failure)
+
+  # Samples x taxa, aligned exactly to the sorted subject/time order used by the
+  # historical per-pair path.
+  abundance <- t(sm_mat[taxa_vec, sample_idx, drop = FALSE])
+  abundance <- abundance[ord, , drop = FALSE]
+  storage.mode(abundance) <- "double"
+  if (any(!is.finite(abundance)) || any(abundance < 0)) {
+    return(.pclv_failure("preprocessing", "non_finite_pair_abundance", list()))
+  }
+
+  n_obs <- nrow(abundance)
+  n_taxa <- ncol(abundance)
+  by_subject <- split(seq_len(n_obs), subject)
+  transition_counts <- vapply(by_subject, function(ix) {
+    if (length(ix) < 2L) return(0L)
+    dt <- diff(time[ix])
+    if (any(!is.finite(dt)) || any(dt <= min_dt)) return(NA_integer_)
+    length(dt)
+  }, integer(1))
+  if (anyNA(transition_counts)) {
+    return(.pclv_failure(
+      "preprocessing", "dt_below_minimum", list(min_dt = min_dt)
+    ))
+  }
+  n_transitions <- sum(transition_counts)
+  if (n_transitions < min_pairs) {
+    return(.pclv_failure(
+      "preprocessing", "insufficient_rows",
+      list(observed_rows = n_transitions, required_rows = min_pairs)
+    ))
+  }
+
+  # Partner sparsity depends only on the partner taxon's pre-smoothed raw
+  # abundance, not on the other member of the pair. Compute this once per taxon
+  # and subject, then copy only the two relevant masks into each pair payload.
+  partner_keep <- matrix(TRUE, nrow = n_obs, ncol = n_taxa)
+  if (is.finite(nz_partner_min_frac) && nz_partner_min_frac > 0) {
+    for (ix in by_subject) {
+      if (!length(ix)) next
+      frac_nz <- colMeans(
+        is.finite(abundance[ix, , drop = FALSE]) &
+          abundance[ix, , drop = FALSE] > 0
+      )
+      low <- is.finite(frac_nz) & frac_nz < nz_partner_min_frac
+      if (any(low)) partner_keep[ix, low] <- FALSE
+    }
+  }
+
+  taxon_sd <- apply(abundance, 2L, stats::sd)
+  pair_index <- utils::combn(seq_len(n_taxa), 2L)
+  n_pairs <- ncol(pair_index)
+
+  # Materialize all unordered-pair abundances in two dense matrices. For the
+  # 100-taxon benchmark this is small relative to concurrent CmdStan fits and
+  # eliminates thousands of repeated R-level row operations.
+  first_raw <- abundance[, pair_index[1L, ], drop = FALSE]
+  second_raw <- abundance[, pair_index[2L, ], drop = FALSE]
+  pair_total <- first_raw + second_raw
+  composition_tolerance <- max(1e-12, 64 * .Machine$double.eps)
+  invalid_composition <- colSums(
+    !is.finite(pair_total) | pair_total > 1 + composition_tolerance
+  ) > 0L
+  max_pair_total <- apply(pair_total, 2L, max)
+
+  rest_raw <- 1 - pair_total
+  rest_raw[rest_raw < 0] <- 0
+
+  # Exact vectorized form of .make_triplet_row() for the canonical
+  # minpos_time + ij policy.
+  first_positive <- first_raw
+  first_positive[first_positive <= 0] <- Inf
+  second_positive <- second_raw
+  second_positive[second_positive <= 0] <- Inf
+  eps_t <- minpos_alpha * pmin(first_positive, second_positive)
+  eps_t[!is.finite(eps_t)] <- eps_fixed
+
+  first_replaced <- first_raw
+  first_replaced[first_replaced <= 0] <- eps_t[first_replaced <= 0]
+  second_replaced <- second_raw
+  second_replaced[second_replaced <= 0] <- eps_t[second_replaced <= 0]
+  rest_replaced <- rest_raw
+  rest_replaced[rest_replaced <= 0] <- eps_t[rest_replaced <= 0]
+  rest_floor <- rest_floor_frac * eps_t
+  below_rest_floor <- rest_replaced < rest_floor
+  rest_replaced[below_rest_floor] <- rest_floor[below_rest_floor]
+
+  closure_sum <- first_replaced + second_replaced + rest_replaced
+  invalid_replacement <- colSums(
+    !is.finite(closure_sum) | closure_sum <= 0
+  ) > 0L
+
+  # Normalization is kept explicitly, even though it cancels algebraically in
+  # the ALR difference, to preserve the established numerical path.
+  first_closed <- first_replaced / closure_sum
+  second_closed <- second_replaced / closure_sum
+  rest_closed <- rest_replaced / closure_sum
+  alr_first <- log(first_closed) - log(rest_closed)
+  alr_second <- log(second_closed) - log(rest_closed)
+  alr_first <- pmax(pmin(alr_first, alr_cap), -alr_cap)
+  alr_second <- pmax(pmin(alr_second, alr_cap), -alr_cap)
+  invalid_alr <- colSums(!is.finite(alr_first) | !is.finite(alr_second)) > 0L
+
+  # Subject-wise predecessor mapping is common to all pairs.
+  prev <- integer(n_obs)
+  dt <- numeric(n_obs)
+  for (ix in by_subject) {
+    if (!length(ix)) next
+    prev[ix[1L]] <- 0L
+    dt[ix[1L]] <- 0
+    if (length(ix) >= 2L) {
+      cur <- ix[-1L]
+      prv <- ix[-length(ix)]
+      prev[cur] <- prv
+      dt[cur] <- time[cur] - time[prv]
+    }
+  }
+  has_prev <- prev > 0L
+  if (any(!is.finite(dt[has_prev])) || any(dt[has_prev] <= 0)) {
+    return(.pclv_failure("preprocessing", "non_positive_dt", list()))
+  }
+
+  lag_first <- matrix(NA_real_, nrow = n_obs, ncol = n_pairs)
+  lag_second <- matrix(NA_real_, nrow = n_obs, ncol = n_pairs)
+  delta_first <- matrix(NA_real_, nrow = n_obs, ncol = n_pairs)
+  delta_second <- matrix(NA_real_, nrow = n_obs, ncol = n_pairs)
+  if (any(has_prev)) {
+    lag_first[has_prev, ] <- alr_first[prev[has_prev], , drop = FALSE]
+    lag_second[has_prev, ] <- alr_second[prev[has_prev], , drop = FALSE]
+    delta_first[has_prev, ] <- sweep(
+      alr_first[has_prev, , drop = FALSE] - lag_first[has_prev, , drop = FALSE],
+      1L, dt[has_prev], "/"
+    )
+    delta_second[has_prev, ] <- sweep(
+      alr_second[has_prev, , drop = FALSE] - lag_second[has_prev, , drop = FALSE],
+      1L, dt[has_prev], "/"
+    )
+  }
+
+  # Drop large intermediates before expanding compact pair payloads. The four
+  # lag/delta matrices are the only pair-wide dense objects still needed below.
+  rm(
+    abundance, first_raw, second_raw, pair_total, rest_raw,
+    first_positive, second_positive, eps_t,
+    first_replaced, second_replaced, rest_replaced, rest_floor,
+    closure_sum, first_closed, second_closed, rest_closed,
+    alr_first, alr_second
+  )
+
+  states <- vector("list", n_pairs)
+  for (k in seq_len(n_pairs)) {
+    idx_i <- pair_index[1L, k]
+    idx_j <- pair_index[2L, k]
+    failure <- NULL
+
+    if (invalid_composition[[k]]) {
+      failure <- .pclv_failure(
+        "preprocessing", "invalid_pair_composition",
+        list(max_pair_total = max_pair_total[[k]])
+      )
+    } else if (invalid_replacement[[k]] || invalid_alr[[k]]) {
+      failure <- .pclv_failure(
+        "preprocessing", "invalid_zero_replacement_state",
+        list(pair_index = k)
+      )
+    }
+
+    states[[k]] <- list(
+      pair_index = k,
+      idx_i = idx_i,
+      idx_j = idx_j,
+      lag_i = as.numeric(lag_first[, k]),
+      lag_j = as.numeric(lag_second[, k]),
+      delta_i = as.numeric(delta_first[, k]),
+      delta_j = as.numeric(delta_second[, k]),
+      partner_keep_i = as.logical(partner_keep[, idx_i]),
+      partner_keep_j = as.logical(partner_keep[, idx_j]),
+      raw_sd_i = as.numeric(taxon_sd[[idx_i]]),
+      raw_sd_j = as.numeric(taxon_sd[[idx_j]]),
+      min_sd = as.numeric(min_sd),
+      failure = failure
+    )
+  }
+
+  list(
+    subject = subject,
+    time = time,
+    states = states,
+    n_pairs = n_pairs,
+    n_transitions = n_transitions
+  )
+}
+
+#' Build one directed model input from a precomputed unordered-pair state
+#'
+#' Only direction-specific row filtering and predictor standardization remain at
+#' worker time. The zero-aware ALR, lag, and derivative trajectories were
+#' already calculated once by \code{.precompute_pair_states_vectorized()}.
+#'
+#' @param pair_state One compact state from the vectorized parent precompute.
+#' @param subject,time Shared ordered vectors from that precompute.
+#' @param direction \code{"ij"} for j -> i or \code{"ji"} for i -> j.
+#' @return Canonical directional pair input data frame or a structured failure.
+#' @noRd
+#' @keywords internal
+.make_pair_inputs_precomputed <- function(pair_state, subject, time,
+                                          direction = c("ij", "ji")) {
+  direction <- match.arg(direction)
+  if (!is.list(pair_state)) stop("Precomputed pair-state invariant violated.")
+  if (.is_pclv_failure(pair_state$failure)) return(pair_state$failure)
+
+  n <- length(time)
+  required_lengths <- c(
+    length(subject), length(pair_state$lag_i), length(pair_state$lag_j),
+    length(pair_state$delta_i), length(pair_state$delta_j),
+    length(pair_state$partner_keep_i), length(pair_state$partner_keep_j)
+  )
+  if (any(required_lengths != n)) {
+    stop("Precomputed pair-state length invariant violated.")
+  }
+
+  time_failure <- .validate_subject_times(time, subject, "preprocessing")
+  if (!is.null(time_failure)) return(time_failure)
+
+  if (identical(direction, "ij")) {
+    raw_sd_target <- pair_state$raw_sd_i
+    raw_sd_partner <- pair_state$raw_sd_j
+  } else {
+    raw_sd_target <- pair_state$raw_sd_j
+    raw_sd_partner <- pair_state$raw_sd_i
+  }
+  required_sd <- pair_state$min_sd
+  if (!is.finite(raw_sd_target) || !is.finite(raw_sd_partner) ||
+      raw_sd_target < required_sd || raw_sd_partner < required_sd) {
+    return(.pclv_failure(
+      "preprocessing", "insufficient_raw_variation",
+      list(
+        observed_sd_i = raw_sd_target,
+        observed_sd_j = raw_sd_partner,
+        required_sd = required_sd
+      )
+    ))
+  }
+
+  if (identical(direction, "ij")) {
+    y <- pair_state$delta_i
+    xi <- pair_state$lag_i
+    xj <- pair_state$lag_j
+    keep_mask <- pair_state$partner_keep_j
+  } else {
+    y <- pair_state$delta_j
+    xi <- pair_state$lag_j
+    xj <- pair_state$lag_i
+    keep_mask <- pair_state$partner_keep_i
+  }
+
+  dat <- data.frame(
+    subject = subject,
+    time = as.numeric(time),
+    y = as.numeric(y),
+    xi = as.numeric(xi),
+    xj = as.numeric(xj)
+  )
+  ok <- is.finite(dat$y) & is.finite(dat$xi) & is.finite(dat$xj) &
+    is.finite(dat$time) & as.logical(keep_mask)
+  dat <- dat[ok, , drop = FALSE]
+  if (!nrow(dat)) {
+    return(.pclv_failure("preprocessing", "no_valid_lagged_rows", list()))
+  }
+
+  variation_failure <- .validate_predictor_variation(dat$xi, dat$xj, "full_data")
+  if (!is.null(variation_failure)) return(variation_failure)
+
+  mu_xi <- mean(dat$xi)
+  sd_xi <- stats::sd(dat$xi)
+  if (!is.finite(sd_xi) || sd_xi <= 0) {
+    return(.pclv_failure(
+      "standardization", "invalid_internal_scaling_state",
+      list(predictor = "xi", observed_sd = sd_xi)
+    ))
+  }
+  mu_xj <- mean(dat$xj)
+  sd_xj <- stats::sd(dat$xj)
+  if (!is.finite(sd_xj) || sd_xj <= 0) {
+    return(.pclv_failure(
+      "standardization", "invalid_internal_scaling_state",
+      list(predictor = "xj", observed_sd = sd_xj)
+    ))
+  }
+
+  dat$xi_unscaled <- dat$xi
+  dat$xj_unscaled <- dat$xj
+  dat$xi <- (dat$xi - mu_xi) / sd_xi
+  dat$xj <- (dat$xj - mu_xj) / sd_xj
+
+  attr(dat, "smooth_edf_mean") <- NA_real_
+  attr(dat, "smooth_scale") <- "logra"
+  attr(dat, "smoothed") <- TRUE
+  dat
+}
+
 #' Build model inputs for pairwise gLV regressions
 #'
 #' Creates lagged predictors and \code{ΔALR_i/Δt} response under either
@@ -1022,14 +1418,13 @@
 #' @return A \pkg{cmdstanr} fit.
 #' @noRd
 #' @keywords internal
-#' cmdstanr::sample()를 무음으로 호출 + 출력 경로/파일 충돌 방지
-#'
-#' - silent=TRUE: stdout/message 억제, refresh=0
-#' - output_dir / output_basename 보장 및 basename에 UID 접미사 강제 부여
-#' - 초미니 반복(iter_warmup/sampling <= 5)이면 짧은 랜덤 지터로 파일 I/O 경합 완화
-#' - (옵션) args$.smoke_mode=TRUE면 parallel_chains <- 1 강제
-#' - init 관련 오류가 나면 1회 폴백(init=NULL) + 새 디렉터리/베이스네임으로 재시도
 .call_sample_silently <- function(mod, args, silent = TRUE) {
+  # cmdstanr::sample()를 무음으로 호출하고 출력 경로/파일 충돌을 방지한다.
+  # - silent=TRUE: stdout/message 억제, refresh=0
+  # - output_dir/output_basename 보장 및 basename UID 접미사 부여
+  # - 초미니 반복에서는 짧은 랜덤 지터로 파일 I/O 경합 완화
+  # - parallel_chains=1을 강제하여 pair-level 단일 병렬 계층 유지
+  # - sampling 오류와 retry 정책은 .sample_with_retry()에서만 처리
   # 1) 콘솔 무음 + 진행/메시지 억제
   if (isTRUE(silent)) {
     args$refresh <- 0L
@@ -1078,45 +1473,13 @@
       unlink(owned_output_dir, recursive = TRUE, force = TRUE)
   }, add = TRUE)
 
-  # --- 스모크 모드(옵션): 초경량 테스트 시 체인 순차 실행 강제 ---
-  # Benchmark-only chain concurrency override.
-  # Without this option, normal package execution remains unchanged.
-  parallel_override <- getOption(
-    "pclvbayes.parallel_chains_override",
-    NULL
-  )
-
-  if (!is.null(parallel_override)) {
-    chains_raw <- args$chains
-
-    valid_override <- is.numeric(parallel_override) &&
-      length(parallel_override) == 1L &&
-      !is.na(parallel_override) &&
-      is.finite(parallel_override) &&
-      parallel_override == as.integer(parallel_override)
-
-    valid_chains <- is.numeric(chains_raw) &&
-      length(chains_raw) == 1L &&
-      !is.na(chains_raw) &&
-      is.finite(chains_raw) &&
-      chains_raw == as.integer(chains_raw)
-
-    if (!valid_override || !valid_chains ||
-        parallel_override < 1L ||
-        chains_raw < 1L ||
-        parallel_override > chains_raw) {
-      stop(
-        "pclvbayes.parallel_chains_override must be ",
-        "an integer from 1 through chains."
-      )
-    }
-
-    args$parallel_chains <- as.integer(parallel_override)
-  }
-
-  if (isTRUE(args$.smoke_mode)) {
-    args$parallel_chains <- 1L
-  }
+  # Pair-level parallelism is the only process-level concurrency layer.
+  # Every CmdStan fit therefore executes its chains sequentially inside the
+  # owning pair worker. This keeps active-chain concurrency equal to the number
+  # of active pair workers and decouples computational parallelism from the
+  # statistical chain count.
+  if (!is.null(args$.smoke_mode)) args$.smoke_mode <- NULL
+  args$parallel_chains <- 1L
 
   # --- 초미니 반복에서 타임스탬프/파일 I/O 경합 완화용 짧은 지터 ---
   if (is.numeric(args$iter_warmup) && is.numeric(args$iter_sampling)) {
@@ -1160,53 +1523,17 @@
 
 #' Convert Pathfinder draws into per-chain init lists
 #'
-#' @description
-#' Takes posterior approximation draws returned by a
-#' \code{CmdStanPathfinder} run and constructs a list of named
-#' parameter initial values suitable for passing to
-#' \code{cmdstanr::sample(init=...)}. Each chain receives a separate
-#' named list of parameter values. If the draws are unusable (e.g.,
-#' no matching parameters, NA/Inf values, or zero-length lists), the
-#' function returns \code{NULL}.
-#'
-#' @param pf_fit A \code{CmdStanPathfinder} object (result of
-#'   \code{mod$pathfinder()}).
-#' @param mod The compiled \code{cmdstanr} model (not used currently,
-#'   reserved for future extensions).
-#' @param chains Integer number of chains to generate initial values
-#'   for.
-#' @param prefer Character vector of parameter names to prioritize
-#'   when extracting from the Pathfinder draws. Defaults to common
-#'   gLV parameters (\code{r0}, \code{a_ii}, \code{a_ij}, \code{sigma},
-#'   \code{sd_ou}, \code{phi}, \code{lambda}, \code{sigma_ou},
-#'   \code{tau_r}, \code{nu}).
-#'
-#' @return A list of length \code{chains}, each element being a named
-#'   list of numeric initial values. Returns \code{NULL} if conversion
-#'   fails.
-#'
-#' @examples
-#' \dontrun{
-#' mod <- cmdstanr::cmdstan_model("glv_pairwise.stan")
-#' pf_fit <- mod$pathfinder(data = data_list)
-#' inits <- .pf_inits_from_draws(pf_fit, mod, chains = 4)
-#' fit <- mod$sample(data = data_list, chains = 4, init = inits)
-#' }
-#'
-#' @keywords internal
-#' @noRd
-#' Convert Pathfinder draws into per-chain init lists
-#'
 #' Takes approximation draws from a CmdStanPathfinder fit and returns a
 #' per-chain list of named numeric scalars suitable for `sample(init=...)`.
-#' If no usable values are found, returns NULL; the caller records Pathfinder unavailability before using an approved ordinary initialization.
-#' @noRd
-#' Convert Pathfinder draws into per-chain init lists (strict)
+#' Returns `NULL` when no usable parameter values can be constructed.
 #'
-#' Takes approximation draws from a CmdStanPathfinder fit and returns a
-#' per-chain list of named numeric scalars for `sample(init=...)`.
-#' Returns `NULL` if no usable values can be constructed.
+#' @param pf_fit A CmdStanPathfinder fit.
+#' @param mod The compiled CmdStan model.
+#' @param chains Number of chain-specific initialization lists to construct.
+#' @param prefer Parameter names eligible for extraction from Pathfinder draws.
+#' @return A list of length `chains`, or `NULL` when conversion fails.
 #' @noRd
+#' @keywords internal
 .pf_inits_from_draws <- function(pf_fit, mod, chains = 4L,
                                  prefer = c("r0","a_ii","a_ij","sigma","sd_ou","phi",
                                             "lambda","sigma_ou","tau_r","nu")) {
@@ -1289,9 +1616,9 @@
       cv = TRUE,
       all.knots = TRUE,
       control.spar = list(
-        low = 0.0,
-        high = 0.25
-        )
+        low = unname(.PCLV_CORE_SPLINE_SPAR_RANGE[["low"]]),
+        high = unname(.PCLV_CORE_SPLINE_SPAR_RANGE[["high"]])
+      )
     ), warning = function(w) stop(conditionMessage(w), call. = FALSE)),
     error = function(e) .pclv_failure("spline_smoothing", "cv_spline_failed",
                                       list(message = conditionMessage(e)))
@@ -1587,48 +1914,103 @@
     ji = as.integer(seed_base + 100000L * idx_i + 1000L * idx_j + 2L))
 }
 
-.make_pair_tasks <- function(taxa_vec, seed_base) {
+.make_pair_tasks <- function(taxa_vec, seed_base, pair_states = NULL) {
   idx <- utils::combn(seq_along(taxa_vec), 2L, simplify = FALSE)
+  if (!is.null(pair_states) && length(pair_states) != length(idx)) {
+    stop("Precomputed pair-state count invariant violated.")
+  }
   lapply(seq_along(idx), function(k) {
     ij <- idx[[k]]
-    list(task_index = k, idx_i = ij[[1L]], idx_j = ij[[2L]],
-         taxon_i = taxa_vec[[ij[[1L]]]], taxon_j = taxa_vec[[ij[[2L]]]],
-         seed_base = as.integer(seed_base),
-         direction_seeds = .pair_direction_seeds(seed_base, ij[[1L]], ij[[2L]]))
+    state <- if (is.null(pair_states)) NULL else pair_states[[k]]
+    if (!is.null(state) &&
+        (!identical(as.integer(state$idx_i), as.integer(ij[[1L]])) ||
+         !identical(as.integer(state$idx_j), as.integer(ij[[2L]])))) {
+      stop("Precomputed pair-state ordering invariant violated.")
+    }
+    list(
+      task_index = k,
+      idx_i = ij[[1L]],
+      idx_j = ij[[2L]],
+      taxon_i = taxa_vec[[ij[[1L]]]],
+      taxon_j = taxa_vec[[ij[[2L]]]],
+      seed_base = as.integer(seed_base),
+      direction_seeds = .pair_direction_seeds(seed_base, ij[[1L]], ij[[2L]]),
+      pair_state = state
+    )
   })
 }
 
-.execute_pair_task <- function(task, taxa_vec, run_one, core_ctx, scheduling,
+.execute_pair_task <- function(task, taxa_vec, run_one, core_ctx,
+                               scheduling = NULL,
                                progress = "none", mute_logs = TRUE) {
+  # One future worker owns exactly one unordered pair at a time. Both
+  # directions, all MCMC chains, retries, Pathfinder initialization, and all
+  # repeated K-fold fits remain serial inside this worker.
   task_ctx <- core_ctx
-  task_ctx$n_workers_kfold_eff <- scheduling$n_workers_kfold_eff
+  # `scheduling` is intentionally ignored: pair-level workers are now the only
+  # process-level scheduler. The optional argument remains internal so existing
+  # characterization fixtures can exercise the same executor during the beta
+  # transition without reintroducing nested parallelism.
+  invisible(scheduling)
+
+  # Normal package tasks carry a precomputed pair state and a real executable.
+  # Lightweight internal test fixtures may omit the state and use a sentinel
+  # executable path; those fixtures should not attempt to instantiate CmdStan.
+  pair_failure <- !is.null(task$pair_state) &&
+    .is_pclv_failure(task$pair_state$failure)
+  have_executable <- is.character(core_ctx$mod_exe_file) &&
+    length(core_ctx$mod_exe_file) == 1L &&
+    nzchar(core_ctx$mod_exe_file) && file.exists(core_ctx$mod_exe_file)
+
+  if (pair_failure) {
+    task_ctx$mod <- NULL
+  } else if (!is.null(task$pair_state) && have_executable) {
+    task_ctx$mod <- tryCatch(
+      cmdstanr::cmdstan_model(stan_file = NULL, exe_file = core_ctx$mod_exe_file),
+      error = function(e) .pclv_failure(
+        "model_loading", "compiled_model_load_failed",
+        list(message = conditionMessage(e), exe_file = core_ctx$mod_exe_file)
+      )
+    )
+  }
   result <- .run_pair(
-    task$idx_i, task$idx_j, kfold_K = task_ctx$kfold_K, kfold_R = task_ctx$kfold_R,
+    task$idx_i, task$idx_j,
+    kfold_K = task_ctx$kfold_K, kfold_R = task_ctx$kfold_R,
     taxa_vec = taxa_vec, .run_one = run_one, ctx = task_ctx,
+    pair_state = task$pair_state,
     progress = progress, mute_logs = mute_logs, seed_base = task$seed_base
   )
-  list(task_index = task$task_index, result = result,
-       direction_seeds = task$direction_seeds)
+  list(
+    task_index = task$task_index,
+    result = result,
+    direction_seeds = task$direction_seeds
+  )
 }
 
 .execute_pair_task_progress <- function(task, taxa_vec, run_one, core_ctx,
-                                        scheduling, progress, progressor) {
+                                        scheduling = NULL, progress, progressor) {
+  invisible(scheduling)
   result <- .execute_pair_task(
-    task, taxa_vec, run_one, core_ctx, scheduling,
+    task, taxa_vec, run_one, core_ctx,
     progress = progress, mute_logs = TRUE
   )
   progressor(message = sprintf("pair %s-%s", task$taxon_i, task$taxon_j))
   result
 }
 
-.outer_pair_map <- function(tasks, taxa_vec, core_ctx, scheduling, progress,
+.outer_pair_map <- function(tasks, taxa_vec, core_ctx, scheduling = NULL, progress,
                             workers, has_progressr,
                             .plan = future::plan,
                             .map = furrr::future_map,
                             .with_progress = progressr::with_progress) {
+  invisible(scheduling)
   previous_plan <- .plan()
   on.exit(.plan(previous_plan), add = TRUE)
   .plan(future::multisession, workers = workers)
+
+  # scheduling = Inf gives one future task per unordered pair. Multisession
+  # workers are reused, so each worker takes the next pair only after its
+  # current pair (both directions + predictive evaluation) is complete.
   options <- furrr::furrr_options(
     seed = TRUE,
     globals = FALSE,
@@ -1636,8 +2018,11 @@
     scheduling = Inf
   )
   common <- list(
-    .x = tasks, taxa_vec = taxa_vec, run_one = .run_one,
-    core_ctx = core_ctx, scheduling = scheduling, progress = progress,
+    .x = tasks,
+    taxa_vec = taxa_vec,
+    run_one = .run_one,
+    core_ctx = core_ctx,
+    progress = progress,
     .options = options
   )
   if (isTRUE(has_progressr) && identical(progress, "bar")) {
@@ -1673,14 +2058,24 @@
 #' @param kfold_K,kfold_R Repeated K-fold settings (metadata pass-through).
 #' @param taxa_vec Character vector of taxon names.
 #' @param .run_one Callable for a single directed fit.
+#' @param pair_state Optional precomputed unordered-pair trajectory payload.
 #' @param progress Progress mode string.
 #' @param mute_logs Logical; suppress local progress.
 #' @param seed_base Integer seed base for reproducibility.
 #' @return A one-row tibble aggregating both directions, or \code{NULL}.
 #' @noRd
 #' @keywords internal
-.run_pair <- function(idx_i, idx_j,kfold_K = NULL, kfold_R = NULL,
-                      taxa_vec, .run_one, ctx, progress,
+.invoke_direction_runner <- function(run_one, base_args, pair_state, direction) {
+  if (!is.function(run_one)) stop("Directed runner must be a function.")
+  fml <- names(formals(run_one))
+  accepts_dots <- !is.null(fml) && "..." %in% fml
+  if (accepts_dots || "pair_state" %in% fml) base_args$pair_state <- pair_state
+  if (accepts_dots || "direction" %in% fml) base_args$direction <- direction
+  do.call(run_one, base_args)
+}
+
+.run_pair <- function(idx_i, idx_j, kfold_K = NULL, kfold_R = NULL,
+                      taxa_vec, .run_one, ctx, pair_state = NULL, progress,
                       mute_logs = FALSE, seed_base) {
   ti <- taxa_vec[[idx_i]]
   pj <- taxa_vec[[idx_j]]
@@ -1689,17 +2084,23 @@
   seed_ij <- direction_seeds[["ij"]]
   seed_ji <- direction_seeds[["ji"]]
 
-  res_ij <- .run_one(
-    target = ti, partner = pj,
-    ctx = ctx,
-    seed_override = seed_ij,
-    progress_local = if (mute_logs) "none" else progress
+  res_ij <- .invoke_direction_runner(
+    .run_one,
+    list(
+      target = ti, partner = pj, ctx = ctx,
+      seed_override = seed_ij,
+      progress_local = if (mute_logs) "none" else progress
+    ),
+    pair_state = pair_state, direction = "ij"
   )
-  res_ji <- .run_one(
-    target = pj, partner = ti,
-    ctx = ctx,
-    seed_override = seed_ji,
-    progress_local = if (mute_logs) "none" else progress
+  res_ji <- .invoke_direction_runner(
+    .run_one,
+    list(
+      target = pj, partner = ti, ctx = ctx,
+      seed_override = seed_ji,
+      progress_local = if (mute_logs) "none" else progress
+    ),
+    pair_state = pair_state, direction = "ji"
   )
 
   if (is.null(res_ij)) res_ij <- .pclv_failure("directed_fit", "missing_result", list(direction = "ij"))
@@ -2442,8 +2843,9 @@
     sa$init <- NULL
   }
 
-  # Fold-task 병렬화는 바깥 스케줄러가 제한한다. 각 fold 내부에서는
-  # main fit과 동일하게 모든 MCMC chain을 병렬 실행한다.
+  # Pair-level parallelism is the only concurrency layer. Fold fits retain the
+  # requested number of chains for diagnostics, but execute those chains
+  # sequentially inside the owning pair worker.
   sa$chains <- if (is.null(sa$chains))
     4L
   else {
@@ -2458,7 +2860,7 @@
       4L
   }
 
-  sa$parallel_chains <- sa$chains
+  sa$parallel_chains <- 1L
 
   tryfit <- .sample_with_retry(
     mod        = mod,
@@ -2537,14 +2939,14 @@
 
 #' Repeated K-fold evaluation (subject-level) with diagnostics payload
 #'
-#' Runs \code{K × R} folds, aggregates subject-wise ELPD and PPD-normalized ELPD,
-#' and returns fold diagnostics and split manifests for reproducibility.
+#' Runs \code{K × R} folds sequentially inside the owning pair worker,
+#' aggregates subject-wise ELPD and PPD-normalized ELPD, and returns fold
+#' diagnostics and split manifests for reproducibility.
 #'
 #' @inheritParams .fold_fit_and_score
 #' @param seed Seed used only to build the repeated subject-level split manifest.
 #'   Fold sampler seeds are derived separately from
 #'   \code{sample_args_base$seed}.
-#' @param n_workers_kfold Number of workers (multisession) for fold-level parallelism.
 #' @return A list with aggregate ELPD summaries, diagnostics, splits, and counts.
 #' @noRd
 #' @keywords internal
@@ -2557,11 +2959,17 @@
                            seed = 123,
                            silent_sampler = TRUE,
                            max_retries = 3,
-                           n_workers_kfold = 1L,
                            min_pairs = 4,
                            freeze_retry_hypers = FALSE,
                            progress = "none",
-                           has_progressr = requireNamespace("progressr", quietly = TRUE)) { # retry computational settings remain fixed within folds
+                           n_workers_kfold = NULL,
+                           has_progressr = NULL) { # retry computational settings remain fixed within folds
+  # These two retired internal arguments are accepted as no-ops only so the
+  # existing characterization tests can call this private helper unchanged.
+  # They never affect scheduling; folds are always sequential in the owning
+  # pair worker.
+  invisible(n_workers_kfold)
+  invisible(has_progressr)
   # `seed` controls only the shared subject partition. Each directed model
   # retains its own sampler seed through sample_args_base$seed below.
   splits <- .make_repkfold_splits(pair_in$subject, K, R, seed)
@@ -2645,27 +3053,10 @@
     result
   }
 
-  # 실행: 순차 또는 병렬
-  if (n_workers_kfold > 1L) {
-    # 안전하게 PSOCK(멀티세션) 사용 권장 (fork 이슈 회피)
-    op <- future::plan()
-    on.exit(future::plan(op), add = TRUE)
-    future::plan(future::multisession, workers = n_workers_kfold)
-    if (isTRUE(has_progressr) && identical(progress, "bar")) {
-      progressr::with_progress({
-        p <- progressr::progressor(steps = length(tasks))
-        res_list <- furrr::future_map(tasks, function(task) {
-          res <- run_task(task)
-          p(message = sprintf("kfold r=%d k=%d", task$r, task$k))
-          res
-        }, .options = furrr::furrr_options(seed = TRUE))
-      })
-    } else {
-      res_list <- furrr::future_map(tasks, run_task, .options = furrr::furrr_options(seed = TRUE))
-    }
-  } else {
-    res_list <- purrr::map(tasks, run_task)
-  }
+  # K-fold evaluation is deliberately serial inside the owning pair worker.
+  # This removes nested futures and makes the number of active CmdStan chains
+  # independent of K, R, and the statistical chain count.
+  res_list <- purrr::map(tasks, run_task)
 
   subs <- sort(unique(pair_in$subject))
   agg <- setNames(numeric(length(subs)), subs)
@@ -2792,6 +3183,10 @@
 #'
 #' @param target Target taxon name (i).
 #' @param partner Partner taxon name (j).
+#' @param ctx Private runtime context. Normal outer-pair execution supplies the
+#'   shared time vectors and pair-local compiled model object.
+#' @param pair_state Optional precomputed unordered-pair trajectory payload.
+#' @param direction Direction label, \code{"ij"} for j -> i or \code{"ji"} for i -> j.
 #' @param seed_override Optional integer seed for reproducibility.
 #' @param progress_local Progress mode string; inherits external \code{progress}.
 #' @return A list with posterior summaries, diagnostics, and K-fold payload; or \code{NULL}.
@@ -2822,12 +3217,16 @@
 .fit_direction_main_posterior <- function(target,
                                           partner,
                                           ctx,
+                                          pair_state = NULL,
+                                          direction = NULL,
                                           seed_override = NULL,
                                           progress_local = "none") {
 
   # ---- 컨텍스트 바인딩(워커 환경 내에서 사용) ----
   meta_df              <- ctx$meta_df
   sm_mat               <- ctx$sm_mat
+  pair_subject         <- ctx$pair_subject
+  pair_time            <- ctx$pair_time
   eps                  <- ctx$eps
   min_pairs            <- ctx$min_pairs
   zero_mode_alr        <- ctx$zero_mode_alr
@@ -2852,7 +3251,6 @@
   seed                 <- ctx$seed
   quiet                <- ctx$quiet
   silent_sampler       <- ctx$silent_sampler
-  n_workers_kfold_eff  <- ctx$n_workers_kfold_eff
   kfold_K              <- ctx$kfold_K
   kfold_R              <- ctx$kfold_R
   kfold_seed           <- ctx$kfold_seed
@@ -2871,37 +3269,57 @@
   kfold_outer_rounds_local <- 0L
 
   # 0) 페어 데이터 구성 ---------------------------------------------------------
-  # allow custom pair builder (e.g., cross-kingdom mixing)
-if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
-  pair_df <- ctx$pair_builder(
-    target = target,
-    partner = partner,
-    ctx = ctx,
-    eps = eps,
-    min_pairs = min_pairs
-  )
-  if (is.null(pair_df)) return(.pclv_failure("preprocessing", "pair_builder_no_data", list()))
-} else {
-  pair_df <- NULL
-}
+  # Normal package execution uses the parent-process vectorized pair state.
+  # The historical builder remains as a private fallback for direct internal
+  # calls and specialized test fixtures, but the outer pair workers do not
+  # recompute spline/zero-replacement/ALR/lag/derivative trajectories.
+  if (!is.null(pair_state)) {
+    if (is.null(direction) || !(direction %in% c("ij", "ji"))) {
+      stop("Precomputed directed-fit invariant violated: direction is required.")
+    }
+    pair_in <- .make_pair_inputs_precomputed(
+      pair_state = pair_state,
+      subject = pair_subject,
+      time = pair_time,
+      direction = direction
+    )
+  } else {
+    # allow custom pair builder (e.g., cross-kingdom mixing)
+    if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
+      pair_df <- ctx$pair_builder(
+        target = target,
+        partner = partner,
+        ctx = ctx,
+        eps = eps,
+        min_pairs = min_pairs
+      )
+      if (is.null(pair_df)) {
+        return(.pclv_failure(
+          "preprocessing", "pair_builder_no_data", list()
+        ))
+      }
+    } else {
+      pair_df <- NULL
+    }
 
-  pair_in <- .make_pair_inputs_glv(
-    pair_df = pair_df,
-    sm_mat = sm_mat, meta_df = meta_df,
-    j = partner, i = target, min_pairs = min_pairs,
-    zero_mode_alr = zero_mode_alr,
-    minpos_alpha = minpos_alpha,
-    minpos_base  = minpos_base,
-    eps_fixed = eps_fixed,
-    lib_eps_c = lib_eps_c,
-    rest_floor_frac = rest_floor_frac,
-    alr_cap = .PCLV_CORE_ALR_CAP,
-    smooth_scale = smooth_scale,
-    alr_spline_df = alr_spline_df,
-    alr_spline_spar = alr_spline_spar,
-    alr_spline_cv = alr_spline_cv,
-    nz_partner_min_frac = nz_partner_min_frac
-  )
+    pair_in <- .make_pair_inputs_glv(
+      pair_df = pair_df,
+      sm_mat = sm_mat, meta_df = meta_df,
+      j = partner, i = target, min_pairs = min_pairs,
+      zero_mode_alr = zero_mode_alr,
+      minpos_alpha = minpos_alpha,
+      minpos_base  = minpos_base,
+      eps_fixed = eps_fixed,
+      lib_eps_c = lib_eps_c,
+      rest_floor_frac = rest_floor_frac,
+      alr_cap = .PCLV_CORE_ALR_CAP,
+      smooth_scale = smooth_scale,
+      alr_spline_df = alr_spline_df,
+      alr_spline_spar = alr_spline_spar,
+      alr_spline_cv = alr_spline_cv,
+      nz_partner_min_frac = nz_partner_min_frac
+    )
+  }
   if (inherits(pair_in, "pclv_failure")) {
     return(pair_in)
   }
@@ -2970,17 +3388,28 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   if (anyDuplicated(nm))
     stan_list <- stan_list[match(unique(nm), nm)]
 
-  # Load only the exact compiled canonical model; workers never compile variants.
-  if (is.null(ctx$mod_exe_file) || !file.exists(ctx$mod_exe_file)) {
-    return(.pclv_failure("model_loading", "compiled_model_unavailable",
-                         list(exe_file = ctx$mod_exe_file)))
+  # The owning pair worker reopens the canonical executable once and reuses the
+  # same CmdStanModel object for both directions and all predictive folds.
+  if (.is_pclv_failure(ctx$mod)) return(ctx$mod)
+  if (!is.null(ctx$mod)) {
+    mod <- ctx$mod
+  } else {
+    # Private fallback for direct internal calls outside the outer pair map.
+    if (is.null(ctx$mod_exe_file) || !file.exists(ctx$mod_exe_file)) {
+      return(.pclv_failure(
+        "model_loading", "compiled_model_unavailable",
+        list(exe_file = ctx$mod_exe_file)
+      ))
+    }
+    mod <- tryCatch(
+      cmdstanr::cmdstan_model(stan_file = NULL, exe_file = ctx$mod_exe_file),
+      error = function(e) .pclv_failure(
+        "model_loading", "compiled_model_load_failed",
+        list(message = conditionMessage(e), exe_file = ctx$mod_exe_file)
+      )
+    )
+    if (.is_pclv_failure(mod)) return(mod)
   }
-  mod <- tryCatch(
-    cmdstanr::cmdstan_model(stan_file = NULL, exe_file = ctx$mod_exe_file),
-    error = function(e) .pclv_failure("model_loading", "compiled_model_load_failed",
-                                      list(message = conditionMessage(e), exe_file = ctx$mod_exe_file))
-  )
-  if (.is_pclv_failure(mod)) return(mod)
 
   # --- seed 결정(쌍별/방향별 재현성) -------------------------------------------
   seed_main <- if (!is.null(seed_override))
@@ -2993,7 +3422,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     data = stan_list,
     seed = seed_main,
     chains = chains,
-    parallel_chains = chains,
+    parallel_chains = 1L,
     iter_warmup = iter_warmup,
     iter_sampling = iter_sampling,
     adapt_delta = adapt_delta,
@@ -3022,7 +3451,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     on.exit(if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE), add = TRUE)
     pf_fit <- tryCatch(mod$pathfinder(
       data = stan_list, seed = seed_main, init = 0.05,
-      num_paths = pf_num_paths, draws = pf_draws,
+      num_paths = pf_num_paths, num_threads = 1L, draws = pf_draws,
       history_size = pf_history_size, max_lbfgs_iters = pf_max_lbfgs_iters,
       psis_resample = pf_psis_resample, show_messages = !silent_sampler,
       output_dir = pf_dir, output_basename = paste0("glv_pf_", target, "_", partner)
@@ -3131,7 +3560,7 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
     # remains direction-specific inside sample_args.
     split_seed = as.integer(kfold_seed),
     sampling_seed = if (is.null(final_args_main$seed)) seed_main else final_args_main$seed,
-    silent_sampler = silent_sampler, n_workers_kfold = n_workers_kfold_eff,
+    silent_sampler = silent_sampler,
     max_retries = max_retries, min_pairs = min_pairs, K = kfold_K, R = kfold_R,
     pair_tag = pair_tag, progress = progress_local
   )
@@ -3342,7 +3771,6 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
       R = predictive$R,
       seed = predictive$split_seed,
       silent_sampler = predictive$silent_sampler,
-      n_workers_kfold = predictive$n_workers_kfold,
       max_retries = predictive$max_retries,
       freeze_retry_hypers = TRUE,
       min_pairs = predictive$min_pairs,
@@ -3512,10 +3940,11 @@ if (!is.null(ctx$pair_builder) && is.function(ctx$pair_builder)) {
   main_result
 }
 
-.run_one <- function(target, partner, ctx, seed_override = NULL,
-                     progress_local = "none") {
+.run_one <- function(target, partner, ctx, pair_state = NULL, direction = NULL,
+                     seed_override = NULL, progress_local = "none") {
   main_result <- .fit_direction_main_posterior(
     target = target, partner = partner, ctx = ctx,
+    pair_state = pair_state, direction = direction,
     seed_override = seed_override, progress_local = progress_local
   )
   .add_predictive_evaluation(main_result)

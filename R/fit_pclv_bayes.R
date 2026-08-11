@@ -1,5 +1,31 @@
+.pclv_force_single_thread_libraries <- function() {
+  vars <- c(
+    "STAN_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"
+  )
+  old <- Sys.getenv(vars, unset = NA_character_)
+  do.call(Sys.setenv, as.list(stats::setNames(rep("1", length(vars)), vars)))
+  old
+}
+
+.pclv_restore_thread_libraries <- function(old) {
+  if (is.null(old) || !length(old)) return(invisible(NULL))
+  for (nm in names(old)) {
+    value <- old[[nm]]
+    if (is.na(value)) {
+      Sys.unsetenv(nm)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(value), nm))
+    }
+  }
+  invisible(NULL)
+}
+
 .prepare_fit_runtime <- function(validated) {
   controls <- validated$controls
+
+  # Compile/load the canonical model once in the parent process. Workers reopen
+  # the already-built executable; no worker compiles a model variant.
   mod <- tryCatch(
     get_pclv_model(quiet = controls$quiet),
     error = function(e) .pclv_failure(
@@ -8,11 +34,18 @@
     )
   )
   if (.is_pclv_failure(mod)) return(mod)
+
+  # Full-community spline smoothing remains part of runtime preparation.
+  # Pair-wide ALR/lag/delta vectorization is performed immediately afterwards
+  # by fit_pclv_bayes(), before any worker is launched. Keeping these two steps
+  # separate preserves the small, testable .prepare_fit_runtime() contract while
+  # still ensuring that workers never repeat deterministic preprocessing.
   sm_mat <- .precompute_spline_smoothed(
     validated$mat_rel, validated$meta_df, validated$taxa_vec,
     controls$eps, controls$min_unique_times
   )
   if (.is_pclv_failure(sm_mat)) return(sm_mat)
+
   context_names <- c(
     "eps", "min_pairs", "min_unique_times", "zero_mode_alr",
     "minpos_alpha", "minpos_base", "eps_fixed", "lib_eps_c",
@@ -24,6 +57,7 @@
     "use_pathfinder_init", "pf_num_paths", "pf_draws",
     "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample"
   )
+
   list(
     ctx = c(list(
       mod_exe_file = mod$exe_file(),
@@ -65,7 +99,10 @@
 #'
 #' Repeated subject-level K-fold ELPD is always computed. Held-out observations
 #' are scored with the irregular-time OU Kalman path using a Student-t observation
-#' likelihood with one posterior-estimated `nu > 2` per directed fit. Spline smoothing is selected by cross-validation.
+#' likelihood with one posterior-estimated `nu > 2` per directed fit. Spline smoothing is selected by cross-validation within the fixed Core `spar` range 0--0.25.
+#' Full-community spline smoothing is precomputed once before pair workers are
+#' launched, and the canonical zero-aware ALR/lag/difference trajectories for
+#' all unordered pairs are then constructed in one vectorized parent-process pass.
 #' Failed folds remain explicit and contribute no zero-valued ELPD placeholders.
 #' The validated \code{kfold_seed} is used only to construct subject-level
 #' split manifests and is shared across pair directions with the same subject
@@ -75,10 +112,17 @@
 #'   canonical v0.2 settings; their implementation controls are private.
 #'
 #' **Parallelism & progress**
-#' - The **outer pair loop** can run in parallel with `n_workers_outer > 1` (PSOCK via **future/furrr**).
-#' - Repeated K-fold fold tasks run sequentially within each directed fit to
-#'   avoid nested process-level parallelism.
-#' - Main and K-fold fits run their MCMC chains in parallel.
+#' - Pair-level PSOCK workers are the **only process-level parallelism layer**.
+#'   With `n_workers_outer = W`, up to `W` unordered pairs are processed at once.
+#' - One worker owns one unordered pair until both directions, all requested
+#'   MCMC chains, retries, Pathfinder initialization, and all `K x R` predictive
+#'   folds for that pair are complete.
+#' - MCMC chains and K-fold tasks execute **sequentially inside each pair worker**.
+#'   Consequently `chains` is a statistical setting, while `n_workers_outer`
+#'   controls computational concurrency; the worker count need not be a multiple
+#'   of the chain count.
+#' - Pathfinder and common implicit BLAS/OpenMP thread pools are restricted to
+#'   one thread per pair worker for the duration of the fit.
 #' - If **progressr** is installed and `progress = "bar"`, outer-pair progress
 #'   is displayed; otherwise execution falls back silently.
 #'
@@ -105,19 +149,16 @@
 #' @param time_col    Column name in sample metadata indicating (numeric) time within subject.
 #'
 #'
-#' @param nz_partner_min_frac Drop subjects whose partner predictor is non-zero in fewer than this
-#' fraction of rows; default \code{0.15}.
-#'
-#'
 #' @param progress Progress output: \code{"bar"}, \code{"verbose"}, or \code{"none"}.
-#' When \code{"bar"} and \pkg{progressr} is available, outer/K-fold progress bars are displayed.
+#' When \code{"bar"} and \pkg{progressr} is available, outer-pair progress is displayed.
 #'
 #'
 #' @param kfold_K Number of folds K; default \code{5}.
 #' @param kfold_R Number of repetitions R; default \code{3}.
 #' @param kfold_seed Seed used only for repeated K-fold subject splits; defaults to \code{seed}. The same value is applied across all pair directions, while fold sampler seeds remain direction-specific.
-#' @param n_workers_outer Number of parallel workers for the outer pair loop;
-#' default \code{1}.
+#' @param n_workers_outer Number of concurrent unordered-pair workers; default
+#' \code{1}. Each worker uses one active CmdStan chain at a time, so this value
+#' directly controls pair-level CPU concurrency and is independent of \code{chains}.
 #'
 #'
 #' @return
@@ -129,6 +170,9 @@
 #'   if (requireNamespace("progressr", quietly = TRUE)) {
 #'     progressr::handlers(global = TRUE); progressr::handlers("cli")
 #'   }}
+#' - `n_workers_outer` is the single concurrency control: one worker owns one
+#'   unordered pair and runs all internal work serially. For example, a value of
+#'   15 is valid even when `chains = 4`; no multiple-of-four restriction exists.
 #' - Reproducibility: seeds are deterministic per pair/fold (`seed`, `kfold_seed`) and
 #'   \code{furrr::future_map(..., .options = furrr::furrr_options(seed = TRUE))} is used.
 #'
@@ -141,11 +185,11 @@
 #'   physeq = EP_phy_obj, subject_col = "plot2", time_col = "week",
 #'   # Pathfinder initialization is fixed by the private v0.2 policy.
 #'   chains = 4, iter_warmup = 1000, iter_sampling = 1500,
-#'   n_workers_outer = 4,   # outer pair loop in parallel
+#'   n_workers_outer = 4,   # four unordered pairs processed concurrently
 #'   progress = "bar"
 #' )
 #' }
-#'#' @rdname fit_pclv_bayes
+#' @rdname fit_pclv_bayes
 #' @export
 
 fit_pclv_bayes <- function(
@@ -184,7 +228,6 @@ fit_pclv_bayes <- function(
   progress_every <- 1L
   silent_sampler <- FALSE
   max_retries <- 3L
-  n_workers_kfold <- as.integer(chains)
   use_pathfinder_init <- TRUE
   pf_num_paths <- 8L
   pf_draws <- 1000L
@@ -197,7 +240,7 @@ fit_pclv_bayes <- function(
     "eps", "zero_mode_alr", "minpos_alpha", "minpos_base", "eps_fixed",
     "lib_eps_c", "rest_floor_frac", "smooth_scale", "alr_spline_df",
     "alr_spline_spar", "alr_spline_cv", "metric", "quiet", "progress_every",
-    "silent_sampler", "max_retries", "n_workers_kfold",
+    "silent_sampler", "max_retries",
     "use_pathfinder_init", "pf_num_paths",
     "pf_draws", "pf_history_size", "pf_max_lbfgs_iters", "pf_psis_resample"
   )
@@ -211,17 +254,47 @@ fit_pclv_bayes <- function(
   subject_col <- validated$subject_col
   time_col <- validated$time_col
   taxa_vec <- validated$taxa_vec
-  meta_df <- validated$meta_df
-  mat_rel <- validated$mat_rel
 
+  # Public validation has now completed. Restrict implicit numerical-library
+  # thread pools before model loading, deterministic precomputation, or worker
+  # creation so one unordered-pair worker corresponds to at most one active CPU
+  # compute thread at a time. The caller's environment is restored on exit.
+  old_thread_env <- .pclv_force_single_thread_libraries()
+  on.exit(.pclv_restore_thread_libraries(old_thread_env), add = TRUE)
 
   runtime <- .prepare_fit_runtime(validated)
   if (.is_pclv_failure(runtime)) return(runtime)
   ctx <- runtime$ctx
-  # K-fold task-level parallelism is a private fixed policy. Individual
-  # fold fits still execute their requested MCMC chains in parallel.
-  n_workers_kfold_eff <- n_workers_kfold
-  ctx$n_workers_kfold_eff <- n_workers_kfold_eff
+
+  # Finish all pair-dependent deterministic preprocessing in the parent before
+  # the worker pool starts. This is the one vectorized ALR/lag/delta pass shared
+  # by every direction, main fit, and K-fold evaluation.
+  pair_precompute <- .precompute_pair_states_vectorized(
+    sm_mat = ctx$sm_mat,
+    meta_df = ctx$meta_df,
+    taxa_vec = taxa_vec,
+    zero_mode_alr = zero_mode_alr,
+    minpos_alpha = minpos_alpha,
+    minpos_base = minpos_base,
+    eps_fixed = eps_fixed,
+    rest_floor_frac = rest_floor_frac,
+    alr_cap = .PCLV_CORE_ALR_CAP,
+    smooth_scale = smooth_scale,
+    nz_partner_min_frac = nz_partner_min_frac,
+    min_pairs = min_pairs
+  )
+  if (.is_pclv_failure(pair_precompute)) return(pair_precompute)
+
+  pair_states <- pair_precompute$states
+  ctx$pair_subject <- pair_precompute$subject
+  ctx$pair_time <- pair_precompute$time
+
+  # Workers receive only the compact pair state plus the immutable model path
+  # and scalar controls. The full smoothed matrix/metadata remain unnecessary
+  # once the vectorized parent pass has completed.
+  ctx$sm_mat <- NULL
+  ctx$meta_df <- NULL
+  rm(pair_precompute, runtime, validated, physeq)
   has_progressr <- requireNamespace("progressr", quietly = TRUE)
 
   if (has_progressr && identical(progress, "bar")) {
@@ -239,14 +312,14 @@ fit_pclv_bayes <- function(
     on.exit(options(old_opt), add = TRUE)  # 함수 종료 시 원복
   }
 
-  # Canonical unordered-pair tasks; scheduling is the only mode-specific layer.
-  tasks <- .make_pair_tasks(taxa_vec, seed)
-  scheduling <- list(n_workers_kfold_eff = n_workers_kfold_eff)
+  # Canonical unordered-pair tasks. Each task carries only its compact
+  # precomputed pair trajectory and is owned by one worker from start to finish.
+  tasks <- .make_pair_tasks(taxa_vec, seed, pair_states = pair_states)
+  rm(pair_states)
   run_task <- function(task, mute_logs) {
     .execute_pair_task(
       task = task, taxa_vec = taxa_vec, run_one = .run_one,
-      core_ctx = ctx, scheduling = scheduling,
-      progress = progress, mute_logs = mute_logs
+      core_ctx = ctx, progress = progress, mute_logs = mute_logs
     )
   }
 
@@ -267,8 +340,8 @@ fit_pclv_bayes <- function(
   } else {
     out <- .outer_pair_map(
       tasks = tasks, taxa_vec = taxa_vec, core_ctx = ctx,
-      scheduling = scheduling, progress = progress,
-      workers = n_workers_outer, has_progressr = has_progressr
+      progress = progress, workers = n_workers_outer,
+      has_progressr = has_progressr
     )
   }
 
