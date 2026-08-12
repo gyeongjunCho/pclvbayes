@@ -2,7 +2,7 @@
 % Please edit documentation in R/cor_meta_resid.R
 \name{cor_meta_resid}
 \alias{cor_meta_resid}
-\title{Pairwise correlations (pair-to-rest ALR or raw RA) with subject-wise random-effects meta-analysis}
+\title{Pairwise correlations with subject-wise random-effects meta-analysis}
 \usage{
 cor_meta_resid(
   physeq,
@@ -12,8 +12,8 @@ cor_meta_resid(
   interesting_taxa = NULL,
   method = c("pearson", "spearman"),
   transform = c("alr", "raw"),
-  min_n = 5,
-  min_k = 2,
+  min_n = 5L,
+  min_k = 2L,
   meta_method = c("DL", "REML"),
   use_knha = TRUE,
   prevalence_cut = NULL,
@@ -29,10 +29,11 @@ cor_meta_resid(
   partial_method = c("resid", "matrix"),
   zero_minpos_alpha = 0.5,
   zero_minpos_base = c("ij", "triplet"),
-  zero_mode_alr = c("minpos_subject", "minpos_time", "lib"),
-  zero_lib_pseudo = 0.5,
+  zero_mode_alr = c("minpos_time", "minpos_subject", "lib", "fixed"),
+  zero_eps_fixed = 1e-06,
+  zero_lib_pseudo = 0.65,
   rest_floor_frac = 1,
-  alr_cap_mode = c("dynamic", "fixed", "none"),
+  alr_cap_mode = c("fixed", "dynamic", "none"),
   alr_cap_value = 12,
   effn_method = c("nw", "bartlett", "ar1"),
   effn_L = NULL,
@@ -47,7 +48,8 @@ cor_meta_resid(
   cozero_action = c("exclude", "flag", "warn"),
   cozero_min_subject_frac = 0.4,
   acf_correction = TRUE,
-  nz_partner_min_frac = 0.15,
+  nz_partner_min_frac = .PCLV_OBSERVED_SUPPORT_POLICY$nz_partner_min_frac,
+  nz_partner_min_n = .PCLV_OBSERVED_SUPPORT_POLICY$nz_partner_min_n,
   warn_alr = FALSE,
   all_columns = FALSE
 )
@@ -67,27 +69,27 @@ cor_meta_resid(
 
 \item{transform}{Transformation, \code{"alr"} or \code{"raw"}.}
 
-\item{min_n}{Minimum observations per subject.}
+\item{min_n}{Minimum observations per subject after time aggregation.}
 
-\item{min_k}{Minimum number of eligible subjects.}
+\item{min_k}{Minimum number of eligible subjects for meta-analysis.}
 
 \item{meta_method}{Meta-analysis method, \code{"DL"} or \code{"REML"}.}
 
 \item{use_knha}{Whether to use Knapp-Hartung adjustment.}
 
-\item{prevalence_cut}{Optional prevalence filter.}
+\item{prevalence_cut}{Optional prevalence filter in \link{0, 1}.}
 
-\item{mean_ra_cut}{Optional mean relative-abundance filter.}
+\item{mean_ra_cut}{Optional mean relative-abundance filter in \link{0, 1}.}
 
-\item{detrend}{Whether to detrend within subjects.}
+\item{detrend}{Whether to remove a linear time trend within subject.}
 
 \item{q_method}{Multiple-testing correction method.}
 
-\item{q_weight_by}{Weighting scheme for q-value correction.}
+\item{q_weight_by}{Weighting scheme for weighted q-value correction.}
 
 \item{k_filter}{Optional minimum subject count filter.}
 
-\item{r_abs_min}{Optional minimum absolute correlation filter.}
+\item{r_abs_min}{Optional minimum absolute pooled correlation in \link{0, 1}.}
 
 \item{var_method}{Variance estimator method.}
 
@@ -95,7 +97,7 @@ cor_meta_resid(
 
 \item{partial_rest}{Whether to adjust raw correlations for the rest component.}
 
-\item{partial_method}{Partial-correlation method.}
+\item{partial_method}{Spearman partial-correlation method.}
 
 \item{zero_minpos_alpha}{Multiplier for minimum-positive zero replacement.}
 
@@ -103,106 +105,103 @@ cor_meta_resid(
 
 \item{zero_mode_alr}{Zero-replacement mode for ALR inputs.}
 
-\item{zero_lib_pseudo}{Library-size pseudo-count coefficient.}
+\item{zero_eps_fixed}{Positive fixed/fallback epsilon.}
 
-\item{rest_floor_frac}{Minimum rest fraction after replacement.}
+\item{zero_lib_pseudo}{Positive library-size epsilon coefficient.}
 
-\item{alr_cap_mode}{ALR capping mode.}
+\item{rest_floor_frac}{Non-negative rest-floor multiplier.}
 
-\item{alr_cap_value}{ALR cap value when fixed capping is used.}
+\item{alr_cap_mode}{ALR capping mode. The canonical default is \code{"fixed"}.}
+
+\item{alr_cap_value}{Positive ALR cap, or dynamic-cap ceiling.}
 
 \item{effn_method}{Effective-sample-size correction method.}
 
 \item{effn_L}{Optional Bartlett lag cutoff.}
 
-\item{effn_bw}{Optional bandwidth for effective sample size.}
+\item{effn_bw}{Optional Newey-West bandwidth.}
 
-\item{effn_aggregate_by_time}{Time aggregation for effective sample size.}
+\item{effn_aggregate_by_time}{Time aggregation for correlation and effective n.}
 
-\item{effn_time_tol}{Time tolerance for aggregation.}
+\item{effn_time_tol}{Optional non-negative time tolerance for aggregation.}
 
-\item{effn_phi_cap}{Cap for AR(1) correlation products.}
+\item{effn_phi_cap}{Optional AR(1) product cap in [0, 1).}
 
-\item{effn_blend}{Blend toward raw sample size.}
+\item{effn_blend}{Optional blend in \link{0, 1} toward ACF-corrected effective n.}
 
-\item{effn_min_frac}{Minimum effective-sample-size fraction.}
+\item{effn_min_frac}{Optional effective-n floor as a fraction of input n.}
 
 \item{cozero_check}{Whether to screen co-zero patterns.}
 
-\item{cozero_tol}{Co-zero screening tolerance.}
+\item{cozero_tol}{Subject-level co-zero threshold in \link{0, 1}.}
 
-\item{cozero_action}{Action for co-zero findings.}
+\item{cozero_action}{Action for high co-zero subjects.}
 
-\item{cozero_min_subject_frac}{Minimum subject fraction for co-zero screening.}
+\item{cozero_min_subject_frac}{Pair-level flag threshold in \link{0, 1}.}
 
 \item{acf_correction}{Whether to apply autocorrelation correction.}
 
-\item{nz_partner_min_frac}{Minimum partner nonzero fraction.}
+\item{nz_partner_min_frac}{Minimum observed-positive fraction required for
+each taxon within subject before zero replacement. Default 0.5.}
 
-\item{warn_alr}{Whether to warn on extreme ALR values.}
+\item{nz_partner_min_n}{Minimum absolute number of observed-positive time
+points required for each taxon within subject. Default 4.}
 
-\item{all_columns}{Logical (default \code{FALSE}). Controls whether the output table
-includes \strong{all possible columns} or only those relevant to the chosen settings:
-\itemize{
-\item \code{FALSE} (default): Only columns relevant to the selected \code{effn_method} and
-\code{partial_rest} option are kept. For example, if \code{effn_method="ar1"}, only
-\code{effn_phi_cap} is shown (while \code{effn_L}, \code{effn_bw} are dropped). If
-\code{partial_rest=FALSE}, the \code{partial_method} column is dropped.
-\item \code{TRUE}: Keep all columns regardless of relevance, filling unused ones with \code{NA}.
-}}
+\item{warn_alr}{Whether to emit one safeguard warning per affected pair.}
+
+\item{all_columns}{Whether to retain setting columns irrelevant to the chosen
+effective-n and partial-correlation modes.}
 }
 \value{
-If \code{return_subjectwise = TRUE}, a list with \code{meta} and \code{subjectwise}.
-the \code{n_eff} settings used.
+A tibble, or a list with \code{meta} and \code{subjectwise} when
+\code{return_subjectwise = TRUE}.
 }
 \description{
-Computes within-subject correlations for each unordered taxon pair and pools them
-via random-effects meta-analysis (REML or DL) using \pkg{metafor}. \strong{CLR and ILR are not used.}
+Computes within-subject correlations for each unordered taxon pair and pools
+them with random-effects meta-analysis using \pkg{metafor}.  CLR and ILR are
+not used.
 
-Two transformation modes are supported:
-\itemize{
-\item \code{transform = "alr"} (recommended): To mitigate spurious near-1 correlations from
-mathematical coupling, use \strong{pair-to-rest ALR} logratios after zero-aware
-multiplicative replacement on the 3-part ``composition `{i, j, rest}```:
-\itemize{
-\item \code{alr_i = log(x_i / x_rest)}, \code{alr_j = log(x_j / x_rest)}.
-We then compute within-subject correlations between \code{alr_i} and \code{alr_j}
-(Spearman or Pearson) and aggregate across subjects.
-}
+With \code{transform = "alr"} (recommended), each pair is represented as the
+three-part composition \code{{i, j, rest}} and transformed to pair-to-rest
+ALRs.  The shared \code{.triplet_alr_transform()} helper is used so that
+correlation/residual screening and future OU-residual analyses can use the
+same zero replacement, rest floor, closure, and ALR cap logic.
 
-\strong{ALR safeguards (important):}
-When \code{rest} is extremely small, ALR values can explode. This function provides
-(i) time-varying zero replacement (\code{zero_mode_alr}), (ii) a \strong{rest floor} (\code{rest_floor_frac}),
-and (iii) optional \strong{winsorization} controlled by \code{alr_cap_mode}.
-\item \code{transform = "raw"}: Work directly on relative abundance (RA) time series.
-\itemize{
-\item \code{partial_rest = FALSE}: simple correlation (Spearman or Pearson).
-\item \code{partial_rest = TRUE}: partial correlation controlling for \code{rest = 1 - x_i - x_j}.
-\itemize{
-\item Spearman: rank-transform \verb{x_i, x_j, rest} to \verb{R_i, R_j, R_r},
-then either regress residuals (\code{partial_method = "resid"}, default) or
-use the rank-correlation matrix formula (\code{partial_method = "matrix"}) to obtain the partial r.
-\item Pearson: regress \code{x_i ~ rest}, \code{x_j ~ rest}, then correlate residuals.
-}
-}
-}
+Before any zero replacement, each subject-level taxon pair must have enough
+observed-positive longitudinal support.  By default each taxon must be
+positive at >=50\% of resolved time points and at >=4 time points. Thus a
+trajectory with >50\% zeros is excluded, while exactly 50\% positive can pass
+if the absolute-count criterion is also met. This is intentionally a
+conservative "do not infer what was mostly unobserved" rule.
 
-Variance scaling for meta-analysis defaults to \strong{Fisher's z} for Pearson and
-\strong{Bonett–Wright} for Spearman; \strong{Fieller–Hartley–Pearson (FHP)} is available.
-Optional Knapp–Hartung adjustment is supported.
+Zero replacement is then used only as a finite-logratio safeguard for the
+intermittent zeros that remain in an otherwise supported trajectory. It is
+not interpreted as biological imputation. The default ALR contract currently
+retains the pcLV-compatible rules: \code{zero_mode_alr = "minpos_time"},
+\code{zero_minpos_base = "ij"}, \code{zero_minpos_alpha = 0.5},
+\code{rest_floor_frac = 1}, and a fixed ALR cap of 12.
 
-\strong{Effective n (neff):}
-\itemize{
-\item \code{effn_method = c("nw","bartlett","ar1")} (default \code{"nw"}).
-\item For short series, you can weaken ACF correction via:
-\itemize{
-\item \code{effn_phi_cap} (AR(1) only): cap \verb{|phi_x * phi_y|}.
-\item \code{effn_blend}: blend \code{n_eff <- (1 - b) * n + b * n_eff} (e.g., \code{b = 0.5}).
-\item \code{effn_min_frac}: floor \code{n_eff >= f * n} (e.g., \code{f = 0.6}).
-}
-\item Optional time aggregation for \code{n_eff}: \code{effn_aggregate_by_time} (\code{"none"|"mean"|"median"})
-with tolerance \code{effn_time_tol}.
-\item For Spearman, \code{n_eff} is computed on the \strong{same scale used for correlation}:
-ranks (simple Spearman) or residuals of ranks (partial-resid Spearman).
-}
+This function does not perform the full-community spline smoothing used by
+the pcLV dynamic model. Correlation keeps observed trajectories unsmoothed; a
+future OU implementation should use actual time intervals. After pcLV
+equivalence/benchmark checks, fit_pclv_bayes() is intended to reuse the same
+observed-support and triplet helpers while retaining its weak spline as a
+model-specific temporal stage.
+
+With \code{transform = "raw"}, correlations are computed directly on
+relative abundance.  Optional partial correlation can control for
+\code{rest = 1 - x_i - x_j}.  For Spearman partial correlation, the function
+operates on ranks and computes effective sample size on rank residuals when
+rest is controlled, including when \code{partial_method = "matrix"}.
+
+Pearson correlations use Fisher-z variance by default. Spearman correlations
+use Bonett-Wright variance by default, with FHP and Fisher-z alternatives.
+Optional Knapp-Hartung adjustment is supported.
+
+Effective sample-size correction uses discrete observation-lag ACFs.  Time
+values are used for ordering and optional duplicate/near-duplicate time
+aggregation, but the ACF is not a continuous-time model.  Therefore the
+\code{nw}, \code{bartlett}, and \code{ar1} corrections assume approximately
+equally spaced observations after aggregation.  A future OU implementation
+should use actual time intervals while reusing the same triplet ALR helper.
 }
