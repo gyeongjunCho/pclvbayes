@@ -36,10 +36,11 @@
 #   Phase 2: future OU code reuses the same support + triplet helpers, while the
 #     OU likelihood itself uses actual time intervals. No spline-based zero
 #     imputation is planned as the default.
-#   Phase 3: after the current pcLV benchmarks are complete, route
-#     fit_pclv_bayes() through the same support and triplet backend. Preserve the
-#     existing pcLV-specific weak full-community spline as a separate temporal
-#     stage and require equivalence tests before deleting the old pair code.
+#   Phase 3 (current): pcLV reuses the same low-level triplet ALR kernel while
+#     retaining its own weak full-community spline and current 0.15 partner
+#     support rule. The stricter observed-support candidate below is NOT applied
+#     to pcLV by this refactor; changing support remains a separate scientific
+#     policy decision.
 #
 # The minpos_time x 0.5 zero rule below is retained for compatibility for now.
 # With the support filter in front of it, it should act only on intermittent zeros
@@ -142,6 +143,75 @@
   alr_cap_mode = "fixed",
   alr_cap = 12
 )
+
+
+#' Build the canonical per-observation minpos-time epsilon
+#'
+#' Low-level vector/matrix helper shared by the high-level compositional
+#' transform and pcLV's all-pair vectorized parent-process precompute.  It owns
+#' only the deterministic epsilon rule; support filtering remains caller-specific.
+#'
+#' @param xi_raw,xj_raw Non-negative objects with identical shape.
+#' @param rest_raw Optional non-negative object of the same shape; required when
+#'   \code{minpos_base = "triplet"}.
+#' @param minpos_alpha Positive multiplier for the local minimum positive value.
+#' @param minpos_base Either \code{"ij"} or \code{"triplet"}.
+#' @param eps_fixed Positive fallback when no positive base value exists.
+#' @return Positive epsilon object with the same shape as \code{xi_raw}.
+#' @noRd
+.triplet_minpos_time_epsilon <- function(
+    xi_raw,
+    xj_raw,
+    rest_raw = NULL,
+    minpos_alpha = .PCLV_TRIPLET_ALR_POLICY$minpos_alpha,
+    minpos_base = .PCLV_TRIPLET_ALR_POLICY$minpos_base,
+    eps_fixed = .PCLV_TRIPLET_ALR_POLICY$eps_fixed) {
+
+  minpos_base <- match.arg(minpos_base, c("ij", "triplet"))
+  same_shape <- function(a, b) {
+    length(a) == length(b) && identical(dim(a), dim(b))
+  }
+  if (!length(xi_raw) || !same_shape(xi_raw, xj_raw)) {
+    stop("xi_raw and xj_raw must be non-empty objects with identical shape.",
+         call. = FALSE)
+  }
+  if (any(!is.finite(xi_raw)) || any(!is.finite(xj_raw)) ||
+      any(xi_raw < 0) || any(xj_raw < 0)) {
+    stop("minpos-time inputs must be finite and non-negative.", call. = FALSE)
+  }
+  if (identical(minpos_base, "triplet")) {
+    if (is.null(rest_raw) || !same_shape(xi_raw, rest_raw) ||
+        any(!is.finite(rest_raw)) || any(rest_raw < 0)) {
+      stop("rest_raw must be finite, non-negative, and shape-matched for triplet minpos.",
+           call. = FALSE)
+    }
+  }
+
+  minpos_alpha <- suppressWarnings(as.numeric(minpos_alpha))
+  eps_fixed <- suppressWarnings(as.numeric(eps_fixed))
+  if (length(minpos_alpha) != 1L || !is.finite(minpos_alpha) || minpos_alpha <= 0) {
+    stop("minpos_alpha must be a finite positive scalar.", call. = FALSE)
+  }
+  if (length(eps_fixed) != 1L || !is.finite(eps_fixed) || eps_fixed <= 0) {
+    stop("eps_fixed must be a finite positive scalar.", call. = FALSE)
+  }
+
+  xi_positive <- xi_raw
+  xj_positive <- xj_raw
+  xi_positive[xi_positive <= 0] <- Inf
+  xj_positive[xj_positive <= 0] <- Inf
+  min_positive <- pmin(xi_positive, xj_positive)
+
+  if (identical(minpos_base, "triplet")) {
+    rest_positive <- rest_raw
+    rest_positive[rest_positive <= 0] <- Inf
+    min_positive <- pmin(min_positive, rest_positive)
+  }
+
+  eps_t <- minpos_alpha * min_positive
+  eps_t[!is.finite(eps_t) | eps_t <= 0] <- eps_fixed
+  eps_t
+}
 
 
 #' Apply zero replacement, rest floor, closure, and ALR capping
@@ -420,17 +490,13 @@
 
   # Build epsilon_t using the policy selected by the caller.
   if (identical(zero_mode_alr, "minpos_time")) {
-    min_pos <- pmin(
-      ifelse(xi_raw > 0, xi_raw, Inf),
-      ifelse(xj_raw > 0, xj_raw, Inf)
-    )
-    if (identical(minpos_base, "triplet")) {
-      min_pos <- pmin(min_pos, ifelse(rest_raw > 0, rest_raw, Inf))
-    }
-    eps_t <- ifelse(
-      is.finite(min_pos),
-      minpos_alpha * min_pos,
-      eps_fixed
+    eps_t <- .triplet_minpos_time_epsilon(
+      xi_raw = xi_raw,
+      xj_raw = xj_raw,
+      rest_raw = rest_raw,
+      minpos_alpha = minpos_alpha,
+      minpos_base = minpos_base,
+      eps_fixed = eps_fixed
     )
   } else if (identical(zero_mode_alr, "minpos_subject")) {
     subject_chr <- as.character(subject)
@@ -482,4 +548,3 @@
   )
   out
 }
-

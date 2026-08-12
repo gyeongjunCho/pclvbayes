@@ -19,12 +19,15 @@ hf2_run_kfold <- function(subjects, split_seed, sampling_seed) {
   observed_train <- list()
   observed_test <- list()
   testthat::local_mocked_bindings(
-    .fold_fit_and_score = function(mod, stan_list_base, sample_args_base,
-                                   pair_in, train_subjects, test_subjects,
-                                   max_retries = 3, silent_sampler = TRUE,
-                                   sample_args_override = NULL,
-                                   freeze_retry_hypers = FALSE,
-                                   seed_override = NULL, min_pairs = 4L) {
+    .fold_fit_and_score = function(
+    mod, stan_list_base, sample_args_base,
+    pair_in, train_subjects, test_subjects,
+    max_retries = 3, silent_sampler = TRUE,
+    sample_args_override = NULL,
+    freeze_retry_hypers = FALSE,
+    seed_override = NULL, min_pairs = 4L,
+    ...
+  ) {
       held_out <- as.character(test_subjects)
       observed_train[[length(observed_train) + 1L]] <<- as.character(train_subjects)
       observed_test[[length(observed_test) + 1L]] <<- held_out
@@ -107,11 +110,14 @@ test_that("predictive context records split and sampling seeds separately", {
       silent_sampler = TRUE, n_workers_kfold = 1L, max_retries = 0L,
       min_pairs = 1L, K = 1L, R = 1L, pair_tag = "b->a", progress = "none"))
   testthat::local_mocked_bindings(
-    .repkfold_eval = function(mod, stan_list_base, sample_args_base, pair_in,
-                              K, R, seed, silent_sampler, max_retries,
-                              n_workers_kfold, min_pairs,
-                              freeze_retry_hypers = FALSE, progress = "none",
-                              has_progressr = FALSE) {
+    .repkfold_eval = function(
+      mod, stan_list_base, sample_args_base, pair_in,
+      K, R, seed, silent_sampler, max_retries,
+      min_pairs,
+      freeze_retry_hypers = FALSE,
+      progress = "none",
+      ...
+     ) {
       expect_identical(seed, 123L)
       expect_identical(sample_args_base$seed, 456L)
       list(K = 1L, R = 1L, elpd_mean = -1, elpd_method = "q16",

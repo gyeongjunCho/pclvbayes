@@ -228,7 +228,7 @@ fit_pclv_bayes <- function(
   progress_every <- 1L
   silent_sampler <- FALSE
   max_retries <- 3L
-  use_pathfinder_init <- TRUE
+  use_pathfinder_init <- FALSE
   pf_num_paths <- 8L
   pf_draws <- 1000L
   pf_history_size <- 50L

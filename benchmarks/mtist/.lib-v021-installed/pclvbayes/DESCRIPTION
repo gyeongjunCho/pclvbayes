@@ -25,14 +25,14 @@ SystemRequirements: CmdStan (install via cmdstanr::install_cmdstan());
 BuildVignettes: false
 Config/roxygen2/version: 8.0.0
 NeedsCompilation: no
-Packaged: 2026-08-11 06:03:36 UTC; heuklang
+Packaged: 2026-08-12 07:55:03 UTC; heuklang
 Author: Gyeongjun Cho [aut, cre] (ORCID:
     <https://orcid.org/0000-0001-6820-2969>, affiliation: National
     Institute of Agricultural Sciences, country: Korea, Republic of),
   Rural Development Administration (RDA) [cph],
   National Institute of Agricultural Sciences (NAS) [cph]
 Maintainer: Gyeongjun Cho <chogj88@korea.kr>
-Built: R 4.6.1; ; 2026-08-11 06:03:38 UTC; unix
+Built: R 4.6.1; ; 2026-08-12 07:55:04 UTC; unix
 RemoteType: local
-RemotePkgRef: local::/tmp/RtmpcZsKdZ/pclv-build-eeb31118de4bb/pclvbayes_0.2.0.tar.gz
-RemoteUrl: /tmp/RtmpcZsKdZ/pclv-build-eeb31118de4bb/pclvbayes_0.2.0.tar.gz
+RemotePkgRef: local::/tmp/RtmpJt1JyE/pclv-build-1246771996af21/pclvbayes_0.2.0.tar.gz
+RemoteUrl: /tmp/RtmpJt1JyE/pclv-build-1246771996af21/pclvbayes_0.2.0.tar.gz

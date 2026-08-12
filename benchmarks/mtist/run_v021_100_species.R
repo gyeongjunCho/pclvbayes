@@ -12,7 +12,7 @@ run_seed <- 20260802L
 
 chains <- 4L
 iter_warmup <- 2000L
-iter_sampling <- 2000L
+iter_sampling <- 1000L
 
 init <- 0.2
 adapt_delta <- 0.98

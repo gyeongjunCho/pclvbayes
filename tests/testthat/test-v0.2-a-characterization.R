@@ -575,7 +575,7 @@ test_that("canonical projection scoring is Kalman OU with draw-specific Student-
   draws <- data.frame(
     r0 = c(0, 0.1), a_ii = c(-0.2, -0.1), a_ij = c(0.3, 0.2),
     sigma = c(0.4, 0.5), sd_ou = c(0.2, 0.25), lambda = c(0.7, 0.8),
-    tau_r = c(0, 0), nu = c(4, 8)
+    sd_r0 = c(0, 0), nu = c(4, 8)
   )
   held_out <- data.frame(
     subject = c("A", "A", "B", "B"), time = c(0, 2, 1, 5),

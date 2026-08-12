@@ -113,7 +113,7 @@ Target:
 4,950 unordered pairs
 9,900 directed fits
 4 chains
-2,000 warmup + 2,000 retained iterations per chain
+2,000 warmup + 1,000 retained iterations per chain
 ```
 
 - [x] Launch benchmark under the pair-owned scheduler
@@ -139,6 +139,8 @@ Target:
 
 Primary goal: simplify internals **without changing the frozen scientific behavior**.
 
+Hotfix (2026-08-12): corrected held-out-subject `sd_r0` integration in predictive scoring and prevented main-fit sampler/retry state from leaking into K-fold fits. Canonical triplet preprocessing and Stan outputs were aligned without changing the pcLV estimand.
+
 Completed early:
 
 - [x] Pair-owned outer execution
@@ -151,10 +153,10 @@ Completed early:
 
 Planned:
 
-- [ ] Characterize all public API, result schemas, masks, seeds, and fixed fixtures
+- [x] Characterize all public API, result schemas, masks, seeds, and fixed fixtures
 - [ ] Remove only proven-dead private code
-- [ ] Migrate remaining duplicated triplet construction onto the shared helper foundation
-- [ ] Prove numerical equivalence before deleting legacy implementations
+- [x] Migrate remaining duplicated triplet construction onto the shared helper foundation
+- [x] Prove numerical equivalence before deleting legacy implementations
 - [ ] Consolidate checkpoint and lifecycle helpers only after dedicated tests exist
 - [ ] Preserve all public scientific behavior unless a later version explicitly declares a model/API change
 
@@ -302,4 +304,3 @@ The pcLVbayes roadmap does **not** currently include:
 - treating unavailable or indeterminate values as zero;
 - choosing preprocessing rules according to agreement with simulation truth;
 - claiming observational posterior interactions as causal proof.
-

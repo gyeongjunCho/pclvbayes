@@ -242,9 +242,8 @@
 .safe_draws_df <- function(fit){
   drw <- fit$draws()
   keep <- intersect(
-    c("a_ij","a_ii","r0",
-      "sigma","sd_ou","phi",
-      "sigma_ou","lambda","sigma_pred","tau_r","nu","log_nu_minus_two"),
+    c("a_ij","a_ii","r0","sd_r0",
+      "sigma","sd_ou","phi","lambda","nu","log_nu_minus_two"),
     posterior::variables(drw)
   )
   if (!length(keep)) {
@@ -271,32 +270,6 @@
   any(grepl(sprintf("E-BFMI .* less than %.1f", thr), txt))
 }
 
-#' Compute per-chain E-BFMI from sampler \code{energy__}
-#'
-#' Uses \code{mean(diff(E)^2)/var(E)} for each chain’s energy series.
-#'
-#' @param fit A \pkg{cmdstanr} \code{CmdStanMCMC} fit.
-#' @return Numeric vector of E-BFMI per chain (may be empty).
-#' @noRd
-#' @keywords internal
-.ebfmi_chainwise_from_energy <- function(fit) {
-  sdiag <- try(fit$sampler_diagnostics(), silent = TRUE)
-  if (inherits(sdiag, "try-error") || is.null(sdiag)) return(rep(NA_real_, 0))
-  vars <- dimnames(sdiag)[[3]]
-  pos  <- match("energy__", vars, nomatch = 0L)
-  if (pos == 0L) return(rep(NA_real_, 0))
-  E <- sdiag[, , pos, drop = FALSE]  # draws x chains x 1
-  C <- dim(E)[2]
-  eb <- rep(NA_real_, C)
-  for (c in seq_len(C)) {
-    ec <- as.numeric(E[, c, 1]); ec <- ec[is.finite(ec)]
-    if (length(ec) < 3) next
-    v <- stats::var(ec); if (!is.finite(v) || v <= 0) next
-    d <- diff(ec)
-    eb[c] <- mean(d * d) / v
-  }
-  eb
-}
 
 #' Summarise key MCMC diagnostics from a CmdStanR fit
 #'
@@ -310,7 +283,7 @@
 #' @noRd
 #' @keywords internal
 .add_convergence_diag <- function(diag, draws,
-                                  pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two")) {
+                                  pars = c("a_ij","a_ii","r0","sd_r0","sigma","sd_ou","phi","nu","log_nu_minus_two")) {
   avail <- posterior::variables(draws)
   use_pars <- intersect(pars, avail)
   if (!length(use_pars)) use_pars <- avail
@@ -380,15 +353,6 @@
   )
 }
 
-# Backward-compatible complete diagnostic helper. Canonical retry execution
-# uses .summarise_sampler_diag(); only a retained fit pays for convergence
-# summaries after its selected draws have been materialized once.
-.summarise_diag <- function(fit,
-                            pars = c("a_ij","a_ii","r0","sigma","sd_ou","phi","nu","log_nu_minus_two"),
-                            max_treedepth = 12) {
-  draws <- .safe_draws_df(fit)
-  .add_convergence_diag(.summarise_sampler_diag(fit, max_treedepth), draws, pars)
-}
 
 # A chain must put at least this much posterior mass on one sign before that
 # sign is treated as identified. This matches the package's existing 95%
@@ -453,7 +417,7 @@
   self_certain <- pmax(aii$positive_probability, aii$negative_probability) >= .PCLV_CHAIN_SIGN_PROB_MIN
   self_agree <- if (n_chains > 1L) all(self_certain) && length(unique(self_dominant)) == 1L && self_dominant[[1L]] != 0L else NA
 
-  residual_parameters <- intersect(c("sigma", "sd_ou", "phi", "lambda", "nu"), names(draws))
+  residual_parameters <- intersect(c("sigma", "sd_r0", "sd_ou", "phi", "lambda", "nu"), names(draws))
   residual <- dplyr::bind_rows(lapply(residual_parameters, function(p) .chain_parameter_summary(draws, p)))
   residual_ranges <- numeric()
   separated <- character()
@@ -485,6 +449,7 @@
   if (length(separated)) {
     residual_reasons <- "chain_specific_residual_regime"
     if (any(c("sigma", "sd_ou") %in% separated)) residual_reasons <- c(residual_reasons, "residual_scale_nonidentifiability")
+    if ("sd_r0" %in% separated) residual_reasons <- c(residual_reasons, "subject_intercept_scale_nonidentifiability")
     if ("sd_ou" %in% separated && any(c("phi", "lambda") %in% separated)) residual_reasons <- c(residual_reasons, "ou_scale_decay_ridge")
   }
 
@@ -572,25 +537,6 @@
 #' @keywords internal
 .lfsr_from_two <- function(p_two) pmin(pmax(p_two/2, 0), 0.5)
 
-#' Monotone cumulative q-value from LFSR
-#'
-#' Computes a cumulative average of sorted LFSR values, producing a
-#' conservative, monotone \eqn{q}-like measure for sign error control.
-#'
-#' @param v Numeric vector of LFSR values.
-#' @return Numeric vector of same length with cumulative \eqn{q}.
-#' @noRd
-#' @keywords internal
-.q_from_lfsr <- function(v) {
-  q <- rep(NA_real_, length(v))
-  nn <- which(!is.na(v))
-  if (length(nn)) {
-    l  <- pmin(pmax(v[nn], 0), 0.5)
-    oo <- nn[order(l)]
-    q[oo] <- cumsum(l[order(l)]) / seq_along(oo)
-  }
-  q
-}
 
 #' Element-wise diagnostic pass/fail predicate
 #'
@@ -772,10 +718,6 @@
   pair_df
 }
 
-.build_pair_df_smoothed <- function(sm_mat, meta_df, j, i, eps = 1e-8,
-                                    min_pairs = 4, min_dt = 1e-8, min_sd = 1e-12) {
-  .select_smoothed_pair_rows(sm_mat, meta_df, j, i, min_pairs, min_dt, min_sd)
-}
 
 .pair_to_rest_abundance <- function(xi, xj) pmax(0, 1 - xi - xj)
 
@@ -821,8 +763,9 @@
 #' This helper intentionally implements the frozen Core preprocessing contract:
 #' pre-smoothed relative abundances (\code{smooth_scale = "logra"}),
 #' \code{zero_mode_alr = "minpos_time"}, and \code{minpos_base = "ij"}.
-#' The mathematical zero-replacement and ALR-cap rules are unchanged from
-#' \code{.make_pair_inputs_glv()}.
+#' Zero replacement, triplet closure, and ALR capping are delegated to the
+#' shared compositional kernel; pcLV-specific smoothing/support rules remain
+#' outside that kernel.
 #'
 #' @param sm_mat Taxa-by-samples matrix returned by
 #'   \code{.precompute_spline_smoothed()}.
@@ -970,39 +913,40 @@
   rest_raw <- 1 - pair_total
   rest_raw[rest_raw < 0] <- 0
 
-  # Exact vectorized form of .make_triplet_row() for the canonical
-  # minpos_time + ij policy.
-  first_positive <- first_raw
-  first_positive[first_positive <= 0] <- Inf
-  second_positive <- second_raw
-  second_positive[second_positive <= 0] <- Inf
-  eps_t <- minpos_alpha * pmin(first_positive, second_positive)
-  eps_t[!is.finite(eps_t)] <- eps_fixed
+  # Shared deterministic triplet kernel. pcLV retains its own smoothing and
+  # partner-support policy; only epsilon/replacement/closure/ALR mathematics is
+  # shared with cor_meta_resid and future OU callers.
+  eps_t <- .triplet_minpos_time_epsilon(
+    xi_raw = first_raw,
+    xj_raw = second_raw,
+    rest_raw = rest_raw,
+    minpos_alpha = minpos_alpha,
+    minpos_base = minpos_base,
+    eps_fixed = eps_fixed
+  )
+  triplet <- tryCatch(
+    .triplet_alr_apply(
+      xi_raw = first_raw,
+      xj_raw = second_raw,
+      rest_raw = rest_raw,
+      eps_t = eps_t,
+      rest_floor_frac = rest_floor_frac,
+      alr_cap_mode = "fixed",
+      alr_cap = alr_cap
+    ),
+    error = function(e) .pclv_failure(
+      "preprocessing", "shared_triplet_transform_failed",
+      list(message = conditionMessage(e))
+    )
+  )
+  if (.is_pclv_failure(triplet)) return(triplet)
 
-  first_replaced <- first_raw
-  first_replaced[first_replaced <= 0] <- eps_t[first_replaced <= 0]
-  second_replaced <- second_raw
-  second_replaced[second_replaced <= 0] <- eps_t[second_replaced <= 0]
-  rest_replaced <- rest_raw
-  rest_replaced[rest_replaced <= 0] <- eps_t[rest_replaced <= 0]
-  rest_floor <- rest_floor_frac * eps_t
-  below_rest_floor <- rest_replaced < rest_floor
-  rest_replaced[below_rest_floor] <- rest_floor[below_rest_floor]
-
-  closure_sum <- first_replaced + second_replaced + rest_replaced
+  alr_first <- triplet$alr_i
+  alr_second <- triplet$alr_j
   invalid_replacement <- colSums(
-    !is.finite(closure_sum) | closure_sum <= 0
+    !is.finite(triplet$xi) | !is.finite(triplet$xj) |
+      !is.finite(triplet$xr) | !is.finite(triplet$eps_star)
   ) > 0L
-
-  # Normalization is kept explicitly, even though it cancels algebraically in
-  # the ALR difference, to preserve the established numerical path.
-  first_closed <- first_replaced / closure_sum
-  second_closed <- second_replaced / closure_sum
-  rest_closed <- rest_replaced / closure_sum
-  alr_first <- log(first_closed) - log(rest_closed)
-  alr_second <- log(second_closed) - log(rest_closed)
-  alr_first <- pmax(pmin(alr_first, alr_cap), -alr_cap)
-  alr_second <- pmax(pmin(alr_second, alr_cap), -alr_cap)
   invalid_alr <- colSums(!is.finite(alr_first) | !is.finite(alr_second)) > 0L
 
   # Subject-wise predecessor mapping is common to all pairs.
@@ -1044,10 +988,7 @@
   # Drop large intermediates before expanding compact pair payloads. The four
   # lag/delta matrices are the only pair-wide dense objects still needed below.
   rm(
-    abundance, first_raw, second_raw, pair_total, rest_raw,
-    first_positive, second_positive, eps_t,
-    first_replaced, second_replaced, rest_replaced, rest_floor,
-    closure_sum, first_closed, second_closed, rest_closed,
+    abundance, first_raw, second_raw, pair_total, rest_raw, eps_t, triplet,
     alr_first, alr_second
   )
 
@@ -1272,36 +1213,44 @@
       list(max_pair_total = suppressWarnings(max(pair_total)))
     ))
   }
-  df$rest_raw <- .pair_to_rest_abundance(df$xi_raw, df$xj_raw)
+  df$rest_raw <- pmax(0, 1 - pair_total)
 
   by_s <- split(seq_len(nrow(df)), df$subject)
-  lagv <- function(v) unsplit(lapply(by_s, function(ix) dplyr::lag(v[ix], .PCLV_CORE_LAG)), df$subject)
+  lagv <- function(v) unsplit(
+    lapply(by_s, function(ix) dplyr::lag(v[ix], .PCLV_CORE_LAG)),
+    df$subject
+  )
 
-  lib <- if ("libsize" %in% names(df)) df$libsize else NA_real_
+  # Preserve the historical lib-mode fallback (invalid/missing library size -> 1).
+  lib <- if ("libsize" %in% names(df)) as.numeric(df$libsize) else rep(1, nrow(df))
+  lib[!is.finite(lib) | lib <= 0] <- 1
 
-  subj_minpos <- unsplit(lapply(by_s, function(ix) {
-    base <- if (minpos_base == "ij") {
-      c(df$xi_raw[ix][df$xi_raw[ix] > 0], df$xj_raw[ix][df$xj_raw[ix] > 0])
-    } else {
-      c(df$xi_raw[ix][df$xi_raw[ix] > 0],
-        df$xj_raw[ix][df$xj_raw[ix] > 0],
-        df$rest_raw[ix][df$rest_raw[ix] > 0])
-    }
-    if (length(base)) min(base) else NA_real_
-  }), df$subject)
-
-  trip <- t(vapply(
-    seq_len(nrow(df)),
-    function(ii)
-      .make_triplet_row(ii, df, subj_minpos, lib,
-                        zero_mode_alr, minpos_alpha, eps_fixed,
-                        lib_eps_c, rest_floor_frac, minpos_base),
-    numeric(4)
-  ))
-  colnames(trip) <- c("xi","xj","xr","eps_star")
-  alr <- .pair_alr(trip, alr_cap)
-  alr_i <- alr$i
-  alr_j <- alr$j
+  alr_mode <- if (is.finite(alr_cap)) "fixed" else "dynamic"
+  alr_limit <- if (is.finite(alr_cap)) alr_cap else 8
+  trip <- tryCatch(
+    .triplet_alr_transform(
+      xi_raw = df$xi_raw,
+      xj_raw = df$xj_raw,
+      rest_raw = df$rest_raw,
+      subject = df$subject,
+      lib = lib,
+      zero_mode_alr = zero_mode_alr,
+      minpos_alpha = minpos_alpha,
+      minpos_base = minpos_base,
+      eps_fixed = eps_fixed,
+      lib_eps_c = lib_eps_c,
+      rest_floor_frac = rest_floor_frac,
+      alr_cap_mode = alr_mode,
+      alr_cap = alr_limit
+    ),
+    error = function(e) .pclv_failure(
+      "preprocessing", "shared_triplet_transform_failed",
+      list(message = conditionMessage(e))
+    )
+  )
+  if (.is_pclv_failure(trip)) return(trip)
+  alr_i <- trip$alr_i
+  alr_j <- trip$alr_j
 
   smooth_edf_mean <- NA_real_
   if (smooth_scale == "alr") {
@@ -1535,8 +1484,8 @@
 #' @noRd
 #' @keywords internal
 .pf_inits_from_draws <- function(pf_fit, mod, chains = 4L,
-                                 prefer = c("r0","a_ii","a_ij","sigma","sd_ou","phi",
-                                            "lambda","sigma_ou","tau_r","nu")) {
+                                 prefer = c("r0","sd_r0","a_ii","a_ij",
+                                            "sigma","sd_ou","phi","log_nu_minus_two")) {
   # 0) 모델 파라미터 집합
   model_params <- try(mod$variables()$parameters, silent = TRUE)
   if (inherits(model_params, "try-error") || is.null(model_params)) {
@@ -1577,6 +1526,66 @@
   ok <- all(vapply(out, function(li) is.list(li) && length(li) > 0L && length(names(li)) > 0L, logical(1)))
   if (!ok) return(NULL)
   out
+}
+
+#' Build Pathfinder-based NUTS initial values from one fit's own data
+#'
+#' The helper is deliberately data-local: callers must pass only the data that
+#' belong to the fit being initialized. In particular, K-fold callers pass the
+#' training fold only, preventing held-out subjects from influencing
+#' initialization. The same helper is used by the main fit and every fold so
+#' the canonical initialization policy is symmetric.
+#'
+#' @noRd
+#' @keywords internal
+.pathfinder_inits_for_data <- function(mod, stan_list, seed, chains,
+                                       pf_num_paths, pf_draws,
+                                       pf_history_size, pf_max_lbfgs_iters,
+                                       pf_psis_resample,
+                                       silent_sampler = TRUE,
+                                       output_basename = "glv_pf") {
+  pf_dir <- tempfile(pattern = "glvpf_", tmpdir = tempdir())
+  dir.create(pf_dir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(if (dir.exists(pf_dir))
+    unlink(pf_dir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  pf_fit <- tryCatch(
+    mod$pathfinder(
+      data = stan_list,
+      seed = as.integer(seed),
+      init = 0.05,
+      num_paths = pf_num_paths,
+      num_threads = 1L,
+      draws = pf_draws,
+      history_size = pf_history_size,
+      max_lbfgs_iters = pf_max_lbfgs_iters,
+      psis_resample = pf_psis_resample,
+      show_messages = !silent_sampler,
+      output_dir = pf_dir,
+      output_basename = output_basename
+    ),
+    error = function(e) .pclv_failure(
+      "initialization", "pathfinder_failed",
+      list(message = conditionMessage(e))
+    )
+  )
+
+  if (.is_pclv_failure(pf_fit)) {
+    return(list(status = "failed", init = NULL, failure = pf_fit))
+  }
+
+  pf_inits <- .pf_inits_from_draws(pf_fit, mod, chains = chains)
+  if (is.null(pf_inits)) {
+    return(list(
+      status = "failed",
+      init = NULL,
+      failure = .pclv_failure(
+        "initialization", "pathfinder_draws_unusable", list()
+      )
+    ))
+  }
+
+  list(status = "success", init = pf_inits, failure = NULL)
 }
 
 #' Strict wrapper for \code{smooth.spline()} without scientific fallbacks
@@ -1678,21 +1687,6 @@
   # 안전 기본값 헬퍼
   .or <- function(x, y) if (is.null(x)) y else x
 
-  # 안전 init
-  .init_safe <- function(stan_list, mod) {
-    function(chain_id) {
-      lst <- list()
-      params <- try(names(mod$variables()$parameters), silent = TRUE)
-      if (inherits(params, "try-error") || is.null(params)) params <- character(0)
-      add <- function(n, v) if (n %in% params) lst[[n]] <<- v
-
-      add("r0", 0); add("a_ii", 0); add("a_ij", 0)
-      add("sigma", 0.20); add("sd_ou", 0.40); add("phi", 0.80)
-      add("log_nu_minus_two", log(3))
-
-      lst
-    }
-  }
   # 재시도 필요 여부 판단 (EBFMI + div + treedepth)
   .needs_retry <- function(diag, fit = NULL, thr = 0.30) {
     low_eb <- is.finite(diag$ebfmi_min) && (diag$ebfmi_min < thr)
@@ -2295,7 +2289,7 @@
   )
   if (!is.null(time_failure)) return(time_failure)
 
-  required_draws <- c("r0", "a_ii", "a_ij", "sigma")
+  required_draws <- c("r0", "a_ii", "a_ij", "sigma", "sd_r0")
   if (!all(required_draws %in% names(draws_df))) {
     return(.pclv_failure(
       "elpd_scoring", "missing_predictive_draws",
@@ -2305,7 +2299,8 @@
   nu_failure <- .validate_nu_draws(draws_df, "elpd_scoring")
   if (!is.null(nu_failure)) return(nu_failure)
   core_draw_values <- unlist(draws_df[required_draws], use.names = FALSE)
-  if (any(!is.finite(core_draw_values)) || any(draws_df$sigma <= 0)) {
+  if (any(!is.finite(core_draw_values)) ||
+      any(draws_df$sigma <= 0) || any(draws_df$sd_r0 < 0)) {
     return(.pclv_failure("elpd_scoring", "invalid_predictive_draws", list()))
   }
 
@@ -2313,7 +2308,6 @@
   have_sigma_ou <- all(c("sigma_ou", "lambda") %in% names(draws_df))
   have_lambda <- "lambda" %in% names(draws_df)
   have_phi <- "phi" %in% names(draws_df)
-  have_tau_r <- "tau_r" %in% names(draws_df)
 
   if (!have_sdou && !have_sigma_ou) {
     return(.pclv_failure(
@@ -2335,8 +2329,7 @@
     (have_lambda && any(!is.finite(draws_df$lambda) | draws_df$lambda <= 0)) ||
     (!have_lambda && have_phi && any(
       !is.finite(draws_df$phi) | draws_df$phi <= 0 | draws_df$phi >= 1
-    )) ||
-    (have_tau_r && any(!is.finite(draws_df$tau_r) | draws_df$tau_r < 0))
+    ))
   if (invalid_ou) {
     return(.pclv_failure("elpd_scoring", "invalid_ou_draws", list()))
   }
@@ -2451,7 +2444,11 @@
   }
   stationary_variance <- pmax(stationary_variance, 0)
 
-  use_random_intercept <- have_tau_r && any(draws_df$tau_r > 0)
+  # Subject-level K-fold predicts entirely new subjects. The fitted
+  # hierarchical model therefore requires integrating a new intercept
+  # b_new ~ Normal(0, sd_r0^2) for every posterior draw. Never substitute
+  # the historical tau_r compatibility quantity (which was fixed to zero).
+  use_random_intercept <- TRUE
   subjects <- unique(as.character(pair_in$subject))
   loglik_full <- matrix(
     NA_real_, nrow = D, ncol = length(subjects),
@@ -2477,7 +2474,7 @@
       mean_ou <- rep(0, D)
       mean_intercept <- rep(0, D)
       var_ou <- stationary_variance
-      var_intercept <- as.numeric(draws_df$tau_r)^2
+      var_intercept <- as.numeric(draws_df$sd_r0)^2
       cov_ou_intercept <- rep(0, D)
     }
 
@@ -2802,7 +2799,13 @@
                                 sample_args_override = NULL,
                                 freeze_retry_hypers = FALSE,
                                 seed_override = NULL,
-                                min_pairs = 4L) {
+                                min_pairs = 4L,
+                                use_pathfinder_init = FALSE,
+                                pf_num_paths = 8L,
+                                pf_draws = 1000L,
+                                pf_history_size = 50L,
+                                pf_max_lbfgs_iters = 200L,
+                                pf_psis_resample = TRUE) {
   pts <- .build_train_test(
     pair_in,
     train_subjects,
@@ -2825,7 +2828,7 @@
   sl$dt  <- pts$dt_train
 
 
-  # ★ 샘플러 제어는 공유하되, 적응 산출물(step_size/metric)은 폴드마다 재적응
+  # Canonical sampler policy is shared, while every fold adapts from its own training data.
   sa <- if (is.null(sample_args_override))
     sample_args_base
   else
@@ -2837,11 +2840,8 @@
   sa$step_size   <- NULL
   sa$inv_metric  <- NULL
   sa$metric_file <- NULL
-  # ★ 풀런에서 넘어온 init(closure) 오염 차단: 폴드 데이터에 맞춰 재생성 또는 제거
-  if (!(is.numeric(sa$init) &&
-        length(sa$init) == 1L && is.finite(sa$init))) {
-    sa$init <- NULL
-  }
+  # `sa$init` comes from the immutable pre-main canonical policy. It is not
+  # derived from full-data adaptation or diagnostics, so preserve it unchanged.
 
   # Pair-level parallelism is the only concurrency layer. Fold fits retain the
   # requested number of chains for diagnostics, but execute those chains
@@ -2862,6 +2862,28 @@
 
   sa$parallel_chains <- 1L
 
+  # Apply the same initialization policy as the main fit, but using training
+  # data only. A fold never receives Pathfinder draws, adapted metrics, step
+  # sizes, or retry-selected hyperparameters from the full-data fit.
+  if (isTRUE(use_pathfinder_init)) {
+    pf_fold <- .pathfinder_inits_for_data(
+      mod = mod,
+      stan_list = sl,
+      seed = if (is.null(seed_override)) sa$seed else seed_override,
+      chains = sa$chains,
+      pf_num_paths = pf_num_paths,
+      pf_draws = pf_draws,
+      pf_history_size = pf_history_size,
+      pf_max_lbfgs_iters = pf_max_lbfgs_iters,
+      pf_psis_resample = pf_psis_resample,
+      silent_sampler = silent_sampler,
+      output_basename = "glv_pf_kfold"
+    )
+    if (identical(pf_fold$status, "success")) {
+      sa$init <- pf_fold$init
+    }
+  }
+
   tryfit <- .sample_with_retry(
     mod        = mod,
     base_args  = sa,
@@ -2870,7 +2892,7 @@
     ebfmi_thresh = 0.30,
     silent_sampler = silent_sampler,
     tag = "kfold",
-    freeze_retry_hypers = freeze_retry_hypers   # ★ 하이퍼를 바꾸지 않는 리트라이
+    freeze_retry_hypers = freeze_retry_hypers
   )
   fit <- tryfit$fit
   # Register cleanup before handling a structured diagnostic failure because
@@ -2879,9 +2901,6 @@
     on.exit(.cleanup_cmdstan_fit_output(fit), add = TRUE)
   }
   if (!is.null(tryfit$failure)) return(tryfit$failure)
-
-  # 방어적 동일성 확인(디버그용; 필요시 주석 처리)
-  fa <- tryfit$final_args
 
   d <- .safe_draws_df(fit)
   dg <- .add_convergence_diag(tryfit$diag, d)
@@ -2961,9 +2980,15 @@
                            max_retries = 3,
                            min_pairs = 4,
                            freeze_retry_hypers = FALSE,
+                           use_pathfinder_init = FALSE,
+                           pf_num_paths = 8L,
+                           pf_draws = 1000L,
+                           pf_history_size = 50L,
+                           pf_max_lbfgs_iters = 200L,
+                           pf_psis_resample = TRUE,
                            progress = "none",
                            n_workers_kfold = NULL,
-                           has_progressr = NULL) { # retry computational settings remain fixed within folds
+                           has_progressr = NULL) {
   # These two retired internal arguments are accepted as no-ops only so the
   # existing characterization tests can call this private helper unchanged.
   # They never affect scheduling; folds are always sequential in the owning
@@ -3030,7 +3055,13 @@
       max_retries = max_retries,
       freeze_retry_hypers = freeze_retry_hypers,
       seed_override = task$seed,
-      min_pairs = min_pairs
+      min_pairs = min_pairs,
+      use_pathfinder_init = use_pathfinder_init,
+      pf_num_paths = pf_num_paths,
+      pf_draws = pf_draws,
+      pf_history_size = pf_history_size,
+      pf_max_lbfgs_iters = pf_max_lbfgs_iters,
+      pf_psis_resample = pf_psis_resample
     )
     if (is.null(result)) {
       result <- .pclv_failure("kfold_scoring", "fold_evaluation_failed",
@@ -3435,6 +3466,11 @@
       100
   )
 
+  # Immutable canonical sampler policy for predictive folds. This snapshot is
+  # taken before main-data Pathfinder initialization and before any diagnostic
+  # retry can alter adapt_delta, metric, warmup, step size, or seed.
+  canonical_base_args <- base_args
+
   # ----(NEW) Pathfinder로 좋은 초기값 만들기----
   # CmdStanR는 pathfinder fit을 init에 바로 받을 수 있음.
   # 체인 수보다 PF draw가 적으면 자동으로(with replacement) 뽑아 씀.
@@ -3446,36 +3482,25 @@
     actual = if (is.null(init)) "default" else if (is.numeric(init)) "scalar" else if (is.function(init)) "function" else "list"
   )
   if (use_pathfinder_init) {
-    pf_dir <- tempfile(pattern = "glvpf_", tmpdir = tempdir())
-    dir.create(pf_dir, recursive = TRUE, showWarnings = FALSE)
-    on.exit(if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE), add = TRUE)
-    pf_fit <- tryCatch(mod$pathfinder(
-      data = stan_list, seed = seed_main, init = 0.05,
-      num_paths = pf_num_paths, num_threads = 1L, draws = pf_draws,
-      history_size = pf_history_size, max_lbfgs_iters = pf_max_lbfgs_iters,
-      psis_resample = pf_psis_resample, show_messages = !silent_sampler,
-      output_dir = pf_dir, output_basename = paste0("glv_pf_", target, "_", partner)
-    ), error = function(e) .pclv_failure("initialization", "pathfinder_failed",
-                                         list(message = conditionMessage(e))))
-    if (.is_pclv_failure(pf_fit)) {
-      initialization_provenance$pathfinder_status <- "failed"
-      initialization_provenance$pathfinder_failure <- pf_fit
-    } else {
-      pf_inits <- .pf_inits_from_draws(pf_fit, mod, chains = chains)
-      if (is.null(pf_inits)) {
-        initialization_provenance$pathfinder_status <- "failed"
-        initialization_provenance$pathfinder_failure <- .pclv_failure(
-          "initialization", "pathfinder_draws_unusable", list()
-        )
-      } else {
-        base_args$init <- pf_inits
-        initialization_provenance$pathfinder_status <- "success"
-        initialization_provenance$actual <- "pathfinder"
-        # Pathfinder supplies initialization only. Preserve the caller's
-        # requested warmup contract exactly.
-      }
+    pf_main <- .pathfinder_inits_for_data(
+      mod = mod,
+      stan_list = stan_list,
+      seed = seed_main,
+      chains = chains,
+      pf_num_paths = pf_num_paths,
+      pf_draws = pf_draws,
+      pf_history_size = pf_history_size,
+      pf_max_lbfgs_iters = pf_max_lbfgs_iters,
+      pf_psis_resample = pf_psis_resample,
+      silent_sampler = silent_sampler,
+      output_basename = "glv_pf_main"
+    )
+    initialization_provenance$pathfinder_status <- pf_main$status
+    initialization_provenance$pathfinder_failure <- pf_main$failure
+    if (identical(pf_main$status, "success")) {
+      base_args$init <- pf_main$init
+      initialization_provenance$actual <- "pathfinder"
     }
-    if (dir.exists(pf_dir)) unlink(pf_dir, recursive = TRUE, force = TRUE)
   }
   # 4) 공통 래퍼로 샘플 + 리트라이 ----------------------------------------------
   tag_lbl  <- sprintf("%s\u2192%s main", partner, target)
@@ -3509,13 +3534,11 @@
   diag       <- res_try$diag
   n_retries  <- res_try$n_retries
   fit_failed <- res_try$fit_failed
-  final_args_main <- res_try$final_args
-
   # 5) 드로우 요약 ---------------------------------------------------------------
   if (quiet) {
     d <- suppressWarnings(.safe_draws_df(fit_full))
   } else {
-    d <- .safe_draws_df(fit_full)  # a_ij, a_ii, r0, tau_r, sigma, sigma_ou, lambda, ...
+    d <- .safe_draws_df(fit_full)
   }
   diag <- .add_convergence_diag(diag, d)
   posterior_summary <- .build_posterior_summary_bundle(d, diag)
@@ -3555,13 +3578,21 @@
   # Predictive evaluation is a separate downstream phase.
   predictive_context <- list(
     mod = mod, stan_list = stan_list, pair_in = pair_in,
-    sample_args = final_args_main,
-    # Split construction is shared across pair directions. The sampler seed
-    # remains direction-specific inside sample_args.
+    # K-fold starts from the canonical pre-main policy, never from the
+    # full-data fit's final/retry-selected sampler arguments.
+    sample_args = canonical_base_args,
+    # Split construction is shared across pair directions. Fold sampler seeds
+    # derive from the original direction seed, not from the number of retries
+    # required by the full-data fit.
     split_seed = as.integer(kfold_seed),
-    sampling_seed = if (is.null(final_args_main$seed)) seed_main else final_args_main$seed,
+    sampling_seed = seed_main,
     silent_sampler = silent_sampler,
     max_retries = max_retries, min_pairs = min_pairs, K = kfold_K, R = kfold_R,
+    use_pathfinder_init = use_pathfinder_init,
+    pf_num_paths = pf_num_paths, pf_draws = pf_draws,
+    pf_history_size = pf_history_size,
+    pf_max_lbfgs_iters = pf_max_lbfgs_iters,
+    pf_psis_resample = pf_psis_resample,
     pair_tag = pair_tag, progress = progress_local
   )
   kfold <- NULL
@@ -3728,6 +3759,39 @@
   )
 }
 
+
+# Apply one stable K-fold failure schema regardless of where predictive
+# evaluation failed. Keeping this in one helper prevents schema drift between
+# execution errors and malformed-result errors.
+.set_kfold_failure_result <- function(main_result, failure, predictive) {
+  main_result$kfold <- NULL
+  main_result$kfold_mean <- NA_real_
+  main_result$kfold_method <- NA_character_
+  main_result$kfold_outer_rounds <- 1L
+  main_result$kfold_failed <- TRUE
+  main_result$kfold_n_folds_ok <- 0L
+  main_result$kfold_n_folds_fail <- NA_integer_
+  main_result$kfold_subject <- list(NULL)
+  main_result$kfold_subject_ppd <- list(NULL)
+  main_result$kfold_subject_ids <- list(NULL)
+  main_result$kfold_subject_counts <- list(NULL)
+  main_result$kfold_subject_success <- list(NULL)
+  main_result$kfold_subject_fail <- list(NULL)
+  main_result$kfold_success_total <- 0L
+  main_result$kfold_failures <- list(failure)
+  main_result$kfold_splits <- list(NULL)
+  main_result$kfold_seed_used <- as.integer(predictive$split_seed)
+  main_result$kfold_K <- as.integer(predictive$K)
+  main_result$kfold_R <- as.integer(predictive$R)
+  main_result$kfold_sd <- NA_real_
+  main_result$kfold_se <- NA_real_
+  main_result$kfold_n_subjects <- 0L
+  main_result$kfold_retry_total <- NA_integer_
+  main_result$kfold_retry_mean <- NA_real_
+  main_result$kfold_nu_fold_means <- list(NULL)
+  main_result
+}
+
 .add_predictive_evaluation <- function(main_result) {
   if (.is_pclv_failure(main_result)) return(main_result)
 
@@ -3772,8 +3836,16 @@
       seed = predictive$split_seed,
       silent_sampler = predictive$silent_sampler,
       max_retries = predictive$max_retries,
-      freeze_retry_hypers = TRUE,
+      # Retry decisions are made independently from each training fold's own
+      # diagnostics under the same canonical retry policy as the main fit.
+      freeze_retry_hypers = FALSE,
       min_pairs = predictive$min_pairs,
+      use_pathfinder_init = predictive$use_pathfinder_init,
+      pf_num_paths = predictive$pf_num_paths,
+      pf_draws = predictive$pf_draws,
+      pf_history_size = predictive$pf_history_size,
+      pf_max_lbfgs_iters = predictive$pf_max_lbfgs_iters,
+      pf_psis_resample = predictive$pf_psis_resample,
       progress = predictive$progress
     ),
     error = function(e) {
@@ -3801,35 +3873,7 @@
       ))
     }
 
-    # Preserve a stable directed-result schema even when the entire predictive
-    # phase fails before a normal repeated-K-fold payload can be assembled.
-    main_result$kfold <- NULL
-    main_result$kfold_mean <- NA_real_
-    main_result$kfold_method <- NA_character_
-    main_result$kfold_outer_rounds <- 1L
-    main_result$kfold_failed <- TRUE
-    main_result$kfold_n_folds_ok <- 0L
-    main_result$kfold_n_folds_fail <- NA_integer_
-    main_result$kfold_subject <- list(NULL)
-    main_result$kfold_subject_ppd <- list(NULL)
-    main_result$kfold_subject_ids <- list(NULL)
-    main_result$kfold_subject_counts <- list(NULL)
-    main_result$kfold_subject_success <- list(NULL)
-    main_result$kfold_subject_fail <- list(NULL)
-    main_result$kfold_success_total <- 0L
-    main_result$kfold_failures <- list(kfold)
-    main_result$kfold_splits <- list(NULL)
-    main_result$kfold_seed_used <- as.integer(predictive$split_seed)
-    main_result$kfold_K <- as.integer(predictive$K)
-    main_result$kfold_R <- as.integer(predictive$R)
-    main_result$kfold_sd <- NA_real_
-    main_result$kfold_se <- NA_real_
-    main_result$kfold_n_subjects <- 0L
-    main_result$kfold_retry_total <- NA_integer_
-    main_result$kfold_retry_mean <- NA_real_
-    main_result$kfold_nu_fold_means <- list(NULL)
-
-    return(main_result)
+    return(.set_kfold_failure_result(main_result, kfold, predictive))
   }
 
   if (!is.list(kfold) ||
@@ -3843,33 +3887,7 @@
       list(pair_tag = predictive$pair_tag)
     )
 
-    main_result$kfold <- NULL
-    main_result$kfold_mean <- NA_real_
-    main_result$kfold_method <- NA_character_
-    main_result$kfold_outer_rounds <- 1L
-    main_result$kfold_failed <- TRUE
-    main_result$kfold_n_folds_ok <- 0L
-    main_result$kfold_n_folds_fail <- NA_integer_
-    main_result$kfold_subject <- list(NULL)
-    main_result$kfold_subject_ppd <- list(NULL)
-    main_result$kfold_subject_ids <- list(NULL)
-    main_result$kfold_subject_counts <- list(NULL)
-    main_result$kfold_subject_success <- list(NULL)
-    main_result$kfold_subject_fail <- list(NULL)
-    main_result$kfold_success_total <- 0L
-    main_result$kfold_failures <- list(failure)
-    main_result$kfold_splits <- list(NULL)
-    main_result$kfold_seed_used <- as.integer(predictive$split_seed)
-    main_result$kfold_K <- as.integer(predictive$K)
-    main_result$kfold_R <- as.integer(predictive$R)
-    main_result$kfold_sd <- NA_real_
-    main_result$kfold_se <- NA_real_
-    main_result$kfold_n_subjects <- 0L
-    main_result$kfold_retry_total <- NA_integer_
-    main_result$kfold_retry_mean <- NA_real_
-    main_result$kfold_nu_fold_means <- list(NULL)
-
-    return(main_result)
+    return(.set_kfold_failure_result(main_result, failure, predictive))
   }
 
   if (!identical(predictive$progress, "none")) {
@@ -4039,17 +4057,6 @@
 }
 
 
-#' Build a two-column (subject, value) tibble from named vectors
-#'
-#' @param keys Character vector of subject IDs.
-#' @param vals Numeric vector of values aligned to \code{keys}.
-#' @return A tibble with \code{subject} and \code{elpd} (or \code{NULL}).
-#' @noRd
-#' @keywords internal
-.as_named_frame <- function(keys, vals) {
-  if (is.null(vals) || length(vals) == 0) return(NULL)
-  tibble::tibble(subject = as.character(keys), elpd = as.numeric(vals))
-}
 
 
 #' Build a three-column (subject, elpd, elpd_ppd) tibble

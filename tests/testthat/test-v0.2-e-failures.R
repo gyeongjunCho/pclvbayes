@@ -40,7 +40,7 @@ test_that("retry exhaustion returns a structured computational failure", {
 })
 
 test_that("programmer invariants still stop immediately", {
-  draws <- data.frame(r0 = 0, a_ii = 0, a_ij = 0, sigma = 1, nu = 5)
+  draws <- data.frame(r0 = 0, a_ii = 0, a_ij = 0, sigma = 1, sd_r0 = 0, nu = 5)
   held <- data.frame(subject = "A", time = 0, y = 0, xi = 0, xj = 0)
   missing_ou <- pclvbayes:::.proj_loglik_subject(draws, held)
   expect_s3_class(missing_ou, "pclv_failure")
