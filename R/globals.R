@@ -1,16 +1,15 @@
-#' @keywords internal
-NULL
-
-utils::globalVariables(c(
-  "Sample","subject","time","xi","xj","xi_next","time_next",
-  "n_pairs_ij","a_ij_mean","a_ij_sd","a_ij_q2.5","a_ij_q97.5","p_ij","q_ij",
-  "rhat_ij","essb_ij","esst_ij","div_ij","tdhit_ij","ok_diag_ij","keep_ij_final",
-  "n_pairs_ji","a_ji_mean","a_ji_sd","a_ji_q2.5","a_ji_q97.5","p_ji","q_ji",
-  "rhat_ji","essb_ji","esst_ji","div_ji","tdhit_ji","ok_diag_ji","keep_ji_final",
-  "xi_lag","xj_lag","alr_i_lag","time_lag","dt","dt_min","dt_adj",
-  "xi_raw","xj_raw","rest_raw",
-  ".data","xj_next","rest_now","rest_next","alr_i_next","alr_i_now","y",
-  "i","j","k",
-  "q_bayes","p_sign2","r_pooled",
-  "taxa_vec","progress","kfold_K","kfold_R"
-))
+# Global variable registration intentionally removed during active development.
+#
+# This file previously contained utils::globalVariables(...) declarations
+# used to suppress R CMD check notes caused by NSE / tidy-eval expressions.
+#
+# During v0.2.x-v0.4.x development, internal variable names and pipelines
+# are still changing, so stale registrations are not maintained.
+#
+# Before a release-quality R CMD check:
+#   1. run R CMD check on the built source tarball,
+#   2. inspect any "no visible binding for global variable" notes,
+#   3. prefer explicit .data$column / tidy-eval references where practical,
+#   4. register only the remaining unavoidable NSE variables.
+#
+# Do not add runtime state or scientific defaults here.

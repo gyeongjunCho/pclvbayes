@@ -5,13 +5,20 @@
 #' for directed cross effects or pair-context self effects.
 #'
 #' Directed cross coefficients are pair-to-rest dynamic coefficients and are
-#' not generally absolute direct-gLV effects. Posterior sign support and MCMC
-#' diagnostics are the primary edge evidence. Pair-specific repeated K-fold
-#' ELPD may be retained as supporting predictive evidence in the fit object.
+#' not generally absolute direct-gLV effects. Posterior sign support, MCMC
+#' diagnostics, and pair-specific held-out predictive evidence are retained as
+#' distinct local evidence fingerprints.
 #'
-#' Cross-pair model weights are not returned because distinct pair-to-rest
-#' models generally predict different transformed outcomes and therefore do
-#' not form a common-outcome stacking or pseudo-BMA model set.
+#' When \code{df$elpd_pointwise_cross} is available, repeated-K-fold ELPD is
+#' summarized per directed pair and joined to the cross table. These ELPD
+#' summaries describe predictive adequacy for that pair-specific transformed
+#' outcome. They are not cross-edge model probabilities or common-outcome
+#' model weights.
+#'
+#' Cross-pair stacking, pseudo-BMA, and pseudo-BMA+ weights are deliberately
+#' not returned because distinct pair-to-rest models generally predict
+#' different transformed outcomes and therefore do not form a common-outcome
+#' model set.
 #'
 #' @details
 #' Diagnostic criteria depend on \code{diag_mode}:
@@ -28,6 +35,10 @@
 #' are marked \code{"diagnostics_unavailable"} unless a historical
 #' \code{direction_ok_*} field explicitly establishes their status.
 #'
+#' Predictive evidence is optional. If an edge has no valid predictive score,
+#' predictive summary fields remain missing and \code{predictive_status}
+#' records whether evidence was unavailable, partial, or invalid/failed.
+#'
 #' Self coefficients are pair-context estimands. The returned self table keeps
 #' both \code{taxon} and \code{partner}, preventing unrelated pair-specific
 #' self estimates and diagnostics from being joined by taxon alone.
@@ -38,14 +49,17 @@
 #' last.
 #'
 #' @param df A list returned by \code{fit_pclv_bayes()} containing
-#'   \code{$cross}, \code{$self}, and \code{$raw}.
+#'   \code{$cross}, \code{$self}, and \code{$raw}. It may additionally
+#'   contain \code{$elpd_pointwise_cross}.
 #' @param alpha Optional threshold for Bayes-FDR/LFSR. When supplied, adds
 #'   \code{pass_bayes_fdr}.
 #' @param diag_mode Either \code{"moderate"} or \code{"strict"}.
 #' @param interaction One of \code{"cross"} or \code{"self"}.
 #'
 #' @return A list containing the requested \code{$cross} or \code{$self}
-#'   summary table. The self table includes \code{taxon} and \code{partner}.
+#'   summary table. The cross table includes pair-specific predictive
+#'   fingerprint fields when available. The self table includes \code{taxon}
+#'   and \code{partner}.
 #'
 #' @export
 summarize_bayes_pclv <- function(df,
@@ -245,6 +259,76 @@ summarize_bayes_pclv <- function(df,
       )
     }
 
+    # Pair-specific predictive evidence is summarized independently of the
+    # diagnostic gate. This preserves the predictive fingerprint even when a
+    # direction later fails MCMC reportability.
+    pred_cross <- .summarize_elpd_cross(df)
+
+    if (nrow(pred_cross)) {
+      pred_key <- paste(pred_cross$from, pred_cross$to, sep = "\r")
+      if (anyDuplicated(pred_key)) {
+        stop(
+          "Pair-specific predictive evidence contains duplicate directed identities."
+        )
+      }
+
+      cross_merged <- cross_merged |>
+        dplyr::left_join(
+          pred_cross,
+          by = c("from", "to")
+        )
+
+      if (nrow(cross_merged) != n_cross_before) {
+        stop(
+          "Predictive-evidence join changed the row count; directed identities are not one-to-one."
+        )
+      }
+    }
+
+    # Typed defaults keep the public schema stable when predictive evidence is
+    # globally absent or absent for a particular edge.
+    predictive_numeric <- c(
+      "elpd_total",
+      "elpd_per_test",
+      "elpd_subject_mean",
+      "elpd_subject_sd",
+      "elpd_ppd_mean",
+      "elpd_split_sd",
+      "n_test_total",
+      "predictive_success_fraction"
+    )
+    predictive_integer <- c(
+      "n_predictive_subjects",
+      "n_predictive_rows",
+      "n_successful_splits"
+    )
+
+    for (nm in predictive_numeric) {
+      if (!nm %in% names(cross_merged)) {
+        cross_merged[[nm]] <- NA_real_
+      }
+    }
+    for (nm in predictive_integer) {
+      if (!nm %in% names(cross_merged)) {
+        cross_merged[[nm]] <- NA_integer_
+      }
+    }
+    if (!"predictive_available" %in% names(cross_merged)) {
+      cross_merged$predictive_available <- FALSE
+    }
+    if (!"predictive_status" %in% names(cross_merged)) {
+      cross_merged$predictive_status <- "predictive_unavailable"
+    }
+
+    cross_merged$predictive_available <- dplyr::coalesce(
+      as.logical(cross_merged$predictive_available),
+      FALSE
+    )
+    cross_merged$predictive_status <- dplyr::coalesce(
+      as.character(cross_merged$predictive_status),
+      "predictive_unavailable"
+    )
+
     cross_sum <- cross_merged |>
       dplyr::mutate(
         diagnostic_class = dplyr::coalesce(
@@ -295,7 +379,20 @@ summarize_bayes_pclv <- function(df,
         ebfmi_min = .data$ebfmi_min,
         diagnostic_class = .data$diagnostic_class,
         sampler_diag_ok = .data$sampler_diag_ok,
-        diag_ok = .data$diag_ok
+        diag_ok = .data$diag_ok,
+        elpd_total = .data$elpd_total,
+        elpd_per_test = .data$elpd_per_test,
+        elpd_subject_mean = .data$elpd_subject_mean,
+        elpd_subject_sd = .data$elpd_subject_sd,
+        elpd_ppd_mean = .data$elpd_ppd_mean,
+        elpd_split_sd = .data$elpd_split_sd,
+        n_test_total = .data$n_test_total,
+        n_predictive_subjects = .data$n_predictive_subjects,
+        n_predictive_rows = .data$n_predictive_rows,
+        n_successful_splits = .data$n_successful_splits,
+        predictive_success_fraction = .data$predictive_success_fraction,
+        predictive_available = .data$predictive_available,
+        predictive_status = .data$predictive_status
       )
 
     if (!is.null(alpha)) {
