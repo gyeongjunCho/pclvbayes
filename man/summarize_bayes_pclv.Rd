@@ -13,10 +13,12 @@ summarize_bayes_pclv(
 }
 \arguments{
 \item{df}{A list returned by \code{fit_pclv_bayes()} containing
-\code{$cross}, \code{$self}, and \code{$raw}.}
+\code{$cross}, \code{$self}, and \code{$raw}. It may additionally
+contain \code{$elpd_pointwise_cross}.}
 
-\item{alpha}{Optional threshold for Bayes-FDR/LFSR. When supplied, adds
-\code{pass_bayes_fdr}.}
+\item{alpha}{Optional LFSR threshold in \code{[0, 0.5]}. When supplied,
+adds \code{pass_lfsr}. The legacy \code{pass_bayes_fdr} alias is retained
+temporarily for backward compatibility.}
 
 \item{diag_mode}{Either \code{"moderate"} or \code{"strict"}.}
 
@@ -24,20 +26,29 @@ summarize_bayes_pclv(
 }
 \value{
 A list containing the requested \code{$cross} or \code{$self}
-summary table. The self table includes \code{taxon} and \code{partner}.
+summary table. The cross table includes pair-specific predictive
+fingerprint fields when available. The self table includes \code{taxon}
+and \code{partner}.
 }
 \description{
 Given the result list from \code{fit_pclv_bayes()}, returns a summary table
 for directed cross effects or pair-context self effects.
 
 Directed cross coefficients are pair-to-rest dynamic coefficients and are
-not generally absolute direct-gLV effects. Posterior sign support and MCMC
-diagnostics are the primary edge evidence. Pair-specific repeated K-fold
-ELPD may be retained as supporting predictive evidence in the fit object.
+not generally absolute direct-gLV effects. Posterior sign support, MCMC
+diagnostics, and pair-specific held-out predictive evidence are retained as
+distinct local evidence fingerprints.
 
-Cross-pair model weights are not returned because distinct pair-to-rest
-models generally predict different transformed outcomes and therefore do
-not form a common-outcome stacking or pseudo-BMA model set.
+When \code{df$elpd_pointwise_cross} is available, repeated-K-fold ELPD is
+summarized per directed pair and joined to the cross table. These ELPD
+summaries describe predictive adequacy for that pair-specific transformed
+outcome. They are not cross-edge model probabilities or common-outcome
+model weights.
+
+Cross-pair stacking, pseudo-BMA, and pseudo-BMA+ weights are deliberately
+not returned because distinct pair-to-rest models generally predict
+different transformed outcomes and therefore do not form a common-outcome
+model set.
 }
 \details{
 Diagnostic criteria depend on \code{diag_mode}:
@@ -54,12 +65,18 @@ Missing diagnostic values fail closed. Results without a diagnostic class
 are marked \code{"diagnostics_unavailable"} unless a historical
 \code{direction_ok_*} field explicitly establishes their status.
 
+Predictive evidence is optional. If an edge has no valid predictive score,
+predictive summary fields remain missing and \code{predictive_status}
+records whether evidence was unavailable, partial, or invalid/failed.
+
 Self coefficients are pair-context estimands. The returned self table keeps
 both \code{taxon} and \code{partner}, preventing unrelated pair-specific
 self estimates and diagnostics from being joined by taxon alone.
 
 Indeterminate directions remain explicit and are not interpreted as zero.
 Non-finite coefficient means receive a missing sign rather than \code{"0"}.
-Tables are sorted by \code{bayes_FDR} in ascending order with missing values
-last.
+Cross and self summaries keep sampler diagnostics, between-chain direction
+stability, and posterior sign evidence as separate quantities. The local false
+sign rate (LFSR) is reported independently of reportability. Tables are sorted
+with reportable results first and then by increasing \code{lfsr}.
 }

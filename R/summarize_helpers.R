@@ -15,6 +15,72 @@
   pmin(pmax(p_two / 2, 0), 0.5)
 }
 
+#' Reconstruct between-chain directional stability from stored medians
+#'
+#' Returns TRUE when all available chains have finite, non-zero posterior
+#' medians with the same sign. Returns NA when chain information is unavailable.
+#'
+#' @noRd
+#' @keywords internal
+.chain_direction_stable_safe <- function(medians) {
+  x <- suppressWarnings(
+    as.numeric(unlist(medians, use.names = FALSE))
+  )
+
+  if (!length(x) || any(!is.finite(x))) {
+    return(NA)
+  }
+
+  s <- sign(x)
+  if (any(s == 0)) {
+    return(FALSE)
+  }
+
+  length(unique(s)) == 1L
+}
+
+#' Descriptive all-chain posterior sign-confidence flag
+#'
+#' This is not an interaction-identifiability gate. It records whether every
+#' chain puts at least `threshold` posterior mass on one sign. Cross effects
+#' provide separate positive and negative probabilities; self effects may
+#' provide the already-maximized dominant-sign probability.
+#'
+#' @noRd
+#' @keywords internal
+.all_chain_sign_confident_safe <- function(positive = NULL,
+                                            negative = NULL,
+                                            dominant = NULL,
+                                            threshold = 0.95) {
+  if (!is.null(dominant)) {
+    p <- suppressWarnings(
+      as.numeric(unlist(dominant, use.names = FALSE))
+    )
+
+    if (!length(p) || any(!is.finite(p))) {
+      return(NA)
+    }
+
+    return(all(p >= threshold))
+  }
+
+  pp <- suppressWarnings(
+    as.numeric(unlist(positive, use.names = FALSE))
+  )
+  pn <- suppressWarnings(
+    as.numeric(unlist(negative, use.names = FALSE))
+  )
+
+  if (!length(pp) ||
+      length(pp) != length(pn) ||
+      any(!is.finite(pp)) ||
+      any(!is.finite(pn))) {
+    return(NA)
+  }
+
+  all(pmax(pp, pn) >= threshold)
+}
+
 #' Element-wise diagnostic pass/fail predicate used by the public summarizer
 #'
 #' Missing, non-finite, negative, non-integral, or malformed diagnostic counts

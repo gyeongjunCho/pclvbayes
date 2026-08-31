@@ -45,14 +45,17 @@
 #'
 #' Indeterminate directions remain explicit and are not interpreted as zero.
 #' Non-finite coefficient means receive a missing sign rather than \code{"0"}.
-#' Tables are sorted by \code{bayes_FDR} in ascending order with missing values
-#' last.
+#' Cross and self summaries keep sampler diagnostics, between-chain direction
+#' stability, and posterior sign evidence as separate quantities. The local false
+#' sign rate (LFSR) is reported independently of reportability. Tables are sorted
+#' with reportable results first and then by increasing \code{lfsr}.
 #'
 #' @param df A list returned by \code{fit_pclv_bayes()} containing
 #'   \code{$cross}, \code{$self}, and \code{$raw}. It may additionally
 #'   contain \code{$elpd_pointwise_cross}.
-#' @param alpha Optional threshold for Bayes-FDR/LFSR. When supplied, adds
-#'   \code{pass_bayes_fdr}.
+#' @param alpha Optional LFSR threshold in \code{[0, 0.5]}. When supplied,
+#'   adds \code{pass_lfsr}. The legacy \code{pass_bayes_fdr} alias is retained
+#'   temporarily for backward compatibility.
 #' @param diag_mode Either \code{"moderate"} or \code{"strict"}.
 #' @param interaction One of \code{"cross"} or \code{"self"}.
 #'
@@ -81,8 +84,8 @@ summarize_bayes_pclv <- function(df,
         length(alpha) != 1L ||
         !is.finite(alpha) ||
         alpha < 0 ||
-        alpha > 1) {
-      stop("`alpha` must be NULL or a finite scalar in [0, 1].")
+        alpha > 0.5) {
+      stop("`alpha` must be NULL or a finite scalar in [0, 0.5].")
     }
     alpha <- as.numeric(alpha)
   }
@@ -208,6 +211,29 @@ summarize_bayes_pclv <- function(df,
     cross$diagnostic_class <- as.character(cross$diagnostic_class)
   }
 
+  # Chain-level summaries are used to reconstruct the current direction-stability
+  # policy from stored fit objects. Missing list-columns are filled with empty
+  # vectors so historical/test fixtures continue to fail closed rather than error.
+  chain_list_columns <- c(
+    "chain_aij_medians_ij",
+    "chain_aij_medians_ji",
+    "chain_sign_probabilities_ij",
+    "chain_sign_probabilities_ji",
+    "chain_negative_sign_probabilities_ij",
+    "chain_negative_sign_probabilities_ji",
+    "chain_aii_medians_ij",
+    "chain_aii_medians_ji",
+    "chain_aii_sign_probabilities_ij",
+    "chain_aii_sign_probabilities_ji"
+  )
+
+  for (nm in chain_list_columns) {
+    if (!nm %in% names(raw)) {
+      raw[[nm]] <- rep(list(numeric()), nrow(raw))
+    }
+  }
+
+
   cross_diag <- dplyr::bind_rows(
     dplyr::transmute(
       raw,
@@ -220,7 +246,11 @@ summarize_bayes_pclv <- function(df,
       div = .data$div_ij,
       tdhit = .data$tdhit_ij,
       ebfmi_min = .data$ebfmi_min_ij,
-      diagnostic_class_diag = .data$diagnostic_class_ij
+      diagnostic_class_diag = .data$diagnostic_class_ij,
+      chain_medians = .data$chain_aij_medians_ij,
+      chain_positive_probabilities = .data$chain_sign_probabilities_ij,
+      chain_negative_probabilities =
+        .data$chain_negative_sign_probabilities_ij
     ),
     dplyr::transmute(
       raw,
@@ -233,7 +263,11 @@ summarize_bayes_pclv <- function(df,
       div = .data$div_ji,
       tdhit = .data$tdhit_ji,
       ebfmi_min = .data$ebfmi_min_ji,
-      diagnostic_class_diag = .data$diagnostic_class_ji
+      diagnostic_class_diag = .data$diagnostic_class_ji,
+      chain_medians = .data$chain_aij_medians_ji,
+      chain_positive_probabilities = .data$chain_sign_probabilities_ji,
+      chain_negative_probabilities =
+        .data$chain_negative_sign_probabilities_ji
     )
   )
 
@@ -331,7 +365,7 @@ summarize_bayes_pclv <- function(df,
 
     cross_sum <- cross_merged |>
       dplyr::mutate(
-        diagnostic_class = dplyr::coalesce(
+        diagnostic_class_fit = dplyr::coalesce(
           .data$diagnostic_class,
           .data$diagnostic_class_diag,
           "diagnostics_unavailable"
@@ -345,18 +379,68 @@ summarize_bayes_pclv <- function(df,
           .data$ebfmi_min,
           thr = thr
         ),
-        diag_ok =
+        chain_direction_stable = vapply(
+          .data$chain_medians,
+          .chain_direction_stable_safe,
+          logical(1)
+        ),
+        chain_direction_stable = dplyr::coalesce(
+          .data$chain_direction_stable,
+          dplyr::case_when(
+            .data$diagnostic_class_fit %in%
+              c("converged", "interaction_stable_residual_unstable") ~ TRUE,
+            .data$diagnostic_class_fit == "interaction_indeterminate" ~ FALSE,
+            TRUE ~ NA
+          )
+        ),
+        high_sign_confidence = mapply(
+          function(pp, pn) {
+            .all_chain_sign_confident_safe(
+              positive = pp,
+              negative = pn,
+              threshold = 0.95
+            )
+          },
+          .data$chain_positive_probabilities,
+          .data$chain_negative_probabilities,
+          SIMPLIFY = TRUE,
+          USE.NAMES = FALSE
+        ),
+        interaction_reportable =
           .data$sampler_diag_ok &
-          .data$diagnostic_class == "converged",
+          dplyr::coalesce(.data$chain_direction_stable, FALSE),
+        diagnostic_class = dplyr::case_when(
+          !is.na(.data$chain_direction_stable) &
+            !.data$chain_direction_stable ~ "interaction_indeterminate",
+          !.data$sampler_diag_ok ~ "sampler_diagnostics_failed",
+          .data$diagnostic_class_fit ==
+            "interaction_stable_residual_unstable" ~
+            "interaction_stable_residual_unstable",
+          .data$interaction_reportable ~ "converged",
+          TRUE ~ "diagnostics_unavailable"
+        ),
+        # Backward-compatible alias. It now means interaction reportability,
+        # not the old diagnostic_class == 'converged' gate.
+        diag_ok = .data$interaction_reportable,
         a_sign = dplyr::case_when(
           !is.finite(.data$a_mean) ~ NA_character_,
           .data$a_mean > 0 ~ "+",
           .data$a_mean < 0 ~ "-",
           TRUE ~ "0"
         ),
+        lfsr = .lfsr_safe(.data$p_sign2),
+        lfsr_tier = dplyr::case_when(
+          !is.finite(.data$lfsr) ~ NA_character_,
+          .data$lfsr <= 0.05 ~ "stringent",
+          .data$lfsr <= 0.20 ~ "balanced",
+          .data$lfsr <= 0.40 ~ "permissive",
+          TRUE ~ "unsupported"
+        ),
+        # Temporary legacy alias: retain the old behavior of returning NA when
+        # the direction is not reportable.
         bayes_FDR = ifelse(
-          .data$diag_ok,
-          .lfsr_safe(.data$p_sign2),
+          .data$interaction_reportable,
+          .data$lfsr,
           NA_real_
         )
       ) |>
@@ -370,6 +454,8 @@ summarize_bayes_pclv <- function(df,
         a_q2.5 = .data$a_q2.5,
         a_q97.5 = .data$a_q97.5,
         p_sign2 = .data$p_sign2,
+        lfsr = .data$lfsr,
+        lfsr_tier = .data$lfsr_tier,
         bayes_FDR = .data$bayes_FDR,
         rhat = .data$rhat,
         essb = .data$essb,
@@ -378,7 +464,11 @@ summarize_bayes_pclv <- function(df,
         tdhit = .data$tdhit,
         ebfmi_min = .data$ebfmi_min,
         diagnostic_class = .data$diagnostic_class,
+        diagnostic_class_fit = .data$diagnostic_class_fit,
         sampler_diag_ok = .data$sampler_diag_ok,
+        chain_direction_stable = .data$chain_direction_stable,
+        high_sign_confidence = .data$high_sign_confidence,
+        interaction_reportable = .data$interaction_reportable,
         diag_ok = .data$diag_ok,
         elpd_total = .data$elpd_total,
         elpd_per_test = .data$elpd_per_test,
@@ -398,15 +488,19 @@ summarize_bayes_pclv <- function(df,
     if (!is.null(alpha)) {
       cross_sum <- dplyr::mutate(
         cross_sum,
-        pass_bayes_fdr =
-          is.finite(.data$bayes_FDR) &
-          .data$bayes_FDR <= alpha
+        pass_lfsr =
+          .data$interaction_reportable &
+          is.finite(.data$lfsr) &
+          .data$lfsr <= alpha,
+        # Temporary backward-compatible alias.
+        pass_bayes_fdr = .data$pass_lfsr
       )
     }
 
     cross_sum <- dplyr::arrange(
       cross_sum,
-      .data$bayes_FDR
+      dplyr::desc(.data$interaction_reportable),
+      .data$lfsr
     )
   }
 
@@ -475,7 +569,9 @@ summarize_bayes_pclv <- function(df,
         div = .data$div_ij,
         tdhit = .data$tdhit_ij,
         ebfmi_min = .data$ebfmi_min_ij,
-        diagnostic_class = .data$diagnostic_class_ij
+        diagnostic_class_fit = .data$diagnostic_class_ij,
+        chain_medians = .data$chain_aii_medians_ij,
+        chain_sign_probabilities = .data$chain_aii_sign_probabilities_ij
       ),
       dplyr::transmute(
         raw,
@@ -488,7 +584,9 @@ summarize_bayes_pclv <- function(df,
         div = .data$div_ji,
         tdhit = .data$tdhit_ji,
         ebfmi_min = .data$ebfmi_min_ji,
-        diagnostic_class = .data$diagnostic_class_ji
+        diagnostic_class_fit = .data$diagnostic_class_ji,
+        chain_medians = .data$chain_aii_medians_ji,
+        chain_sign_probabilities = .data$chain_aii_sign_probabilities_ji
       )
     )
 
@@ -530,8 +628,8 @@ summarize_bayes_pclv <- function(df,
 
     self_sum <- self_merged |>
       dplyr::mutate(
-        diagnostic_class = dplyr::coalesce(
-          as.character(.data$diagnostic_class),
+        diagnostic_class_fit = dplyr::coalesce(
+          as.character(.data$diagnostic_class_fit),
           "diagnostics_unavailable"
         ),
         sampler_diag_ok = .diag_ok_fun(
@@ -543,9 +641,38 @@ summarize_bayes_pclv <- function(df,
           .data$ebfmi_min,
           thr = thr
         ),
-        diag_ok =
+        self_direction_stable = vapply(
+          .data$chain_medians,
+          .chain_direction_stable_safe,
+          logical(1)
+        ),
+        # For historical objects without self-chain medians, only an explicitly
+        # converged fit provides a conservative fallback. Interaction-specific
+        # indeterminate classes are not reused to decide self direction.
+        self_direction_stable = dplyr::coalesce(
+          .data$self_direction_stable,
+          dplyr::case_when(
+            .data$diagnostic_class_fit == "converged" ~ TRUE,
+            TRUE ~ NA
+          )
+        ),
+        high_sign_confidence = vapply(
+          .data$chain_sign_probabilities,
+          function(p) {
+            .all_chain_sign_confident_safe(
+              dominant = p,
+              threshold = 0.95
+            )
+          },
+          logical(1)
+        ),
+        self_reportable =
           .data$sampler_diag_ok &
-          .data$diagnostic_class == "converged",
+          dplyr::coalesce(.data$self_direction_stable, FALSE),
+        # Keep the fit-level diagnostic class for backward compatibility.
+        # Self reportability is represented separately by self_reportable.
+        diagnostic_class = .data$diagnostic_class_fit,
+        diag_ok = .data$self_reportable,
         from = .data$taxon,
         to = .data$taxon,
         a_sign = dplyr::case_when(
@@ -554,9 +681,17 @@ summarize_bayes_pclv <- function(df,
           .data$a_self_mean < 0 ~ "-",
           TRUE ~ "0"
         ),
+        lfsr = .lfsr_safe(.data$p_sign2_self),
+        lfsr_tier = dplyr::case_when(
+          !is.finite(.data$lfsr) ~ NA_character_,
+          .data$lfsr <= 0.05 ~ "stringent",
+          .data$lfsr <= 0.20 ~ "balanced",
+          .data$lfsr <= 0.40 ~ "permissive",
+          TRUE ~ "unsupported"
+        ),
         bayes_FDR = ifelse(
-          .data$diag_ok,
-          .lfsr_safe(.data$p_sign2_self),
+          .data$self_reportable,
+          .data$lfsr,
           NA_real_
         )
       ) |>
@@ -571,6 +706,8 @@ summarize_bayes_pclv <- function(df,
         a_q2.5 = .data$a_self_q2.5,
         a_q97.5 = .data$a_self_q97.5,
         p_sign2 = .data$p_sign2_self,
+        lfsr = .data$lfsr,
+        lfsr_tier = .data$lfsr_tier,
         bayes_FDR = .data$bayes_FDR,
         rhat = .data$rhat,
         essb = .data$essb,
@@ -579,22 +716,29 @@ summarize_bayes_pclv <- function(df,
         tdhit = .data$tdhit,
         ebfmi_min = .data$ebfmi_min,
         diagnostic_class = .data$diagnostic_class,
+        diagnostic_class_fit = .data$diagnostic_class_fit,
         sampler_diag_ok = .data$sampler_diag_ok,
+        self_direction_stable = .data$self_direction_stable,
+        high_sign_confidence = .data$high_sign_confidence,
+        self_reportable = .data$self_reportable,
         diag_ok = .data$diag_ok
       )
 
     if (!is.null(alpha)) {
       self_sum <- dplyr::mutate(
         self_sum,
-        pass_bayes_fdr =
-          is.finite(.data$bayes_FDR) &
-          .data$bayes_FDR <= alpha
+        pass_lfsr =
+          .data$self_reportable &
+          is.finite(.data$lfsr) &
+          .data$lfsr <= alpha,
+        pass_bayes_fdr = .data$pass_lfsr
       )
     }
 
     self_sum <- dplyr::arrange(
       self_sum,
-      .data$bayes_FDR,
+      dplyr::desc(.data$self_reportable),
+      .data$lfsr,
       .data$taxon,
       .data$partner
     )

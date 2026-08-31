@@ -387,96 +387,345 @@
 .classify_chain_diagnostics <- function(draws, diag) {
   empty <- list(
     diagnostic_class = "sampler_diagnostics_failed",
-    interaction_identifiable = FALSE, residual_identifiable = FALSE,
-    chain_sign_agreement = NA, pooled_sign_probability = NA_real_,
-    chain_aij_means = numeric(), chain_aij_medians = numeric(),
-    chain_aij_positive_probabilities = numeric(), chain_aij_negative_probabilities = numeric(),
-    chain_aij_mean_range = NA_real_, chain_aij_median_range = NA_real_,
+    interaction_identifiable = FALSE,
+    residual_identifiable = FALSE,
+    chain_sign_agreement = NA,
+    pooled_sign_probability = NA_real_,
+
+    chain_aij_means = numeric(),
+    chain_aij_medians = numeric(),
+    chain_aij_positive_probabilities = numeric(),
+    chain_aij_negative_probabilities = numeric(),
+    chain_aij_mean_range = NA_real_,
+    chain_aij_median_range = NA_real_,
     chain_sign_probability_max_difference = NA_real_,
-    chain_aii_means = numeric(), chain_aii_medians = numeric(),
-    chain_aii_sign_probabilities = numeric(), chain_aii_sign_agreement = NA,
-    chain_residual_summary = data.frame(), residual_median_ranges = numeric(),
+
+    chain_aii_means = numeric(),
+    chain_aii_medians = numeric(),
+    chain_aii_sign_probabilities = numeric(),
+    chain_aii_sign_agreement = NA,
+
+    chain_residual_summary = data.frame(),
+    residual_median_ranges = numeric(),
     residual_regime_disagreement = NA,
+
     indeterminate_reason = "missing_or_invalid_posterior_draws"
   )
-  if (!is.data.frame(draws) || !all(c("a_ij", "a_ii", ".chain") %in% names(draws)) ||
-      any(!is.finite(draws$a_ij)) || any(!is.finite(draws$a_ii))) return(empty)
+
+  if (!is.data.frame(draws) ||
+      !all(c("a_ij", "a_ii", ".chain") %in% names(draws)) ||
+      any(!is.finite(draws$a_ij)) ||
+      any(!is.finite(draws$a_ii))) {
+    return(empty)
+  }
 
   aij <- .chain_parameter_summary(draws, "a_ij")
   aii <- .chain_parameter_summary(draws, "a_ii")
-  if (!nrow(aij) || !nrow(aii)) return(empty)
+
+  if (!nrow(aij) || !nrow(aii)) {
+    return(empty)
+  }
+
   n_chains <- nrow(aij)
-  dominant <- ifelse(aij$median > 0, 1L, ifelse(aij$median < 0, -1L, 0L))
-  certain <- pmax(aij$positive_probability, aij$negative_probability) >= .PCLV_CHAIN_SIGN_PROB_MIN
-  sign_agree <- if (n_chains > 1L) all(certain) && length(unique(dominant)) == 1L && dominant[[1L]] != 0L else NA
-  magnitude_agree <- if (n_chains > 1L) .chain_intervals_overlap(aij) else NA
+
+  # --------------------------------------------------------------------------
+  # Interaction direction stability
+  #
+  # This tests only whether chains agree on the direction of the interaction.
+  # Posterior sign certainty (e.g. >= 0.95) is NOT an identifiability gate.
+  # Sign strength is evaluated downstream using pooled LFSR.
+  # --------------------------------------------------------------------------
+  dominant <- ifelse(
+    aij$median > 0,
+    1L,
+    ifelse(aij$median < 0, -1L, 0L)
+  )
+
+  sign_agree <- if (n_chains > 1L) {
+    length(unique(dominant)) == 1L &&
+      dominant[[1L]] != 0L
+  } else {
+    NA
+  }
+
   pooled_pos <- mean(draws$a_ij > 0)
   pooled_neg <- mean(draws$a_ij < 0)
 
-  self_dominant <- ifelse(aii$median > 0, 1L, ifelse(aii$median < 0, -1L, 0L))
-  self_certain <- pmax(aii$positive_probability, aii$negative_probability) >= .PCLV_CHAIN_SIGN_PROB_MIN
-  self_agree <- if (n_chains > 1L) all(self_certain) && length(unique(self_dominant)) == 1L && self_dominant[[1L]] != 0L else NA
+  # --------------------------------------------------------------------------
+  # Self-effect direction stability
+  #
+  # As above, this is direction agreement only. Posterior certainty remains
+  # available through chain_aii_sign_probabilities.
+  # --------------------------------------------------------------------------
+  self_dominant <- ifelse(
+    aii$median > 0,
+    1L,
+    ifelse(aii$median < 0, -1L, 0L)
+  )
 
-  residual_parameters <- intersect(c("sigma", "sd_r0", "sd_ou", "phi", "lambda", "nu"), names(draws))
-  residual <- dplyr::bind_rows(lapply(residual_parameters, function(p) .chain_parameter_summary(draws, p)))
+  self_agree <- if (n_chains > 1L) {
+    length(unique(self_dominant)) == 1L &&
+      self_dominant[[1L]] != 0L
+  } else {
+    NA
+  }
+
+  # --------------------------------------------------------------------------
+  # Residual-regime stability
+  # --------------------------------------------------------------------------
+  residual_parameters <- intersect(
+    c("sigma", "sd_r0", "sd_ou", "phi", "lambda", "nu"),
+    names(draws)
+  )
+
+  residual <- dplyr::bind_rows(
+    lapply(
+      residual_parameters,
+      function(p) .chain_parameter_summary(draws, p)
+    )
+  )
+
   residual_ranges <- numeric()
   separated <- character()
+
   if (nrow(residual)) {
     by_parameter <- split(residual, residual$parameter)
-    residual_ranges <- vapply(by_parameter, function(x) diff(range(x$median)), numeric(1))
-    if (n_chains > 1L) separated <- names(Filter(function(x) !.chain_intervals_overlap(x), by_parameter))
-  }
-  residual_disagree <- if (n_chains > 1L) length(separated) > 0L else NA
 
-  diag_ok <- is.list(diag) && isTRUE(.ok_diag(
-    diag$worst_rhat, diag$min_ess_bulk, diag$min_ess_tail,
-    diag$n_divergent, diag$n_treedepth_hit, diag$n_draws
-  )) && is.finite(diag$ebfmi_min) && diag$ebfmi_min >= .PCLV_EBFMI_MIN
+    residual_ranges <- vapply(
+      by_parameter,
+      function(x) diff(range(x$median)),
+      numeric(1)
+    )
+
+    if (n_chains > 1L) {
+      separated <- names(
+        Filter(
+          function(x) !.chain_intervals_overlap(x),
+          by_parameter
+        )
+      )
+    }
+  }
+
+  residual_disagree <- if (n_chains > 1L) {
+    length(separated) > 0L
+  } else {
+    NA
+  }
+
+  # --------------------------------------------------------------------------
+  # Sampler diagnostics
+  # --------------------------------------------------------------------------
+  diag_ok <-
+    is.list(diag) &&
+    isTRUE(
+      .ok_diag(
+        diag$worst_rhat,
+        diag$min_ess_bulk,
+        diag$min_ess_tail,
+        diag$n_divergent,
+        diag$n_treedepth_hit,
+        diag$n_draws
+      )
+    ) &&
+    is.finite(diag$ebfmi_min) &&
+    diag$ebfmi_min >= .PCLV_EBFMI_MIN
+
   diagnostic_reasons <- character()
-  if (!is.list(diag) || !is.finite(diag$worst_rhat) || diag$worst_rhat >= 1.05) diagnostic_reasons <- c(diagnostic_reasons, "high_rhat")
-  if (!is.list(diag) || !is.finite(diag$min_ess_bulk) || !is.finite(diag$min_ess_tail) || diag$min_ess_bulk <= 400 || diag$min_ess_tail <= 400) diagnostic_reasons <- c(diagnostic_reasons, "low_ess")
-  if (!is.list(diag) || !is.finite(diag$ebfmi_min) || diag$ebfmi_min < .PCLV_EBFMI_MIN) diagnostic_reasons <- c(diagnostic_reasons, "low_ebfmi")
-  if (is.list(diag) && is.finite(diag$n_divergent) && diag$n_divergent > 0) diagnostic_reasons <- c(diagnostic_reasons, "divergences")
-  if (is.list(diag) && is.finite(diag$n_treedepth_hit) && diag$n_treedepth_hit > 0) diagnostic_reasons <- c(diagnostic_reasons, "treedepth_saturation")
 
-  interaction_reasons <- character()
-  if (n_chains > 1L && (length(unique(dominant)) != 1L || dominant[[1L]] == 0L)) {
-    interaction_reasons <- "chain_sign_disagreement"
-  } else if (n_chains > 1L && (!all(certain) || !isTRUE(magnitude_agree))) {
-    interaction_reasons <- "interaction_magnitude_disagreement"
+  if (!is.list(diag) ||
+      !is.finite(diag$worst_rhat) ||
+      diag$worst_rhat >= 1.05) {
+    diagnostic_reasons <- c(
+      diagnostic_reasons,
+      "high_rhat"
+    )
   }
+
+  if (!is.list(diag) ||
+      !is.finite(diag$min_ess_bulk) ||
+      !is.finite(diag$min_ess_tail) ||
+      diag$min_ess_bulk <= 400 ||
+      diag$min_ess_tail <= 400) {
+    diagnostic_reasons <- c(
+      diagnostic_reasons,
+      "low_ess"
+    )
+  }
+
+  if (!is.list(diag) ||
+      !is.finite(diag$ebfmi_min) ||
+      diag$ebfmi_min < .PCLV_EBFMI_MIN) {
+    diagnostic_reasons <- c(
+      diagnostic_reasons,
+      "low_ebfmi"
+    )
+  }
+
+  if (is.list(diag) &&
+      is.finite(diag$n_divergent) &&
+      diag$n_divergent > 0) {
+    diagnostic_reasons <- c(
+      diagnostic_reasons,
+      "divergences"
+    )
+  }
+
+  if (is.list(diag) &&
+      is.finite(diag$n_treedepth_hit) &&
+      diag$n_treedepth_hit > 0) {
+    diagnostic_reasons <- c(
+      diagnostic_reasons,
+      "treedepth_saturation"
+    )
+  }
+
+  # --------------------------------------------------------------------------
+  # Interaction identifiability
+  #
+  # Only actual between-chain direction disagreement makes the interaction
+  # indeterminate here.
+  #
+  # The previous 0.95 per-chain sign-probability gate and the custom
+  # interaction interval-overlap gate are intentionally NOT used as hard
+  # identifiability criteria. Sign strength is handled by LFSR downstream,
+  # while between-chain magnitude convergence is already represented by
+  # standard sampler diagnostics (especially R-hat / ESS).
+  # --------------------------------------------------------------------------
+  interaction_reasons <- character()
+
+  if (n_chains > 1L && !isTRUE(sign_agree)) {
+    interaction_reasons <- "chain_sign_disagreement"
+  }
+
+  # --------------------------------------------------------------------------
+  # Residual identifiability
+  # --------------------------------------------------------------------------
   residual_reasons <- character()
+
   if (length(separated)) {
     residual_reasons <- "chain_specific_residual_regime"
-    if (any(c("sigma", "sd_ou") %in% separated)) residual_reasons <- c(residual_reasons, "residual_scale_nonidentifiability")
-    if ("sd_r0" %in% separated) residual_reasons <- c(residual_reasons, "subject_intercept_scale_nonidentifiability")
-    if ("sd_ou" %in% separated && any(c("phi", "lambda") %in% separated)) residual_reasons <- c(residual_reasons, "ou_scale_decay_ridge")
+
+    if (any(c("sigma", "sd_ou") %in% separated)) {
+      residual_reasons <- c(
+        residual_reasons,
+        "residual_scale_nonidentifiability"
+      )
+    }
+
+    if ("sd_r0" %in% separated) {
+      residual_reasons <- c(
+        residual_reasons,
+        "subject_intercept_scale_nonidentifiability"
+      )
+    }
+
+    if ("sd_ou" %in% separated &&
+        any(c("phi", "lambda") %in% separated)) {
+      residual_reasons <- c(
+        residual_reasons,
+        "ou_scale_decay_ridge"
+      )
+    }
   }
 
+  # --------------------------------------------------------------------------
+  # Classification
+  # --------------------------------------------------------------------------
   if (n_chains == 1L) {
-    diagnostic_class <- if (diag_ok) "converged" else "sampler_diagnostics_failed"
+    diagnostic_class <- if (diag_ok) {
+      "converged"
+    } else {
+      "sampler_diagnostics_failed"
+    }
   } else if (length(interaction_reasons)) {
     diagnostic_class <- "interaction_indeterminate"
   } else if (!diag_ok || isTRUE(residual_disagree)) {
     diagnostic_class <- "interaction_stable_residual_unstable"
-  } else diagnostic_class <- "converged"
-  reasons <- unique(c(interaction_reasons, residual_reasons, diagnostic_reasons))
+  } else {
+    diagnostic_class <- "converged"
+  }
+
+  reasons <- unique(c(
+    interaction_reasons,
+    residual_reasons,
+    diagnostic_reasons
+  ))
 
   list(
     diagnostic_class = diagnostic_class,
-    interaction_identifiable = diagnostic_class %in% c("converged", "interaction_stable_residual_unstable"),
-    residual_identifiable = identical(diagnostic_class, "converged"),
-    chain_sign_agreement = sign_agree, pooled_sign_probability = max(pooled_pos, pooled_neg),
-    chain_aij_means = stats::setNames(aij$mean, aij$chain), chain_aij_medians = stats::setNames(aij$median, aij$chain),
-    chain_aij_positive_probabilities = stats::setNames(aij$positive_probability, aij$chain),
-    chain_aij_negative_probabilities = stats::setNames(aij$negative_probability, aij$chain),
-    chain_aij_mean_range = diff(range(aij$mean)), chain_aij_median_range = diff(range(aij$median)),
-    chain_sign_probability_max_difference = diff(range(aij$positive_probability)),
-    chain_aii_means = stats::setNames(aii$mean, aii$chain), chain_aii_medians = stats::setNames(aii$median, aii$chain),
-    chain_aii_sign_probabilities = stats::setNames(pmax(aii$positive_probability, aii$negative_probability), aii$chain),
-    chain_aii_sign_agreement = self_agree, chain_residual_summary = residual,
-    residual_median_ranges = residual_ranges, residual_regime_disagreement = residual_disagree,
-    indeterminate_reason = reasons
+
+    interaction_identifiable =
+      diagnostic_class %in% c(
+        "converged",
+        "interaction_stable_residual_unstable"
+      ),
+
+    residual_identifiable =
+      identical(diagnostic_class, "converged"),
+
+    # Direction agreement only; posterior certainty is separate.
+    chain_sign_agreement = sign_agree,
+
+    pooled_sign_probability =
+      max(pooled_pos, pooled_neg),
+
+    chain_aij_means =
+      stats::setNames(aij$mean, aij$chain),
+
+    chain_aij_medians =
+      stats::setNames(aij$median, aij$chain),
+
+    chain_aij_positive_probabilities =
+      stats::setNames(
+        aij$positive_probability,
+        aij$chain
+      ),
+
+    chain_aij_negative_probabilities =
+      stats::setNames(
+        aij$negative_probability,
+        aij$chain
+      ),
+
+    chain_aij_mean_range =
+      diff(range(aij$mean)),
+
+    chain_aij_median_range =
+      diff(range(aij$median)),
+
+    chain_sign_probability_max_difference =
+      diff(range(aij$positive_probability)),
+
+    chain_aii_means =
+      stats::setNames(aii$mean, aii$chain),
+
+    chain_aii_medians =
+      stats::setNames(aii$median, aii$chain),
+
+    chain_aii_sign_probabilities =
+      stats::setNames(
+        pmax(
+          aii$positive_probability,
+          aii$negative_probability
+        ),
+        aii$chain
+      ),
+
+    chain_aii_sign_agreement =
+      self_agree,
+
+    chain_residual_summary =
+      residual,
+
+    residual_median_ranges =
+      residual_ranges,
+
+    residual_regime_disagreement =
+      residual_disagree,
+
+    indeterminate_reason =
+      reasons
   )
 }
 
